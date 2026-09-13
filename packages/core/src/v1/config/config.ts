@@ -164,6 +164,9 @@ export const Info = Schema.Struct({
       reserved: Schema.optional(NonNegativeInt).annotate({
         description: "Token buffer for compaction. Leaves enough window to avoid overflow during compaction.",
       }),
+      threshold: Schema.optional(Schema.Finite).annotate({
+        description: "Context usage threshold for auto-compaction as a fraction between 0 and 1 (default: 0.89)",
+      }),
     }),
   ),
   experimental: Schema.optional(
@@ -184,6 +187,25 @@ export const Info = Schema.Struct({
       }),
       policies: Schema.optional(Schema.mutable(Schema.Array(ConfigExperimental.Policy))).annotate({
         description: "Policy statements applied to supported resources, such as provider access",
+      }),
+      max_subagent_depth: Schema.optional(PositiveInt).annotate({
+        description: "Maximum depth of nested subagent invocations (default: 1)",
+      }),
+      checkpoint: Schema.optional(
+        Schema.Struct({
+          enabled: Schema.optional(Schema.Boolean).annotate({
+            description: "Enable checkpoint saving for agent recovery",
+          }),
+          auto: Schema.optional(Schema.Boolean).annotate({
+            description: "Automatically create checkpoints at key points",
+          }),
+        }),
+      ),
+      max_steps: Schema.optional(Schema.Finite).annotate({
+        description: "Maximum number of steps per agent loop (default: Infinity).",
+      }),
+      length_continue: Schema.optional(Schema.Boolean).annotate({
+        description: "When the model hits its output token limit, automatically continue the response instead of truncating.",
       }),
     }),
   ),

@@ -1305,8 +1305,8 @@ class Interpreter<R> {
     const declarations = getArray(node, "declarations")
     const self = this
     return Effect.gen(function* () {
-      for (const declarationValue of declarations) {
-        const declaration = asNode(declarationValue, "declarations")
+      for (const [index, declarationValue] of declarations.entries()) {
+        const declaration = asNode(declarationValue, `declarations[${index}]`)
 
         if (declaration.type !== "VariableDeclarator") {
           throw new InterpreterRuntimeError("Unsupported variable declaration shape.", declaration)

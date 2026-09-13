@@ -13,6 +13,7 @@ import { NamedError } from "@opencode-ai/core/util/error"
 import { Agent as AgentSvc } from "../../src/agent/agent"
 import { BackgroundJob } from "@/background/job"
 import { Command } from "../../src/command"
+import { Checkpoint } from "../../src/checkpoint/checkpoint"
 import { Config } from "@/config/config"
 import { LSP } from "@/lsp/lsp"
 import { MCP } from "../../src/mcp"
@@ -170,6 +171,7 @@ const testLLMServerNode = LayerNode.make({ service: TestLLMServer, layer: TestLL
 
 const promptRoot = LayerNode.group([
   SessionPrompt.node,
+  Checkpoint.node,
   Session.node,
   SessionProjector.node,
   MessageV2.node,
@@ -670,6 +672,45 @@ it.instance("loop surfaces content-filter finishes as session errors", () =>
     }
     expect(result.parts).toEqual(
       expect.arrayContaining([expect.objectContaining({ type: "text", text: "partial response" })]),
+    )
+  }),
+)
+
+it.instance("loop continues on length finish when experimental.length_continue is enabled", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig((url) => ({
+      ...providerCfg(url),
+      experimental: { length_continue: true },
+    }))
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const chat = yield* sessions.create({ title: "Pinned" })
+
+    yield* prompt.prompt({
+      sessionID: chat.id,
+      agent: "build",
+      noReply: true,
+      parts: [{ type: "text", text: "hello" }],
+    })
+    yield* llm.push(reply().text("partial response").length())
+    yield* llm.push(reply().text("continued response").stop())
+
+    const result = yield* prompt.loop({ sessionID: chat.id })
+    const messages = yield* sessions.messages({ sessionID: chat.id })
+
+    expect(yield* llm.hits).toHaveLength(2)
+    expect(result.info.role).toBe("assistant")
+    if (result.info.role === "assistant") {
+      expect(result.info.finish).toBe("stop")
+    }
+    const synthetic = messages.find(
+      (m) =>
+        m.info.role === "user" &&
+        m.parts.some((p) => p.type === "text" && p.metadata?.length_continue === true),
+    )
+    expect(synthetic).toBeDefined()
+    expect(result.parts).toEqual(
+      expect.arrayContaining([expect.objectContaining({ type: "text", text: "continued response" })]),
     )
   }),
 )

@@ -25,6 +25,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import * as Stream from "effect/Stream"
 import { Command } from "../command"
+import { Checkpoint } from "@/checkpoint/checkpoint"
 import { pathToFileURL, fileURLToPath } from "url"
 import { Config } from "@/config/config"
 import { ConfigMarkdown } from "@/config/markdown"
@@ -59,6 +60,24 @@ import { LLMEvent } from "@opencode-ai/llm"
 
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
+
+function loopBreakMessage(
+  reason: SessionProcessor.Handle["loopReason"],
+  noEditStreak: number,
+): string {
+  switch (reason) {
+    case "churn":
+      return `You have edited the same file repeatedly without making net progress. Stop editing, read the current state of the file, identify what actually needs to change, then make one deliberate edit that moves the task forward. If the file is already correct, stop and report that.`
+    case "oscillation":
+      return `You are cycling between a small set of tools and files without ever landing on an answer. Stop calling tools. Write down what you know so far, identify the single open question, and either answer it with one targeted call or report your findings and stop.`
+    case "no_edit":
+      return `You have made ${noEditStreak} consecutive turns without editing any files. You appear to be reading and searching in a loop. Stop, then make an actual code change (edit/write/apply_patch) to progress the task. If the task is genuinely read-only, respond with your findings and stop.`
+    case "text":
+      return "You appear to be repeating the same output. Stop and try a completely different approach to solve the problem."
+    default:
+      return "You appear to be repeating the same tool call. Stop, then make an actual code change (edit/write/apply_patch) to progress the task. If the task is genuinely read-only, respond with your findings and stop."
+  }
+}
 
 const decodeMessageInfo = Schema.decodeUnknownExit(SessionV1.Info)
 const decodeMessagePart = Schema.decodeUnknownExit(SessionV1.Part)
@@ -140,6 +159,7 @@ const layer = Layer.effect(
     const events = yield* EventV2Bridge.Service
     const flags = yield* RuntimeFlags.Service
     const database = yield* Database.Service
+    const checkpoint = yield* Checkpoint.Service
     const { db } = database
     const ops = Effect.fn("SessionPrompt.ops")(function* () {
       return {
@@ -1054,6 +1074,28 @@ const layer = Layer.effect(
     )(function* (input: PromptInput) {
       const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
       yield* revert.cleanup(session)
+      // If a checkpoint exists for this session (e.g. from a prior interrupted run),
+      // surface its context as a synthetic part on the resumed user message so the
+      // agent picks up where it left off instead of starting over.
+      const resume = yield* checkpoint.resume(input.sessionID).pipe(Effect.orDie)
+      if (resume) {
+        const lines = [
+          `Resuming from checkpoint ${resume.id} created ${new Date(resume.timestamp).toISOString()}.`,
+        ]
+        if (resume.task) lines.push(`Task: ${resume.task}`)
+        if (resume.accomplishments.length)
+          lines.push("Accomplished: " + resume.accomplishments.join("; "))
+        if (resume.nextSteps.length)
+          lines.push("Next steps: " + resume.nextSteps.join("; "))
+        yield* sessions.updatePart({
+          id: PartID.ascending(),
+          messageID: input.messageID!,
+          sessionID: input.sessionID,
+          type: "text",
+          synthetic: true,
+          text: lines.join("\n"),
+        })
+      }
       const message = yield* createUserMessage(input)
       yield* sessions.touch(input.sessionID)
 
@@ -1084,6 +1126,7 @@ const layer = Layer.effect(
         let structured: unknown
         let step = 0
         const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
+        const cfg = yield* config.get()
 
         while (true) {
           yield* status.set(sessionID, { type: "busy" })
@@ -1110,9 +1153,9 @@ const layer = Layer.effect(
 
           if (
             lastAssistant?.finish &&
-            !["tool-calls", "unknown"].includes(lastAssistant.finish) &&
+            !["tool-calls"].includes(lastAssistant.finish) &&
             !hasToolCalls &&
-            lastAssistant.parentID === lastUser.id
+            lastUser.id < lastAssistant.id
           ) {
             const orphan = lastAssistantMsg?.parts.find(
               (part): part is SessionV1.ToolPart => part.type === "tool" && isOrphanedInterruptedTool(part),
@@ -1175,7 +1218,7 @@ const layer = Layer.effect(
             yield* events.publish(Session.Event.Error, { sessionID, error: error.toObject() })
             throw error
           }
-          const maxSteps = agent.steps ?? Infinity
+          const maxSteps = agent.steps ?? cfg.experimental?.max_steps ?? Infinity
           const isLastStep = step >= maxSteps
           msgs = yield* SessionReminders.apply({ messages: msgs, agent, session }).pipe(
             Effect.provideService(RuntimeFlags.Service, flags),
@@ -1218,7 +1261,7 @@ const layer = Layer.effect(
             })
             .pipe(Effect.onInterrupt(() => finalizeInterruptedAssistant))
 
-          const outcome: "break" | "continue" = yield* Effect.gen(function* () {
+          const outcome: "break" | "continue" | "intervene" = yield* Effect.gen(function* () {
             const lastUserMsg = msgs.findLast((m) => m.info.role === "user")
             const bypassAgentCheck = lastUserMsg?.parts.some((p) => p.type === "agent") ?? false
             const promptOps = yield* ops()
@@ -1254,13 +1297,13 @@ const layer = Layer.effect(
 
             yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
 
-            const [skills, env, instructions, mcpInstructions, modelMsgs] = yield* Effect.all([
+            const [skills, env, mcpInstructions, modelMsgs] = yield* Effect.all([
               sys.skills(agent),
               sys.environment(model),
-              instruction.system().pipe(Effect.orDie),
               sys.mcp(agent, session.permission),
               MessageV2.toModelMessagesEffect(msgs, model),
             ])
+            const instructions = session.parentID ? [] : (yield* instruction.system().pipe(Effect.orDie))
             const system = [
               ...env,
               ...instructions,
@@ -1314,10 +1357,58 @@ const layer = Layer.effect(
                 yield* sessions.updateMessage(handle.message)
                 return "break" as const
               }
+              if (handle.message.finish === "length") {
+                const cfg = yield* config.get()
+                if (cfg.experimental?.length_continue !== true) {
+                  // length_continue disabled: fall through to compaction / existing behavior
+                } else {
+                  // Cap attempts to prevent infinite truncation loops.
+                  const priorContinues = msgs.filter(
+                    (m) =>
+                      m.info.role === "user" &&
+                      m.parts.some((p) => p.type === "text" && p.metadata?.length_continue === true),
+                  ).length
+                  if (priorContinues >= 3) {
+                    handle.message.error = new SessionV1.OutputLengthError({
+                      message: "Model output was truncated after 3 continue attempts",
+                    }).toObject()
+                    yield* sessions.updateMessage(handle.message)
+                    yield* events.publish(Session.Event.Error, { sessionID, error: handle.message.error })
+                    return "break" as const
+                  }
+                  const continueMsg = yield* sessions.updateMessage({
+                    id: MessageID.ascending(),
+                    role: "user",
+                    sessionID,
+                    time: { created: Date.now() },
+                    agent: lastUser.agent,
+                    model: lastUser.model,
+                  })
+                  yield* sessions.updatePart({
+                    id: PartID.ascending(),
+                    messageID: continueMsg.id,
+                    sessionID,
+                    type: "text",
+                    metadata: { length_continue: true },
+                    synthetic: true,
+                    text: "Your previous response was truncated due to reaching the output token limit. Continue from where you left off.",
+                    time: { start: Date.now(), end: Date.now() },
+                  })
+                  return "continue" as const
+                }
+              }
             }
 
-            if (result === "stop") return "break" as const
-            if (result === "compact") {
+            if (result.result === "stop") {
+              if (handle.loopDetected) {
+                return "intervene" as const
+              }
+              return "break" as const
+            }
+            if (handle.loopDetected) {
+              return "intervene" as const
+            }
+            if (result.result === "compact") {
               yield* compaction.create({
                 sessionID,
                 agent: lastUser.agent,
@@ -1332,6 +1423,37 @@ const layer = Layer.effect(
             Effect.onInterrupt(() => finalizeInterruptedAssistant),
           )
           if (outcome === "break") break
+          if (outcome === "intervene") {
+            yield* Effect.logError("loop_intervention", {
+              "session.id": sessionID,
+              messageID: handle.message.id,
+              reason: handle.loopReason,
+              noEditStreak: handle.noEditStreak,
+            })
+            const breakMsg: SessionV1.User = {
+              id: MessageID.ascending(),
+              role: "user",
+              sessionID,
+              time: { created: Date.now() },
+              agent: lastUser.agent,
+              model: lastUser.model,
+              format: { type: "text" },
+            }
+            yield* sessions.updateMessage(breakMsg)
+            const breakPart: SessionV1.Part = {
+              type: "text",
+              id: PartID.ascending(),
+              messageID: breakMsg.id,
+              sessionID,
+              text: loopBreakMessage(handle.loopReason, handle.noEditStreak),
+            }
+            yield* sessions.updatePart(breakPart)
+            msgs = [
+              ...msgs,
+              { info: breakMsg, parts: [breakPart] },
+            ]
+            continue
+          }
           continue
         }
 
@@ -1599,6 +1721,7 @@ export const node = LayerNode.make({
   service: Service,
   layer: layer,
   deps: [
+    Checkpoint.node,
     SessionStatus.node,
     Session.node,
     Agent.node,

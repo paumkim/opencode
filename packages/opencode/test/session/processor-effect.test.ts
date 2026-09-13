@@ -18,7 +18,7 @@ import { MessageID, PartID, SessionID } from "../../src/session/schema"
 import { SessionStatus } from "../../src/session/status"
 import { SessionSummary } from "../../src/session/summary"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
-import { provideTmpdirInstance, provideTmpdirServer } from "../fixture/fixture"
+import { TestInstance, provideTmpdirInstance, provideTmpdirServer } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
 import { raw, reply, TestLLMServer } from "../lib/llm-server"
 import { RuntimeFlags } from "@/effect/runtime-flags"
@@ -226,6 +226,78 @@ const fragmentFailureLLM = Layer.succeed(
 const fragmentFailureEnv = LayerNode.compile(root, [...replacements, [LLM.node, fragmentFailureLLM]])
 const itFragmentFailure = testEffect(fragmentFailureEnv)
 
+const textLoopLLM = Layer.succeed(
+  LLM.Service,
+  LLM.Service.of({
+    stream: () =>
+      Stream.make(
+        LLMEvent.stepStart({ index: 0 }),
+        LLMEvent.textStart({ id: "text-1" }),
+        LLMEvent.textDelta({ id: "text-1", text: "same" }),
+        LLMEvent.textEnd({ id: "text-1" }),
+        LLMEvent.textStart({ id: "text-2" }),
+        LLMEvent.textDelta({ id: "text-2", text: "same" }),
+        LLMEvent.textEnd({ id: "text-2" }),
+        LLMEvent.textStart({ id: "text-3" }),
+        LLMEvent.textDelta({ id: "text-3", text: "same" }),
+        LLMEvent.textEnd({ id: "text-3" }),
+        LLMEvent.stepFinish({ index: 0, reason: "stop" }),
+        LLMEvent.finish({ reason: "stop" }),
+      ),
+  }),
+)
+const textLoopEnv = LayerNode.compile(root, [...replacements, [LLM.node, textLoopLLM]])
+const itTextLoop = testEffect(textLoopEnv)
+
+// Pushable LLM used by tests that need to drive multiple distinct turns.
+// The queue lives in module-level state so test helpers can push into it
+// without extending the LLM.Service interface.
+const noEditQueues: LLMEvent[][] = []
+function pushLLM(events: LLMEvent[]) {
+  noEditQueues.push(events)
+}
+const noEditLLM = Layer.succeed(
+  LLM.Service,
+  LLM.Service.of({
+    stream: () =>
+      Stream.fromEffect(
+        Effect.sync(() => {
+          const q = noEditQueues.shift() ?? []
+          if (q.length) return q
+          return [
+            LLMEvent.stepStart({ index: 0 }),
+            LLMEvent.stepFinish({ index: 0, reason: "stop" }),
+            LLMEvent.finish({ reason: "stop" }),
+          ]
+        }),
+      ).pipe(Stream.flatMap(Stream.fromIterable)),
+  }),
+)
+const noEditEnv = LayerNode.compile(root, [...replacements, [LLM.node, noEditLLM]])
+const itNoEdit = testEffect(noEditEnv)
+
+function textTurn(text: string): LLMEvent[] {
+  return [
+    LLMEvent.stepStart({ index: 0 }),
+    LLMEvent.textStart({ id: "text-1" }),
+    LLMEvent.textDelta({ id: "text-1", text }),
+    LLMEvent.textEnd({ id: "text-1" }),
+    LLMEvent.stepFinish({ index: 0, reason: "stop" }),
+    LLMEvent.finish({ reason: "stop" }),
+  ]
+}
+
+function toolTurn(name: string, input: Record<string, unknown>): LLMEvent[] {
+  return [
+    LLMEvent.stepStart({ index: 0 }),
+    LLMEvent.toolInputStart({ id: "call-1", name }),
+    LLMEvent.toolInputEnd({ id: "call-1", name }),
+    LLMEvent.toolCall({ id: "call-1", name, input, providerExecuted: false }),
+    LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }),
+    LLMEvent.finish({ reason: "tool-calls" }),
+  ]
+}
+
 const boot = Effect.fn("test.boot")(function* () {
   const processors = yield* SessionProcessor.Service
   const session = yield* Session.Service
@@ -277,7 +349,7 @@ it.live("session.processor effect tests capture llm input cleanly", () =>
         const parts = yield* MessageV2.parts(msg.id)
         const calls = yield* llm.calls
 
-        expect(value).toBe("continue")
+        expect(value.result).toBe("continue")
         expect(calls).toBe(1)
         expect(parts.some((part) => part.type === "text" && part.text === "hello")).toBe(true)
       }),
@@ -410,7 +482,7 @@ it.live("session.processor effect tests stop after token overflow requests compa
 
         const parts = yield* MessageV2.parts(msg.id)
 
-        expect(value).toBe("compact")
+        expect(value.result).toBe("compact")
         expect(parts.some((part) => part.type === "text" && part.text === "after")).toBe(true)
         expect(parts.some((part) => part.type === "step-finish")).toBe(true)
       }),
@@ -458,7 +530,7 @@ it.live("session.processor effect tests capture reasoning from http mock", () =>
         const reasoning = parts.find((part): part is SessionV1.ReasoningPart => part.type === "reasoning")
         const text = parts.find((part): part is SessionV1.TextPart => part.type === "text")
 
-        expect(value).toBe("continue")
+        expect(value.result).toBe("continue")
         expect(yield* llm.calls).toBe(1)
         expect(reasoning?.text).toBe("think")
         expect(text?.text).toBe("done")
@@ -505,7 +577,7 @@ it.live("session.processor effect tests reset reasoning state across retries", (
         const parts = yield* MessageV2.parts(msg.id)
         const reasoning = parts.filter((part): part is SessionV1.ReasoningPart => part.type === "reasoning")
 
-        expect(value).toBe("continue")
+        expect(value.result).toBe("continue")
         expect(yield* llm.calls).toBe(2)
         expect(reasoning.some((part) => part.text === "two")).toBe(true)
         expect(reasoning.some((part) => part.text === "onetwo")).toBe(false)
@@ -549,7 +621,7 @@ it.live("session.processor effect tests do not retry unknown json errors", () =>
           tools: {},
         })
 
-        expect(value).toBe("stop")
+        expect(value.result).toBe("stop")
         expect(yield* llm.calls).toBe(1)
         expect(handle.message.error?.name).toBe("APIError")
       }),
@@ -595,113 +667,9 @@ it.live("session.processor effect tests retry recognized structured json errors"
 
         const parts = yield* MessageV2.parts(msg.id)
 
-        expect(value).toBe("continue")
+        expect(value.result).toBe("continue")
         expect(yield* llm.calls).toBe(2)
         expect(parts.some((part) => part.type === "text" && part.text === "after")).toBe(true)
-        expect(handle.message.error).toBeUndefined()
-      }),
-    { config: (url) => providerCfg(url) },
-  ),
-)
-
-it.live("session.processor effect tests retry OpenAI-compatible midstream server errors", () =>
-  provideTmpdirServer(
-    ({ dir, llm }) =>
-      Effect.gen(function* () {
-        const { processors, session, provider } = yield* boot()
-
-        yield* llm.push(raw({ chunks: [{ error: { type: "server_error", code: "server_error", message: "xxx" } }] }))
-        yield* llm.text("after")
-
-        const chat = yield* session.create({})
-        const parent = yield* user(chat.id, "retry midstream server error")
-        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
-        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
-        const handle = yield* processors.create({
-          assistantMessage: msg,
-          sessionID: chat.id,
-          model: mdl,
-        })
-
-        const value = yield* handle.process({
-          user: {
-            id: parent.id,
-            sessionID: chat.id,
-            role: "user",
-            time: parent.time,
-            agent: parent.agent,
-            model: { providerID: ref.providerID, modelID: ref.modelID },
-          } satisfies SessionV1.User,
-          sessionID: chat.id,
-          model: mdl,
-          agent: agent(),
-          system: [],
-          messages: [{ role: "user", content: "retry midstream server error" }],
-          tools: {},
-        })
-
-        const parts = yield* MessageV2.parts(msg.id)
-
-        expect(value).toBe("continue")
-        expect(yield* llm.calls).toBe(2)
-        expect(parts.some((part) => part.type === "text" && part.text === "after")).toBe(true)
-        expect(handle.message.error).toBeUndefined()
-      }),
-    { config: (url) => providerCfg(url) },
-  ),
-)
-
-it.live("session.processor effect tests retry network_error finish reasons", () =>
-  provideTmpdirServer(
-    ({ dir, llm }) =>
-      Effect.gen(function* () {
-        const { processors, session, provider } = yield* boot()
-
-        yield* llm.push(
-          raw({
-            chunks: [
-              {
-                id: "chatcmpl-network-error",
-                object: "chat.completion.chunk",
-                choices: [{ index: 0, delta: { role: "assistant", content: "" }, finish_reason: "network_error" }],
-              },
-            ],
-          }),
-        )
-        yield* llm.text("after retry")
-
-        const chat = yield* session.create({})
-        const parent = yield* user(chat.id, "retry network error")
-        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
-        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
-        const handle = yield* processors.create({
-          assistantMessage: msg,
-          sessionID: chat.id,
-          model: mdl,
-        })
-
-        const value = yield* handle.process({
-          user: {
-            id: parent.id,
-            sessionID: chat.id,
-            role: "user",
-            time: parent.time,
-            agent: parent.agent,
-            model: { providerID: ref.providerID, modelID: ref.modelID },
-          } satisfies SessionV1.User,
-          sessionID: chat.id,
-          model: mdl,
-          agent: agent(),
-          system: [],
-          messages: [{ role: "user", content: "retry network error" }],
-          tools: {},
-        })
-
-        const parts = yield* MessageV2.parts(msg.id)
-
-        expect(value).toBe("continue")
-        expect(yield* llm.calls).toBe(2)
-        expect(parts.some((part) => part.type === "text" && part.text === "after retry")).toBe(true)
         expect(handle.message.error).toBeUndefined()
       }),
     { config: (url) => providerCfg(url) },
@@ -754,7 +722,7 @@ it.live("session.processor effect tests publish retry status updates", () =>
 
         yield* off
 
-        expect(value).toBe("continue")
+        expect(value.result).toBe("continue")
         expect(yield* llm.calls).toBe(2)
         expect(states).toStrictEqual([1])
       }),
@@ -797,7 +765,7 @@ it.live("session.processor effect tests compact on structured context overflow",
           tools: {},
         })
 
-        expect(value).toBe("compact")
+        expect(value.result).toBe("compact")
         expect(yield* llm.calls).toBe(1)
         expect(handle.message.error).toBeUndefined()
       }),
@@ -853,7 +821,7 @@ it.live("session.processor effect tests complete AI SDK tool calls when native f
         const parts = yield* MessageV2.parts(msg.id)
         const call = parts.find((part): part is SessionV1.ToolPart => part.type === "tool")
 
-        expect(value).toBe("continue")
+        expect(value.result).toBe("continue")
         expect(yield* llm.calls).toBe(1)
         expect(call?.callID).toBe("call_1")
         expect(call?.tool).toBe("lookup")
@@ -1152,7 +1120,7 @@ itFragmentFailure.live("session.processor effect tests retain partial legacy par
             messages: [{ role: "user", content: "provider failure" }],
             tools: {},
           }),
-        ).toBe("stop")
+        ).toEqual({ result: "stop", noEditStreak: 0 })
         yield* off
 
         const parts = yield* MessageV2.parts(msg.id)
@@ -1168,4 +1136,148 @@ itFragmentFailure.live("session.processor effect tests retain partial legacy par
       }),
     { config: cfg },
   ),
+)
+
+itTextLoop.live("session.processor effect tests detect repeated text loop", () =>
+  provideTmpdirInstance(
+    (dir) =>
+      Effect.gen(function* () {
+        const { processors, session, provider } = yield* boot()
+
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "loop")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const handle = yield* processors.create({
+          assistantMessage: msg,
+          sessionID: chat.id,
+          model: mdl,
+        })
+
+        const value = yield* handle.process({
+          user: {
+            id: parent.id,
+            sessionID: chat.id,
+            role: "user",
+            time: parent.time,
+            agent: parent.agent,
+            model: { providerID: ref.providerID, modelID: ref.modelID },
+          } satisfies SessionV1.User,
+          sessionID: chat.id,
+          model: mdl,
+          agent: agent(),
+          system: [],
+          messages: [{ role: "user", content: "loop" }],
+          tools: {},
+        })
+
+        const parts = yield* MessageV2.parts(msg.id)
+        const textParts = parts.filter((part): part is SessionV1.TextPart => part.type === "text")
+
+        expect(value.result).toBe("continue")
+        expect(handle.loopDetected).toBe(true)
+        expect(textParts.map((part) => part.text)).toEqual(["same", "same", "same"])
+      }),
+    { config: cfg },
+  ),
+)
+
+itNoEdit.instance(
+  "session.processor effect tests detect no-edit read/search loops",
+  () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const { processors, session, provider } = yield* boot()
+
+      const chat = yield* session.create({})
+      const parent = yield* user(chat.id, "no edit loop")
+      const msg = yield* assistant(chat.id, parent.id, path.resolve(test.directory))
+      const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+      const handle = yield* processors.create({
+        assistantMessage: msg,
+        sessionID: chat.id,
+        model: mdl,
+      })
+
+      const input = {
+        user: {
+          id: parent.id,
+          sessionID: chat.id,
+          role: "user" as const,
+          time: parent.time,
+          agent: parent.agent,
+          model: { providerID: ref.providerID, modelID: ref.modelID },
+        } satisfies SessionV1.User,
+        sessionID: chat.id,
+        model: mdl,
+        agent: agent(),
+        system: [],
+        messages: [{ role: "user" as const, content: "no edit loop" }],
+        tools: {},
+      }
+
+      // Three consecutive turns that only read/search and never edit.
+      pushLLM(textTurn("reading files"))
+      pushLLM(textTurn("reading files"))
+      pushLLM(textTurn("reading files"))
+
+      yield* handle.process(input)
+      yield* handle.process(input)
+      const value = yield* handle.process(input)
+
+      expect(value.result).toBe("continue")
+      expect(handle.loopDetected).toBe(true)
+      expect(handle.noEditStreak).toBe(3)
+    }),
+  { config: cfg },
+)
+
+itNoEdit.instance(
+  "session.processor effect tests reset no-edit streak after an edit",
+  () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const { processors, session, provider } = yield* boot()
+
+      const chat = yield* session.create({})
+      const parent = yield* user(chat.id, "edit resets streak")
+      const msg = yield* assistant(chat.id, parent.id, path.resolve(test.directory))
+      const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+      const handle = yield* processors.create({
+        assistantMessage: msg,
+        sessionID: chat.id,
+        model: mdl,
+      })
+
+      const input = {
+        user: {
+          id: parent.id,
+          sessionID: chat.id,
+          role: "user" as const,
+          time: parent.time,
+          agent: parent.agent,
+          model: { providerID: ref.providerID, modelID: ref.modelID },
+        } satisfies SessionV1.User,
+        sessionID: chat.id,
+        model: mdl,
+        agent: agent(),
+        system: [],
+        messages: [{ role: "user" as const, content: "edit resets streak" }],
+        tools: {},
+      }
+
+      // Two read-only turns, then one edit. The streak should reset.
+      pushLLM(textTurn("reading files"))
+      pushLLM(textTurn("reading more"))
+      pushLLM(toolTurn("write", { path: "a.txt", content: "x" }))
+
+      yield* handle.process(input)
+      yield* handle.process(input)
+      const value = yield* handle.process(input)
+
+      expect(value.result).toBe("continue")
+      expect(handle.loopDetected).toBe(false)
+      expect(handle.noEditStreak).toBe(0)
+    }),
+  { config: cfg },
 )

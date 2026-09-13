@@ -18,6 +18,7 @@ import type { SessionID } from "./schema"
 import { SessionRetry } from "./retry"
 import { SessionStatus } from "./status"
 import { SessionSummary } from "./summary"
+import { Checkpoint } from "@/checkpoint/checkpoint"
 import type { Provider } from "@/provider/provider"
 import { Question } from "@/question"
 import { errorMessage } from "@/util/error"
@@ -27,7 +28,39 @@ import { Database } from "@opencode-ai/core/database/database"
 import { Usage, type LLMEvent } from "@opencode-ai/llm"
 
 const DOOM_LOOP_THRESHOLD = 3
+const TEXT_LOOP_THRESHOLD = 3
+const NO_EDIT_STREAK_THRESHOLD = 3
+const CHURN_STREAK_THRESHOLD = 3
+const OSCILLATION_WINDOW = 8
+const OSCILLATION_UNIQUE_RATIO = 0.35
+const EDIT_TOOLS = new Set(["edit", "write", "apply_patch"])
+
+// Build a stable fingerprint for a tool call so we can detect cycles that
+// aren't strictly consecutive (e.g. read A → read B → read A → read B).
+function toolFingerprint(toolName: string, input: unknown): string {
+  const record = isRecord(input) ? input : { value: input }
+  const filePath =
+    typeof record.file_path === "string"
+      ? record.file_path
+      : typeof record.path === "string"
+        ? record.path
+        : typeof record.filePath === "string"
+          ? record.filePath
+          : ""
+  const command =
+    typeof record.command === "string"
+      ? record.command
+      : typeof record.cmd === "string"
+        ? record.cmd
+        : ""
+  return `${toolName}:${filePath || command}`
+}
 export type Result = "compact" | "stop" | "continue"
+
+export interface ProcessResult {
+  result: Result
+  noEditStreak: number
+}
 
 export interface Handle {
   readonly message: SessionV1.Assistant
@@ -44,7 +77,10 @@ export interface Handle {
       attachments?: SessionV1.FilePart[]
     },
   ) => Effect.Effect<void>
-  readonly process: (streamInput: LLM.StreamInput) => Effect.Effect<Result>
+  readonly process: (streamInput: LLM.StreamInput) => Effect.Effect<ProcessResult>
+  readonly loopDetected: boolean
+  readonly noEditStreak: number
+  readonly loopReason: "doom" | "text" | "no_edit" | "churn" | "oscillation" | "none"
 }
 
 type Input = {
@@ -72,6 +108,13 @@ interface ProcessorContext extends Input {
   needsCompaction: boolean
   currentText: SessionV1.TextPart | undefined
   reasoningMap: Record<string, SessionV1.ReasoningPart>
+  textHistory: string[]
+  loopDetected: boolean
+  hasEditInStep: boolean
+  noEditStreak: number
+  churnStreak: number
+  churnTarget: string
+  recentTools: string[]
 }
 
 type StreamEvent = LLMEvent
@@ -93,6 +136,7 @@ const layer = Layer.effect(
     const status = yield* SessionStatus.Service
     const image = yield* Image.Service
     const events = yield* EventV2Bridge.Service
+    const checkpoint = yield* Checkpoint.Service
     const database = yield* Database.Service
 
     const create = Effect.fn("SessionProcessor.create")(function* (input: Input) {
@@ -111,6 +155,13 @@ const layer = Layer.effect(
         needsCompaction: false,
         currentText: undefined,
         reasoningMap: {},
+        textHistory: [],
+        loopDetected: false,
+        hasEditInStep: false,
+        noEditStreak: 0,
+        churnStreak: 0,
+        churnTarget: "",
+        recentTools: [],
       }
       let aborted = false
 
@@ -350,6 +401,49 @@ const layer = Layer.effect(
                 : value.providerMetadata,
             }))
 
+            // Track whether this step produced a file edit. Models that
+            // only read/search/delete without ever editing will churn
+            // indefinitely on newer, less-instructed model generations.
+            if (EDIT_TOOLS.has(value.name)) ctx.hasEditInStep = true
+
+            // Churn: editing the same file over and over without net progress.
+            // A write that merely reverts the previous edit shouldn't reset
+            // the streak — it's still spinning, just in a different direction.
+            if (EDIT_TOOLS.has(value.name)) {
+              const fp = toolFingerprint(value.name, input)
+              ctx.churnStreak = fp === ctx.churnTarget ? ctx.churnStreak + 1 : 1
+              ctx.churnTarget = fp
+              if (ctx.churnStreak >= CHURN_STREAK_THRESHOLD) {
+                ctx.loopDetected = true
+                yield* Effect.logError("churn_loop", {
+                  "session.id": ctx.sessionID,
+                  messageID: ctx.assistantMessage.id,
+                  file: fp,
+                  streak: ctx.churnStreak,
+                })
+              }
+            }
+
+            // Oscillation: cycling between a small set of tools/files without
+            // ever landing. Unlike doom_loop this catches non-consecutive
+            // repeats (read A → read B → read A → read B).
+            ctx.recentTools = [...ctx.recentTools, toolFingerprint(value.name, input)].slice(
+              -OSCILLATION_WINDOW,
+            )
+            if (ctx.recentTools.length >= OSCILLATION_WINDOW) {
+              const unique = new Set(ctx.recentTools).size
+              if (unique / ctx.recentTools.length <= OSCILLATION_UNIQUE_RATIO) {
+                ctx.loopDetected = true
+                yield* Effect.logError("oscillation_loop", {
+                  "session.id": ctx.sessionID,
+                  messageID: ctx.assistantMessage.id,
+                  unique,
+                  total: ctx.recentTools.length,
+                  tools: [...new Set(ctx.recentTools)].join(","),
+                })
+              }
+            }
+
             const parts = yield* MessageV2.parts(ctx.assistantMessage.id).pipe(
               Effect.provideService(Database.Service, database),
             )
@@ -435,20 +529,6 @@ const layer = Layer.effect(
           case "step-finish": {
             const completedSnapshot = yield* snapshot.track()
             yield* Effect.forEach(Object.keys(ctx.reasoningMap), finishReasoning)
-            // Anthropic reports thinking blocks it removed before the model saw the
-            // prompt. Prefix mismatches mean opencode changed history behind a signed
-            // block; log them so the churn can be tracked down.
-            const dropped = isRecord(value.providerMetadata?.anthropic)
-              ? value.providerMetadata.anthropic.inputTransformations
-              : undefined
-            if (Array.isArray(dropped) && dropped.length > 0) {
-              yield* Effect.logWarning("thinking blocks dropped by provider", {
-                sessionID: ctx.sessionID,
-                messageID: ctx.assistantMessage.id,
-                model: ctx.model.id,
-                transformations: JSON.stringify(dropped),
-              })
-            }
             const usage = Session.getUsage({
               model: ctx.model,
               usage: value.usage ?? new Usage({}),
@@ -471,6 +551,7 @@ const layer = Layer.effect(
             if (ctx.snapshot) {
               const patch = yield* snapshot.patch(ctx.snapshot)
               if (patch.files.length) {
+                ctx.hasEditInStep = true
                 yield* session.updatePart({
                   id: PartID.ascending(),
                   messageID: ctx.assistantMessage.id,
@@ -493,6 +574,24 @@ const layer = Layer.effect(
               isOverflow({ cfg: yield* config.get(), tokens: usage.tokens, model: ctx.model })
             ) {
               ctx.needsCompaction = true
+            }
+            if (ctx.hasEditInStep) {
+              yield* checkpoint
+                .create({
+                  sessionID: ctx.sessionID,
+                  task: ctx.assistantMessage.parentID ?? ctx.sessionID,
+                  accomplishments: ctx.currentText?.text
+                    ? [ctx.currentText.text.slice(0, 200)]
+                    : [],
+                  nextSteps: [],
+                  context: {
+                    hasEditInStep: ctx.hasEditInStep,
+                    noEditStreak: ctx.noEditStreak,
+                    model: ctx.model.id,
+                    agent: ctx.assistantMessage.agent,
+                  },
+                })
+                .pipe(Effect.ignore, Effect.forkIn(scope))
             }
             return
           }
@@ -541,6 +640,21 @@ const layer = Layer.effect(
               ctx.currentText.time = { start: ctx.currentText.time?.start ?? end, end }
             }
             if (value.providerMetadata) ctx.currentText.metadata = value.providerMetadata
+            if (ctx.currentText.text.trim()) {
+              ctx.textHistory.push(ctx.currentText.text)
+              const recentTexts = ctx.textHistory.slice(-TEXT_LOOP_THRESHOLD)
+              if (
+                recentTexts.length === TEXT_LOOP_THRESHOLD &&
+                recentTexts.every((text) => text === recentTexts[0])
+              ) {
+                ctx.loopDetected = true
+                yield* Effect.logError("text_loop", {
+                  "session.id": ctx.sessionID,
+                  messageID: ctx.assistantMessage.id,
+                  text: recentTexts[0],
+                })
+              }
+            }
             yield* session.updatePart(ctx.currentText)
             ctx.currentText = undefined
             return
@@ -650,6 +764,8 @@ const layer = Layer.effect(
           yield* Effect.gen(function* () {
             ctx.currentText = undefined
             ctx.reasoningMap = {}
+            // textHistory is intentionally NOT reset here: it accumulates across turns so a model repeating identical output 3x triggers text_loop.
+            ctx.loopDetected = false
             yield* status.set(ctx.sessionID, { type: "busy" })
             const stream = llm.stream(streamInput)
 
@@ -690,15 +806,45 @@ const layer = Layer.effect(
             Effect.ensuring(cleanup()),
           )
 
-          if (ctx.needsCompaction) return "compact"
-          if (ctx.blocked || ctx.assistantMessage.error) return "stop"
-          return "continue"
+          if (ctx.needsCompaction) return { result: "compact" as const, noEditStreak: ctx.noEditStreak }
+          if (ctx.blocked || ctx.assistantMessage.error)
+            return { result: "stop" as const, noEditStreak: ctx.noEditStreak }
+          const noEditStreak = ctx.hasEditInStep ? 0 : ctx.noEditStreak + 1
+          ctx.noEditStreak = noEditStreak
+          if (noEditStreak >= NO_EDIT_STREAK_THRESHOLD) {
+            ctx.loopDetected = true
+            yield* Effect.logError("no_edit_loop", {
+              "session.id": input.sessionID,
+              messageID: input.assistantMessage.id,
+              streak: noEditStreak,
+            })
+          }
+          ctx.hasEditInStep = false
+          return { result: "continue" as const, noEditStreak }
         })
       })
 
       return {
         get message() {
           return ctx.assistantMessage
+        },
+        get loopDetected() {
+          return ctx.loopDetected
+        },
+        get noEditStreak() {
+          return ctx.noEditStreak
+        },
+        get loopReason() {
+          if (ctx.loopDetected) {
+            if (ctx.churnStreak >= CHURN_STREAK_THRESHOLD) return "churn"
+            if (ctx.recentTools.length >= OSCILLATION_WINDOW) {
+              const unique = new Set(ctx.recentTools).size
+              if (unique / ctx.recentTools.length <= OSCILLATION_UNIQUE_RATIO) return "oscillation"
+            }
+            if (ctx.noEditStreak >= NO_EDIT_STREAK_THRESHOLD) return "no_edit"
+            return "doom"
+          }
+          return "none"
         },
         updateToolCall,
         completeToolCall,
@@ -725,6 +871,7 @@ export const node = LayerNode.make({
     SessionStatus.node,
     Image.node,
     EventV2Bridge.node,
+    Checkpoint.node,
     Database.node,
   ],
 })

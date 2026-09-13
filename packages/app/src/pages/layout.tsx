@@ -12,6 +12,7 @@ import {
   type Accessor,
 } from "solid-js"
 import { makeEventListener } from "@solid-primitives/event-listener"
+import { createMediaQuery } from "@solid-primitives/media"
 import { useNavigate, useParams } from "@solidjs/router"
 import { useLayout, LocalProject } from "@/context/layout"
 import { useServerSync } from "@/context/server-sync"
@@ -1700,15 +1701,16 @@ export default function LegacyLayout(props: ParentProps) {
     ),
   )
 
+  const side = createMemo(() => Math.max(layout.sidebar.width(), 244))
+  const isDesktop = createMediaQuery("(min-width: 80rem)")
+  const panel = createMemo(() => Math.max(side() - 64, 0))
+
   createEffect(() => {
     document.documentElement.style.setProperty(
       "--dialog-left-margin",
-      `${layout.sidebar.opened() ? layout.sidebar.width() : 48}px`,
+      `${isDesktop() && layout.sidebar.opened() ? layout.sidebar.width() : 48}px`,
     )
   })
-
-  const side = createMemo(() => Math.max(layout.sidebar.width(), 244))
-  const panel = createMemo(() => Math.max(side() - 64, 0))
 
   const loadedSessionDirs = new Set<string>()
 
@@ -2347,7 +2349,7 @@ export default function LegacyLayout(props: ParentProps) {
                   !state.sizing,
               }}
               style={{
-                "--main-left": layout.sidebar.opened() ? `${side()}px` : "4rem",
+                "--main-left": isDesktop() && layout.sidebar.opened() ? `${side()}px` : "4rem",
               }}
             >
               <main

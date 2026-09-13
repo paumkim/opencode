@@ -53,6 +53,8 @@ export class Service extends ConfigService.Service<Service>()("@opencode/Runtime
   bashDefaultTimeoutMs: positiveInteger("OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS"),
   experimentalNativeLlm: bool("OPENCODE_EXPERIMENTAL_NATIVE_LLM"),
   experimentalWebSockets: bool("OPENCODE_EXPERIMENTAL_WEBSOCKETS"),
+  promoteAllSubagents: bool("OPENCODE_PROMOTE_ALL_SUBAGENTS"),
+  subagentTimeoutMs: positiveInteger("OPENCODE_SUBAGENT_TIMEOUT_MS"),
   client: Config.string("OPENCODE_CLIENT").pipe(Config.withDefault("cli")),
 }) {}
 

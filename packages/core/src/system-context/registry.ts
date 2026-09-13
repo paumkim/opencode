@@ -12,6 +12,7 @@ export interface Entry {
 export interface Interface {
   readonly register: (entry: Entry) => Effect.Effect<void, never, Scope.Scope>
   readonly load: () => Effect.Effect<SystemContext.SystemContext>
+  readonly loadExcept: (keys: ReadonlyArray<SystemContext.Key>) => Effect.Effect<SystemContext.SystemContext>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/v2/SystemContextRegistry") {}
@@ -40,6 +41,14 @@ const layer = Layer.effect(
         const current = (yield* Ref.get(entries)).toSorted((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
         return SystemContext.combine(
           yield* Effect.forEach(current, (entry) => entry.load, { concurrency: "unbounded" }),
+        )
+      }),
+      loadExcept: Effect.fn("SystemContextRegistry.loadExcept")(function* (keys) {
+        const excluded = new Set(keys)
+        const current = (yield* Ref.get(entries)).toSorted((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
+        const filtered = current.filter((entry) => !excluded.has(entry.key))
+        return SystemContext.combine(
+          yield* Effect.forEach(filtered, (entry) => entry.load, { concurrency: "unbounded" }),
         )
       }),
     })

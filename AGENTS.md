@@ -1,3 +1,26 @@
+## Silent Execution
+
+Think internally. Execute without narrating. Do not announce what you are about to do, narrate steps, or ask preliminary questions during execution. Only communicate when:
+- (a) A result or summary is ready
+- (b) You are blocked or stuck
+- (c) You need information from the user
+
+During execution, use `+ Thought:` for internal reasoning and proceed directly to commands. No preamble, no rephrasing, no commentary between steps.
+
+## Subagent Delegation Discipline
+
+1. **One subagent at a time** — Never spawn multiple subagents in parallel for a single task. Break work into sequential, small, focused sub-tasks and delegate one at a time.
+
+2. **Break down before delegating** — Before spawning a subagent, decompose the task into the smallest meaningful unit. The delegating agent must know exactly what it needs: the specific question, the exact file:line, the precise change. Do not hand off vague or broad requests.
+
+3. **Subagents decompose too** — If a subagent receives a task that is still too large, it must break it down further and execute the smallest piece itself before delegating the next piece. No subagent should blindly forward a broad task downstream.
+
+4. **Agents must be productive, not just delegators** — The orchestrating agent should do as much of the work as it can directly (analysis, planning, simple edits, reasoning). Only delegate what genuinely requires a subagent's tool surface. Avoid the "useless manager" anti-pattern where everything is handed off and the orchestrator contributes nothing.
+
+5. **Clear task prompts** — Every subagent task prompt must include: (a) the objective in one sentence, (b) the exact steps or scope, (c) the expected output, and (d) how to verify success.
+
+6. **No spam spawning** — If a task can be done in one focused subagent call, do that. Do not fan out into many subagents for what is fundamentally one job.
+
 - To regenerate the legacy JavaScript SDK, run `./packages/sdk/js/script/build.ts`.
 - After changing the public Protocol or Server `HttpApi`, run `bun run generate` from `packages/client`. Do not edit `src/generated` or `src/generated-effect` directly.
 - Keep runtime dependencies directed from Schema to Core and Protocol, then from Core and Protocol to Server. Client runtime code may depend on Schema and Protocol but never Core or Server; `sdk-next` composes Client, Core, and Server.

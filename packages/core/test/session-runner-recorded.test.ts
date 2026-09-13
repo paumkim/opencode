@@ -35,6 +35,8 @@ import { ReferenceGuidance } from "@opencode-ai/core/reference/guidance"
 import { describe, expect } from "bun:test"
 import { eq } from "drizzle-orm"
 import { Effect, Layer } from "effect"
+import { ModelV2 } from "@opencode-ai/core/model"
+import { ProviderV2 } from "@opencode-ai/core/provider"
 import path from "node:path"
 import { testEffect } from "./lib/effect"
 
@@ -67,7 +69,25 @@ const model = OpenAIChat.route
     generation: { maxTokens: 20, temperature: 0 },
   })
   .model({ id: "gpt-4o-mini" })
-const models = SessionRunnerModel.layerWith(() => Effect.succeed(model))
+const modelInfo = ModelV2.Info.make({
+  id: ModelV2.ID.make("gpt-4o-mini"),
+  providerID: ProviderV2.ID.make("openai"),
+  name: "GPT-4o Mini",
+  api: { id: ModelV2.ID.make("gpt-4o-mini"), type: "aisdk", package: "@ai-sdk/openai", url: "https://api.openai.com/v1" },
+  capabilities: { tools: true, input: ["text"], output: ["text"] },
+  request: { headers: {}, body: {} },
+  variants: [],
+  time: { released: 0 },
+  cost: [],
+  status: "active",
+  enabled: true,
+  limit: { context: 128_000, output: 16_385 },
+})
+
+const models = SessionRunnerModel.layerWith(
+  () => Effect.succeed(model),
+  () => Effect.succeed(modelInfo),
+)
 const systemContext = AppNodeBuilder.build(SystemContextRegistry.node)
 const skillGuidance = Layer.mock(SkillGuidance.Service, { load: () => Effect.succeed(SystemContext.empty) })
 const referenceGuidance = Layer.mock(ReferenceGuidance.Service, { load: () => Effect.succeed(SystemContext.empty) })

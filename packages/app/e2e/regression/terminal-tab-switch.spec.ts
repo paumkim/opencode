@@ -50,18 +50,29 @@ test("keeps the terminal session alive when switching session tabs in a workspac
 
 type Probed = HTMLElement & { __e2eProbe?: string }
 
+function isProbed(el: HTMLElement): el is Probed {
+  return "__e2eProbe" in el
+}
+
 async function switchTab(page: Page, title: string) {
   await page.locator("[data-titlebar-tab-slot]", { hasText: title }).click()
 }
 
 async function writeProbe(page: Page) {
   await page.locator('[data-component="terminal"]').evaluate((el, probe) => {
-    ;(el as Probed).__e2eProbe = probe
+    if (isProbed(el)) {
+      el.__e2eProbe = probe
+    }
   }, PROBE)
 }
 
 async function readProbe(page: Page) {
-  return page.locator('[data-component="terminal"]').evaluate((el) => (el as Probed).__e2eProbe)
+  return page.locator('[data-component="terminal"]').evaluate((el) => {
+    if (isProbed(el)) {
+      return el.__e2eProbe
+    }
+    return undefined
+  })
 }
 
 async function setup(page: Page) {

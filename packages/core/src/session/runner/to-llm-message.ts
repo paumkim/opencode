@@ -115,8 +115,13 @@ const assistant = (message: SessionMessage.Assistant, model: Model) => {
 function toLLMMessage(message: SessionMessage.Message, model: Model): Message[] {
   switch (message.type) {
     case "agent-switched":
-    case "model-switched":
       return []
+    case "model-switched":
+      return [
+        Message.system(
+          `Model switched to ${message.model.providerID}/${message.model.id}${message.model.variant ? ` (variant: ${message.model.variant})` : ""}`,
+        ),
+      ]
     case "user":
       return [
         Message.make({

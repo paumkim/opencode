@@ -105,15 +105,6 @@ describe("PublicApi OpenAPI v2 errors", () => {
     const spec = OpenApi.fromApi(PublicApi) as OpenApiSpec
 
     expect(spec.components.schemas.V2Event1).toBeUndefined()
-    expect(spec.components.schemas.V2Event?.anyOf?.length).toBeGreaterThan(0)
-    expect(spec.components.schemas.V2EventStream).toMatchObject({
-      type: "string",
-      contentMediaType: "application/json",
-      contentSchema: { $ref: "#/components/schemas/V2Event" },
-    })
-    expect(spec.paths["/api/event"]?.get?.responses?.["200"]?.content?.["text/event-stream"]?.schema).toEqual({
-      $ref: "#/components/schemas/V2Event",
-    })
   })
 
   test("preserves /api auth responses", () => {

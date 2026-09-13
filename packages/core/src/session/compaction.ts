@@ -11,6 +11,7 @@ import { Token } from "../util/token"
 
 const DEFAULT_BUFFER = 20_000
 const DEFAULT_KEEP_TOKENS = 8_000
+const DEFAULT_THRESHOLD = 0.89
 const TOOL_OUTPUT_MAX_CHARS = 2_000
 const SUMMARY_OUTPUT_TOKENS = 4_096
 const SUMMARY_TEMPLATE = `Output exactly the Markdown structure shown inside <template> and keep the section order unchanged. Do not include the <template> tags in your response.
@@ -18,41 +19,29 @@ const SUMMARY_TEMPLATE = `Output exactly the Markdown structure shown inside <te
 ## Objective
 - [one or two brief sentences describing what the user is trying to accomplish]
 
+## Current Request
+- [the most recent user message restated as an elevator talk — the exact ask the agent is actively working on; preserve the user's own wording and intent, or "(none)"]
+
 ## Important Details
 - [constraints/preferences, decisions and why, important facts/assumptions, exact context needed to continue, or "(none)"]
 
 ## Work State
-### Completed
-- [finished work, verified facts, or changes made; otherwise "(none)"]
-
-### Active
-- [current work, partial changes, or investigation state; otherwise "(none)"]
-
-### Blocked
-- [blockers, failing commands, or unknowns; otherwise "(none)"]
+- Completed: [finished work, verified facts, or changes made; otherwise "(none)"]
+- Active: [current work, partial changes, or investigation state; otherwise "(none)"]
+- Blocked: [blockers, failing commands, or unknowns; otherwise "(none)"]
 
 ## Next Move
 1. [immediate concrete action, or "(none)"]
 2. [next action if known, or "(none)"]
-
-## Relevant Files
-- [file or directory path: why it matters, or "(none)"]
 </template>
 
 Rules:
 - Keep every section, even when empty.
 - Use terse bullets, not prose paragraphs.
 - Preserve exact file paths, symbols, commands, error strings, URLs, and identifiers when known.
+- Put relevant files and symbols inside the section where they matter; do not add extra sections.
+- Re-state the user's most recent request in Current Request using their own wording and intent, not a paraphrase of what the agent thinks they wanted.
 - Do not mention the summary process or that context was compacted.`
-const SUMMARY_UPDATE_INSTRUCTIONS = `The <prior-summary> summarizes everything that happened before the <conversation>. Construct a new summary that combines both. The <prior-summary> is discarded after this: anything you do not carry into the new summary is lost.
-
-When combining:
-- Carry forward objectives, constraints, user directives, decisions, and parallel workstreams from the <prior-summary> even when the <conversation> does not mention them. Drop only what is finished and no longer needed.
-- The <conversation> is more recent than the <prior-summary>. Where they conflict, the conversation wins: state the corrected fact and drop the old claim.
-- Add new progress, decisions, constraints, and context from the conversation.
-- Move completed work from "Active" to "Completed".
-- If a blocker has been resolved, update the summary to reflect that while keeping any details still needed to continue the work.
-- Update "Objective" and "Next Move" to reflect the current work state.`
 
 type Entry = {
   readonly seq: number
@@ -63,6 +52,7 @@ type Settings = {
   readonly auto: boolean
   readonly buffer: number
   readonly tokens: number
+  readonly threshold: number
 }
 
 type Dependencies = {
@@ -129,8 +119,9 @@ const settings = (documents: readonly Config.Entry[]) => {
       auto: current.auto ?? result.auto,
       buffer: current.buffer ?? result.buffer,
       tokens: current.keep?.tokens ?? result.tokens,
+      threshold: current.threshold ?? result.threshold,
     }),
-    { auto: true, buffer: DEFAULT_BUFFER, tokens: DEFAULT_KEEP_TOKENS },
+    { auto: true, buffer: DEFAULT_BUFFER, tokens: DEFAULT_KEEP_TOKENS, threshold: DEFAULT_THRESHOLD },
   )
 }
 
@@ -145,33 +136,36 @@ const select = (
   if (conversation.length === 0) return
   let total = 0
   let split = conversation.length
+  let splitPrefix = ""
+  let splitSuffix = ""
   for (let index = conversation.length - 1; index >= 0; index--) {
     const next = total + Token.estimate(conversation[index])
-    if (next > tokens) break
+    if (next > tokens) {
+      const remaining = Math.max(0, tokens - total) * 4
+      if (remaining > 0) {
+        splitPrefix = conversation[index].slice(0, -remaining)
+        splitSuffix = conversation[index].slice(-remaining)
+        split = index + 1
+      }
+      break
+    }
     total = next
     split = index
   }
   return {
-    head: conversation.slice(0, split).join("\n\n"),
-    recent: conversation.slice(split).join("\n\n"),
+    head: [...conversation.slice(0, split), splitPrefix].filter(Boolean).join("\n\n"),
+    recent: [splitSuffix, ...conversation.slice(split)].filter(Boolean).join("\n\n"),
   }
 }
 
-export const buildPrompt = (input: { readonly previousSummary?: string; readonly context: readonly string[] }) => {
-  const conversation = `Here is the conversation so far:\n\n<conversation>\n${input.context.join("\n\n")}\n</conversation>`
-  if (!input.previousSummary)
-    return [
-      conversation,
-      "Create a new anchored summary from the conversation history in the <conversation> tags above so another coding agent can continue the work.",
-      SUMMARY_TEMPLATE,
-    ].join("\n\n")
-  return [
-    conversation,
-    `Here is the summary of the conversation before the <conversation> above:\n\n<prior-summary>\n${input.previousSummary}\n</prior-summary>`,
-    SUMMARY_UPDATE_INSTRUCTIONS,
+export const buildPrompt = (input: { readonly previousSummary?: string; readonly context: readonly string[] }) =>
+  [
+    input.previousSummary
+      ? `Update the anchored summary below using the conversation history above.\nPreserve still-true details, remove stale details, and merge in the new facts.\n<previous-summary>\n${input.previousSummary}\n</previous-summary>`
+      : "Create a new anchored summary from the conversation history.",
     SUMMARY_TEMPLATE,
+    ...input.context,
   ].join("\n\n")
-}
 
 export const make = (dependencies: Dependencies) => {
   const config = settings(dependencies.config)
@@ -202,7 +196,6 @@ export const make = (dependencies: Dependencies) => {
       .stream(
         LLM.request({
           model: input.model,
-          http: input.request.http,
           messages: [Message.user(summaryPrompt)],
           tools: [],
           generation: { maxTokens: summaryOutput },

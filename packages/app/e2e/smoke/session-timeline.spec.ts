@@ -121,7 +121,7 @@ test.describe("smoke: session timeline", () => {
       provider: fixture.provider,
       directory: fixture.directory,
       project: fixture.project,
-      pageMessages: (sessionID) => ({ items: fixture.messages[sessionID as keyof typeof fixture.messages] ?? [] }),
+      pageMessages: (sessionID) => pageMessages(sessionID, 100),
     })
     await configureSmokePage(page, fixture.directory)
     await page.addInitScript(
@@ -247,7 +247,7 @@ test.describe("smoke: session timeline", () => {
       provider: fixture.provider,
       directory: fixture.directory,
       project: fixture.project,
-      pageMessages: (sessionID) => ({ items: fixture.messages[sessionID as keyof typeof fixture.messages] ?? [] }),
+      pageMessages: (sessionID) => pageMessages(sessionID, 100),
     })
     await configureSmokePage(page, fixture.directory)
     await page.addInitScript(

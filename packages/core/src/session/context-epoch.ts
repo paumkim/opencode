@@ -24,7 +24,7 @@ export function initialize(
   db: DatabaseService,
   context: Effect.Effect<SystemContext.SystemContext>,
   sessionID: SessionSchema.ID,
-): Effect.Effect<Prepared | undefined, SystemContext.InitializationBlocked> {
+): Effect.Effect<Prepared | undefined, SystemContext.SystemContext.InitializationBlocked> {
   return initializeOnce(db, context, sessionID).pipe(Effect.withSpan("SessionContextEpoch.initialize"))
 }
 
@@ -33,7 +33,7 @@ export function prepare(
   events: EventV2.Interface,
   context: Effect.Effect<SystemContext.SystemContext>,
   sessionID: SessionSchema.ID,
-): Effect.Effect<Prepared, SystemContext.InitializationBlocked | ContextSnapshotDecodeError> {
+): Effect.Effect<Prepared | undefined, SystemContext.SystemContext.InitializationBlocked | ContextSnapshotDecodeError> {
   return prepareOnce(db, events, context, sessionID).pipe(Effect.withSpan("SessionContextEpoch.prepare"))
 }
 
@@ -48,7 +48,10 @@ const prepareOnce = Effect.fnUntraced(function* (
     { concurrency: "unbounded" },
   )
   if (!stored) {
-    const generation = yield* SystemContext.initialize(value)
+    const generation = yield* SystemContext.initialize(value).pipe(
+      Effect.catchTag("SystemContext.InitializationBlocked", () => Effect.succeed(undefined)),
+    )
+    if (generation === undefined) return
     const baselineSeq = yield* insert(db, sessionID, generation)
     return { baseline: generation.baseline, baselineSeq }
   }
@@ -83,7 +86,11 @@ const initializeOnce = Effect.fnUntraced(function* (
   sessionID: SessionSchema.ID,
 ) {
   if (yield* exists(db, sessionID)) return
-  const generation = yield* context.pipe(Effect.flatMap(SystemContext.initialize))
+  const generation = yield* context.pipe(
+    Effect.flatMap(SystemContext.initialize),
+    Effect.catchTag("SystemContext.InitializationBlocked", () => Effect.succeed(undefined)),
+  )
+  if (generation === undefined) return
   const baselineSeq = yield* insert(db, sessionID, generation)
   return { baseline: generation.baseline, baselineSeq }
 })

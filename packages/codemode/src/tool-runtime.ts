@@ -302,6 +302,11 @@ export const copyOut = (value: unknown, undefinedAsNull = false): unknown => {
   if (typeof value === "number" && !Number.isFinite(value)) {
     return null
   }
+  // Dates cross the boundary as ISO-8601 strings so they serialize as JSON instead of
+  // silently becoming {} (Object.entries(new Date()) === []).
+  if (value instanceof Date) {
+    return Number.isFinite(value.getTime()) ? value.toISOString() : null
+  }
   if (Array.isArray(value)) {
     return value.map((item) => copyOut(item, undefinedAsNull))
   }

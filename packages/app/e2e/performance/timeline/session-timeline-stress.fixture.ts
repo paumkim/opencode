@@ -135,7 +135,7 @@ function toolPart(
       ? { files: [patchFile(index, "update"), patchFile(index + 1, index % 2 === 0 ? "add" : "delete")] }
       : tool === "edit" || tool === "write"
         ? {
-            filediff: fileDiff(String(input.filePath ?? `src/generated/file-${index}.ts`), index),
+            filediff: JSON.stringify(fileDiff(String(input.filePath ?? `src/generated/file-${index}.ts`), index)),
             diff: patch(index, outputLength),
             preview: patch(index + 1, 420),
           }
@@ -354,16 +354,17 @@ export const fixture = {
 }
 
 export function pageMessages(sessionID: string, limit: number, before?: string) {
-  const messages = fixture.messages[sessionID as keyof typeof fixture.messages] ?? []
+  const messages = Object.values(fixture.messages).flat()
+  const filtered = messages.filter((message) => message.info.sessionID === sessionID)
   const end = before
     ? Math.max(
         0,
-        messages.findIndex((message) => message.info.id === before),
+        filtered.findIndex((message) => message.info.id === before),
       )
-    : messages.length
+    : filtered.length
   const start = Math.max(0, end - limit)
   return {
-    items: messages.slice(start, end),
-    cursor: start > 0 ? messages[start]!.info.id : undefined,
+    items: filtered.slice(start, end),
+    cursor: start > 0 ? filtered[start]?.info.id : undefined,
   }
 }

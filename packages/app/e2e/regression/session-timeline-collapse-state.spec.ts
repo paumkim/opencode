@@ -223,7 +223,6 @@ test.describe("regression: session timeline local row state", () => {
     await expectSessionTitle(page, title)
 
     const wrapper = page.locator(`[data-timeline-part-id="${editPartID}"]`).first()
-    const trigger = wrapper.locator('[data-slot="collapsible-trigger"]').first()
     const diff = wrapper.locator('[data-component="edit-content"]').first()
     await expectAppVisible(diff)
     await expect.poll(() => wrapper.evaluate((element) => element.getBoundingClientRect().height)).toBeGreaterThan(500)

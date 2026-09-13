@@ -15,7 +15,7 @@ import { Database } from "../../database/database"
 import { EventV2 } from "../../event"
 import { Location } from "../../location"
 import { ModelV2 } from "../../model"
-import { PermissionV2 } from "../../permission"
+import { ModelCapabilities } from "../../model/capabilities"
 import { ProviderV2 } from "../../provider"
 import { QuestionV2 } from "../../question"
 import { SystemContext } from "../../system-context/index"
@@ -102,6 +102,7 @@ const layer = Layer.effect(
     const location = yield* Location.Service
     const systemContext = yield* SystemContextRegistry.Service
     const skillGuidance = yield* SkillGuidance.Service
+    const modelCapabilities = yield* ModelCapabilities.Service
     const referenceGuidance = yield* ReferenceGuidance.Service
     const config = yield* Config.Service
     const snapshots = yield* Snapshot.Service
@@ -141,13 +142,9 @@ const layer = Layer.effect(
     const awaitToolFibers = (fibers: FiberSet.FiberSet<void, ToolOutputStore.Error>) =>
       Effect.raceFirst(FiberSet.join(fibers), FiberSet.awaitEmpty(fibers))
 
-    // Match V1: declining a user prompt halts the loop instead of becoming model-facing tool output.
-    const isUserDeclined = (cause: Cause.Cause<unknown>) =>
-      cause.reasons.some(
-        (reason) =>
-          Cause.isDieReason(reason) &&
-          (reason.defect instanceof PermissionV2.DeclinedError || reason.defect instanceof QuestionV2.RejectedError),
-      )
+    // Match V1: dismissing a question halts the loop instead of becoming model-facing tool output.
+    const isQuestionRejected = (cause: Cause.Cause<unknown>) =>
+      cause.reasons.some((reason) => Cause.isDieReason(reason) && reason.defect instanceof QuestionV2.RejectedError)
 
     type TurnTransition =
       // Automatic compaction completed; rebuild the request from compacted history.
@@ -165,8 +162,15 @@ const layer = Layer.effect(
     const continueAfterOverflowCompaction = (step: number) =>
       new TurnTransitionError({ _tag: "ContinueAfterOverflowCompaction", step })
 
-    const loadSystemContext = (agent: AgentV2.Selection) =>
-      Effect.all([systemContext.load(), skillGuidance.load(agent), referenceGuidance.load()], {
+    const loadSystemContext = (agent: AgentV2.Selection, model: ModelV2.Info, session: SessionSchema.Info) =>
+      Effect.all([
+        session.parentID
+          ? systemContext.loadExcept([SystemContext.Key.make("core/instructions")])
+          : systemContext.load(),
+        skillGuidance.load(agent),
+        modelCapabilities.load(model),
+        referenceGuidance.load(),
+      ], {
         concurrency: "unbounded",
       }).pipe(Effect.map(SystemContext.combine))
 
@@ -180,7 +184,9 @@ const layer = Layer.effect(
       if (session.location.directory !== location.directory || session.location.workspaceID !== location.workspaceID)
         return yield* Effect.interrupt
       const agent = yield* agents.select(session.agent)
-      const initialized = yield* SessionContextEpoch.initialize(db, loadSystemContext(agent), session.id)
+      const model = yield* models.resolve(session)
+      const modelInfo = yield* models.modelInfo(session)
+      const initialized = yield* SessionContextEpoch.initialize(db, loadSystemContext(agent, modelInfo, session), session.id)
       const toolFibers = yield* FiberSet.make<void, ToolOutputStore.Error>()
       let needsContinuation = false
       let currentStep = step
@@ -195,8 +201,8 @@ const layer = Layer.effect(
         if (promoted > 0) currentStep = 1
       }
       const system =
-        initialized ?? (yield* SessionContextEpoch.prepare(db, events, loadSystemContext(agent), session.id))
-      const model = yield* models.resolve(session)
+        initialized ?? (yield* SessionContextEpoch.prepare(db, events, loadSystemContext(agent, modelInfo, session), session.id))
+      if (!system) return { needsContinuation: false, step: currentStep }
       const entries = yield* SessionHistory.entriesForRunner(db, session.id, system.baselineSeq)
       const context = entries.map((entry) => entry.message)
       const isLastStep = agent.info?.steps !== undefined && currentStep >= agent.info.steps
@@ -204,13 +210,6 @@ const layer = Layer.effect(
       const promptCacheKey = /^ses_[0-9a-f]{64}$/.test(session.id) ? session.id.slice(4) : session.id
       const request = LLM.request({
         model,
-        http: {
-          headers: {
-            "x-session-affinity": session.id,
-            "X-Session-Id": session.id,
-            ...(session.parentID ? { "x-parent-session-id": session.parentID } : {}),
-          },
-        },
         providerOptions: { openai: { promptCacheKey } },
         system: [agent.info?.system, system.baseline]
           .filter((part): part is string => part !== undefined && part.length > 0)
@@ -301,7 +300,7 @@ const layer = Layer.effect(
           }
           if (stream._tag === "Failure" && Cause.hasInterrupts(stream.cause)) yield* FiberSet.clear(toolFibers)
           const settled = yield* restore(awaitToolFibers(toolFibers)).pipe(Effect.exit)
-          if (settled._tag === "Failure" && isUserDeclined(settled.cause)) {
+          if (settled._tag === "Failure" && isQuestionRejected(settled.cause)) {
             yield* FiberSet.clear(toolFibers)
             yield* withPublication(publisher.failUnsettledTools("Tool execution interrupted"))
             return yield* Effect.interrupt
@@ -431,6 +430,7 @@ export const node = makeLocationNode({
     Location.node,
     SystemContextRegistry.node,
     SkillGuidance.node,
+    ModelCapabilities.node,
     ReferenceGuidance.node,
     Config.node,
     Snapshot.node,

@@ -154,6 +154,9 @@ function getConfig() {
         rpm: { packageName: "opencode", fpm: [metainfoFpm(appId), legacyDesktopEntryFpm] },
       }
     }
+    default: {
+      return base
+    }
   }
 }
 

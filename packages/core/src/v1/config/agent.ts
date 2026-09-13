@@ -17,6 +17,8 @@ const AgentSchema = Schema.StructWithRest(
     }),
     temperature: Schema.optional(Schema.Finite),
     top_p: Schema.optional(Schema.Finite),
+    frequency_penalty: Schema.optional(Schema.Finite),
+    presence_penalty: Schema.optional(Schema.Finite),
     prompt: Schema.optional(Schema.String),
     tools: Schema.optional(Schema.Record(Schema.String, Schema.Boolean)).annotate({
       description: "@deprecated Use 'permission' field instead",
@@ -48,6 +50,8 @@ const KNOWN_KEYS = new Set([
   "description",
   "temperature",
   "top_p",
+  "frequency_penalty",
+  "presence_penalty",
   "mode",
   "hidden",
   "color",

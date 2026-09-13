@@ -18,7 +18,7 @@ const categories = [
   "disabled-by-default-v8.cpu_profiler",
 ]
 
-export async function startChromeTrace(page: Page, name: string) {
+export async function startChromeTrace(page: Page, name: string): Promise<(() => Promise<void>) | undefined> {
   const directory = process.env.OPENCODE_PERFORMANCE_TRACE_DIR
   if (!directory) return
 
@@ -44,7 +44,7 @@ export async function startChromeTrace(page: Page, name: string) {
     await Promise.allSettled([session.detach()])
     throw error
   }
-  let stopping: Promise<string> | undefined
+  let stopping: Promise<void> | undefined
 
   return () =>
     (stopping ??= (async () => {
@@ -59,7 +59,6 @@ export async function startChromeTrace(page: Page, name: string) {
         await writeProtocolStream(session, result.stream, partial)
         if (result.dataLossOccurred) throw new Error(`Chrome trace lost data; partial capture retained: ${partial}`)
         await rename(partial, file)
-        return file
       } finally {
         await Promise.allSettled([session.detach()])
       }

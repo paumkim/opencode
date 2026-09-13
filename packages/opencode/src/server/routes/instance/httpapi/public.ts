@@ -164,7 +164,7 @@ function matchLegacyOpenApi(input: Record<string, unknown>) {
                   ? { $ref: "#/components/schemas/Event" }
                   : path === "/global/event"
                     ? { $ref: "#/components/schemas/GlobalEvent" }
-                    : { $ref: "#/components/schemas/V2Event" },
+                    : { $ref: "#/components/schemas/VStream" },
             },
           },
         }
@@ -174,6 +174,7 @@ function matchLegacyOpenApi(input: Record<string, unknown>) {
     }
   }
   deleteUnusedLegacyErrorComponents(spec)
+  fixV2EventSchemas(spec)
   return input
 }
 
@@ -352,6 +353,8 @@ function normalizeLegacyErrorResponses(operation: OpenApiOperation) {
   }
 }
 
+function fixV2EventSchemas(spec: OpenApiSpec) {
+  const schemas = spec.components?.schemas as Record<string, any> || {}; if (!schemas) return; const streamWrapper = schemas["V2Event"]; const eventUnion = schemas["V2Event1"]; if (streamWrapper && streamWrapper.type === "string" && eventUnion && eventUnion.anyOf) { schemas["V2Event"] = eventUnion; delete schemas["V2Event1"]; schemas["VStream"] = { type: "string", contentMediaType: "application/json", contentSchema: { $ref: "#/components/schemas/V2Event" } }; } }
 function deleteUnusedLegacyErrorComponents(spec: OpenApiSpec) {
   for (const name of [
     "Unauthorized",

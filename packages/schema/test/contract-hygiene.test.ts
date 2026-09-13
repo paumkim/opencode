@@ -7,7 +7,6 @@ import { Project } from "../src/project"
 import { Pty } from "../src/pty"
 import { Question } from "../src/question"
 import { Session } from "../src/session"
-import { SessionEvent } from "../src/session-event"
 import { SessionTodo } from "../src/session-todo"
 import { optional } from "../src/schema"
 
