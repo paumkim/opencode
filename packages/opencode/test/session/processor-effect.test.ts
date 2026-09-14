@@ -18,6 +18,7 @@ import { MessageID, PartID, SessionID } from "../../src/session/schema"
 import { SessionStatus } from "../../src/session/status"
 import { SessionSummary } from "../../src/session/summary"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
+import { Permission } from "../../src/permission"
 import { TestInstance, provideTmpdirInstance, provideTmpdirServer } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
 import { raw, reply, TestLLMServer } from "../lib/llm-server"
@@ -1230,6 +1231,148 @@ itNoEdit.instance(
       expect(handle.noEditStreak).toBe(3)
     }),
   { config: cfg },
+)
+
+const reasoningQueues: LLMEvent[][] = []
+function pushReasoningLLM(events: LLMEvent[]) {
+  reasoningQueues.push(events)
+}
+const reasoningLLM = Layer.succeed(
+  LLM.Service,
+  LLM.Service.of({
+    stream: () =>
+      Stream.fromEffect(
+        Effect.sync(() => {
+          const q = reasoningQueues.shift() ?? []
+          if (q.length) return q
+          return [
+            LLMEvent.stepStart({ index: 0 }),
+            LLMEvent.stepFinish({ index: 0, reason: "stop" }),
+            LLMEvent.finish({ reason: "stop" }),
+          ]
+        }),
+      ).pipe(Stream.flatMap(Stream.fromIterable)),
+  }),
+)
+const reasoningEnv = LayerNode.compile(root, [...replacements, [LLM.node, reasoningLLM]])
+const itReasoning = testEffect(reasoningEnv)
+
+let reasoningCallId = 0
+function reasoningTurn(text: string): LLMEvent[] {
+  reasoningCallId++
+  const callId = `call-${reasoningCallId}`
+  return [
+    LLMEvent.stepStart({ index: 0 }),
+    LLMEvent.reasoningStart({ id: "reasoning-1" }),
+    LLMEvent.reasoningDelta({ id: "reasoning-1", text }),
+    LLMEvent.reasoningEnd({ id: "reasoning-1" }),
+    LLMEvent.toolInputStart({ id: callId, name: "write" }),
+    LLMEvent.toolInputEnd({ id: callId, name: "write" }),
+    LLMEvent.toolCall({ id: callId, name: "write", input: { path: `a${reasoningCallId}.txt`, content: "x" }, providerExecuted: false }),
+    LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }),
+    LLMEvent.finish({ reason: "tool-calls" }),
+  ]
+}
+
+itReasoning.live(
+  "session.processor effect tests detect repeated reasoning loop",
+  () =>
+    provideTmpdirInstance(
+      (dir) =>
+        Effect.gen(function* () {
+          const { processors, session, provider } = yield* boot()
+
+          const chat = yield* session.create({})
+          const parent = yield* user(chat.id, "reasoning loop")
+          const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+          const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+          const handle = yield* processors.create({
+            assistantMessage: msg,
+            sessionID: chat.id,
+            model: mdl,
+          })
+
+          const input = {
+            user: {
+              id: parent.id,
+              sessionID: chat.id,
+              role: "user" as const,
+              time: parent.time,
+              agent: parent.agent,
+              model: { providerID: ref.providerID, modelID: ref.modelID },
+            } satisfies SessionV1.User,
+            sessionID: chat.id,
+            model: mdl,
+            agent: agent(),
+            system: [],
+            messages: [{ role: "user" as const, content: "reasoning loop" }],
+            tools: {},
+          }
+
+          pushReasoningLLM(reasoningTurn("circling the same thought"))
+          pushReasoningLLM(reasoningTurn("circling the same thought"))
+          pushReasoningLLM(reasoningTurn("circling the same thought"))
+
+          yield* handle.process(input)
+          yield* handle.process(input)
+          const value = yield* handle.process(input)
+
+          expect(value.result).toBe("continue")
+          expect(handle.loopDetected).toBe(true)
+          expect(handle.loopReason).toBe("reasoning")
+        }),
+      { config: cfg },
+    ),
+)
+
+itReasoning.live(
+  "session.processor effect tests reset reasoning history after a distinct turn",
+  () =>
+    provideTmpdirInstance(
+      (dir) =>
+        Effect.gen(function* () {
+          const { processors, session, provider } = yield* boot()
+
+          const chat = yield* session.create({})
+          const parent = yield* user(chat.id, "reasoning reset")
+          const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+          const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+          const handle = yield* processors.create({
+            assistantMessage: msg,
+            sessionID: chat.id,
+            model: mdl,
+          })
+
+          const input = {
+            user: {
+              id: parent.id,
+              sessionID: chat.id,
+              role: "user" as const,
+              time: parent.time,
+              agent: parent.agent,
+              model: { providerID: ref.providerID, modelID: ref.modelID },
+            } satisfies SessionV1.User,
+            sessionID: chat.id,
+            model: mdl,
+            agent: agent(),
+            system: [],
+            messages: [{ role: "user" as const, content: "reasoning reset" }],
+            tools: {},
+          }
+
+          pushReasoningLLM(reasoningTurn("first thought"))
+          pushReasoningLLM(reasoningTurn("second thought"))
+          pushReasoningLLM(reasoningTurn("third thought"))
+
+          yield* handle.process(input)
+          yield* handle.process(input)
+          const value = yield* handle.process(input)
+
+          expect(value.result).toBe("continue")
+          expect(handle.loopReason).not.toBe("reasoning")
+        }),
+      { config: cfg },
+    ),
 )
 
 itNoEdit.instance(

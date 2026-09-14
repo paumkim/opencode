@@ -61,22 +61,41 @@ import { LLMEvent } from "@opencode-ai/llm"
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
 
+const MAX_INTERVENTIONS = 3
+
 function loopBreakMessage(
   reason: SessionProcessor.Handle["loopReason"],
   noEditStreak: number,
+  intervention: number,
 ): string {
+  let msg: string
   switch (reason) {
     case "churn":
-      return `You have edited the same file repeatedly without making net progress. Stop editing, read the current state of the file, identify what actually needs to change, then make one deliberate edit that moves the task forward. If the file is already correct, stop and report that.`
+      msg = `You have edited the same file repeatedly without making net progress. Stop editing, read the current state of the file, identify what actually needs to change, then make one deliberate edit that moves the task forward. If the file is already correct, stop and report that.`
+      break
     case "oscillation":
-      return `You are cycling between a small set of tools and files without ever landing on an answer. Stop calling tools. Write down what you know so far, identify the single open question, and either answer it with one targeted call or report your findings and stop.`
+      msg = `You are cycling between a small set of tools and files without ever landing on an answer. Stop calling tools. Write down what you know so far, identify the single open question, and either answer it with one targeted call or report your findings and stop.`
+      break
     case "no_edit":
-      return `You have made ${noEditStreak} consecutive turns without editing any files. You appear to be reading and searching in a loop. Stop, then make an actual code change (edit/write/apply_patch) to progress the task. If the task is genuinely read-only, respond with your findings and stop.`
+      msg = `You have made ${noEditStreak} consecutive turns without editing any files. You appear to be reading and searching in a loop. Stop, then make an actual code change (edit/write/apply_patch) to progress the task. If the task is genuinely read-only, respond with your findings and stop.`
+      break
     case "text":
-      return "You appear to be repeating the same output. Stop and try a completely different approach to solve the problem."
+      msg = "You appear to be repeating the same output. Stop and try a completely different approach to solve the problem."
+      break
+    case "reasoning":
+      msg = "You are repeating the same reasoning/thinking content across turns. Stop circling. Produce a concrete answer, make a tool call, or report your findings now."
+      break
     default:
-      return "You appear to be repeating the same tool call. Stop, then make an actual code change (edit/write/apply_patch) to progress the task. If the task is genuinely read-only, respond with your findings and stop."
+      msg = "You appear to be repeating the same tool call. Stop, then make an actual code change (edit/write/apply_patch) to progress the task. If the task is genuinely read-only, respond with your findings and stop."
   }
+
+  if (intervention >= 3) {
+    return `STOP. Session ending after ${intervention} repeated loops. Report what you accomplished and what is blocking you.`
+  }
+  if (intervention >= 2) {
+    return `${msg} INTERVENTION ${intervention}: You have been warned ${intervention} times. You MUST make concrete progress now — produce a result, make an edit, or report findings. Continuing to loop will end the session.`
+  }
+  return msg
 }
 
 const decodeMessageInfo = Schema.decodeUnknownExit(SessionV1.Info)
@@ -1126,6 +1145,7 @@ const layer = Layer.effect(
         const ctx = yield* InstanceState.context
         let structured: unknown
         let step = 0
+        let interventions = 0
         const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
         const cfg = yield* config.get()
 
@@ -1425,12 +1445,49 @@ const layer = Layer.effect(
           )
           if (outcome === "break") break
           if (outcome === "intervene") {
+            interventions++
             yield* Effect.logError("loop_intervention", {
               "session.id": sessionID,
               messageID: handle.message.id,
               reason: handle.loopReason,
               noEditStreak: handle.noEditStreak,
+              intervention: interventions,
             })
+            // Auto-compact: give the model fresh context before retrying
+            yield* compaction.create({
+              sessionID,
+              agent: lastUser.agent,
+              model: lastUser.model,
+              auto: true,
+              overflow: true,
+            }).pipe(Effect.catch(() => Effect.void))
+            if (interventions >= MAX_INTERVENTIONS) {
+              yield* Effect.logError("loop_max_interventions", {
+                "session.id": sessionID,
+                interventions,
+                reason: handle.loopReason,
+              })
+              const stopMsg: SessionV1.User = {
+                id: MessageID.ascending(),
+                role: "user",
+                sessionID,
+                time: { created: Date.now() },
+                agent: lastUser.agent,
+                model: lastUser.model,
+                format: { type: "text" },
+              }
+              yield* sessions.updateMessage(stopMsg)
+              const stopPart: SessionV1.Part = {
+                type: "text",
+                id: PartID.ascending(),
+                messageID: stopMsg.id,
+                sessionID,
+                text: `Session stopped after ${interventions} loop interventions. Reason: ${handle.loopReason}. Report what you accomplished and what is blocking you.`,
+              }
+              yield* sessions.updatePart(stopPart)
+              msgs = [...msgs, { info: stopMsg, parts: [stopPart] }]
+              break
+            }
             const breakMsg: SessionV1.User = {
               id: MessageID.ascending(),
               role: "user",
@@ -1446,7 +1503,7 @@ const layer = Layer.effect(
               id: PartID.ascending(),
               messageID: breakMsg.id,
               sessionID,
-              text: loopBreakMessage(handle.loopReason, handle.noEditStreak),
+              text: loopBreakMessage(handle.loopReason, handle.noEditStreak, interventions),
             }
             yield* sessions.updatePart(breakPart)
             msgs = [

@@ -207,6 +207,9 @@ export const Info = Schema.Struct({
       length_continue: Schema.optional(Schema.Boolean).annotate({
         description: "When the model hits its output token limit, automatically continue the response instead of truncating.",
       }),
+      stream_delay: Schema.optional(NonNegativeInt).annotate({
+        description: "Delay in milliseconds between each streamed token (text-delta) event. Slows down model output to reduce CLI rendering pressure.",
+      }),
     }),
   ),
 }).annotate({ identifier: "Config" })

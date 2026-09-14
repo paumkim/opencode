@@ -13,6 +13,7 @@
     }
   },
   "plugin": ["@prevalentware/opencode-goal-plugin"],
+  "experimental": { "stream_delay": 50 },
   "mcp": {},
   "tools": {
     "github-triage": false,

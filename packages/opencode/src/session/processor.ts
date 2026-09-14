@@ -2,7 +2,7 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { Image } from "@/image/image"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
-import { Cause, Deferred, Effect, Exit, Layer, Context, Scope, Schema } from "effect"
+import { Cause, Deferred, Duration, Effect, Exit, Layer, Context, Scope, Schema } from "effect"
 import * as Stream from "effect/Stream"
 import { Agent } from "@/agent/agent"
 import { Config } from "@/config/config"
@@ -29,6 +29,7 @@ import { Usage, type LLMEvent } from "@opencode-ai/llm"
 
 const DOOM_LOOP_THRESHOLD = 3
 const TEXT_LOOP_THRESHOLD = 3
+const REASONING_LOOP_THRESHOLD = 3
 const NO_EDIT_STREAK_THRESHOLD = 3
 const CHURN_STREAK_THRESHOLD = 3
 const OSCILLATION_WINDOW = 8
@@ -80,7 +81,7 @@ export interface Handle {
   readonly process: (streamInput: LLM.StreamInput) => Effect.Effect<ProcessResult>
   readonly loopDetected: boolean
   readonly noEditStreak: number
-  readonly loopReason: "doom" | "text" | "no_edit" | "churn" | "oscillation" | "none"
+  readonly loopReason: "doom" | "text" | "no_edit" | "churn" | "oscillation" | "reasoning" | "none"
 }
 
 type Input = {
@@ -108,6 +109,7 @@ interface ProcessorContext extends Input {
   needsCompaction: boolean
   currentText: SessionV1.TextPart | undefined
   reasoningMap: Record<string, SessionV1.ReasoningPart>
+  reasoningHistory: string[]
   textHistory: string[]
   loopDetected: boolean
   hasEditInStep: boolean
@@ -155,6 +157,7 @@ const layer = Layer.effect(
         needsCompaction: false,
         currentText: undefined,
         reasoningMap: {},
+        reasoningHistory: [],
         textHistory: [],
         loopDetected: false,
         hasEditInStep: false,
@@ -356,12 +359,29 @@ const layer = Layer.effect(
             })
             return
 
-          case "reasoning-end":
-            if (value.providerMetadata && value.id in ctx.reasoningMap) {
-              ctx.reasoningMap[value.id].metadata = value.providerMetadata
-            }
-            yield* finishReasoning(value.id)
-            return
+case "reasoning-end": {
+               if (value.providerMetadata && value.id in ctx.reasoningMap) {
+                 ctx.reasoningMap[value.id].metadata = value.providerMetadata
+               }
+               const reasoning = ctx.reasoningMap[value.id]
+               if (reasoning?.text.trim()) {
+                 ctx.reasoningHistory.push(reasoning.text)
+                 const recent = ctx.reasoningHistory.slice(-REASONING_LOOP_THRESHOLD)
+                 if (
+                   recent.length === REASONING_LOOP_THRESHOLD &&
+                   recent.every((text) => text === recent[0])
+                 ) {
+                   ctx.loopDetected = true
+                   yield* Effect.logError("reasoning_loop", {
+                     "session.id": ctx.sessionID,
+                     messageID: ctx.assistantMessage.id,
+                     text: recent[0].slice(0, 200),
+                   })
+                 }
+               }
+               yield* finishReasoning(value.id)
+               return
+             }
 
           case "tool-input-start":
             if (ctx.assistantMessage.summary) {
@@ -764,12 +784,21 @@ const layer = Layer.effect(
           yield* Effect.gen(function* () {
             ctx.currentText = undefined
             ctx.reasoningMap = {}
+            // reasoningHistory is intentionally NOT reset here: it accumulates across turns so a model repeating identical thinking 3x triggers reasoning_loop.
             // textHistory is intentionally NOT reset here: it accumulates across turns so a model repeating identical output 3x triggers text_loop.
             ctx.loopDetected = false
             yield* status.set(ctx.sessionID, { type: "busy" })
             const stream = llm.stream(streamInput)
 
+            const streamDelay = (yield* config.get()).experimental?.stream_delay ?? 0
+
             yield* stream.pipe(
+              Stream.mapEffect((event) => {
+                if (streamDelay > 0 && (event.type === "text-delta" || event.type === "reasoning-delta")) {
+                  return Effect.sleep(Duration.millis(streamDelay)).pipe(Effect.as(event))
+                }
+                return Effect.succeed(event)
+              }),
               Stream.tap((event) => handleEvent(event)),
               Stream.takeUntil(() => ctx.needsCompaction),
               Stream.runDrain,
@@ -834,18 +863,19 @@ const layer = Layer.effect(
         get noEditStreak() {
           return ctx.noEditStreak
         },
-        get loopReason() {
-          if (ctx.loopDetected) {
-            if (ctx.churnStreak >= CHURN_STREAK_THRESHOLD) return "churn"
-            if (ctx.recentTools.length >= OSCILLATION_WINDOW) {
-              const unique = new Set(ctx.recentTools).size
-              if (unique / ctx.recentTools.length <= OSCILLATION_UNIQUE_RATIO) return "oscillation"
-            }
-            if (ctx.noEditStreak >= NO_EDIT_STREAK_THRESHOLD) return "no_edit"
-            return "doom"
-          }
-          return "none"
-        },
+get loopReason() {
+           if (ctx.loopDetected) {
+             if (ctx.churnStreak >= CHURN_STREAK_THRESHOLD) return "churn"
+             if (ctx.recentTools.length >= OSCILLATION_WINDOW) {
+               const unique = new Set(ctx.recentTools).size
+               if (unique / ctx.recentTools.length <= OSCILLATION_UNIQUE_RATIO) return "oscillation"
+             }
+             if (ctx.noEditStreak >= NO_EDIT_STREAK_THRESHOLD) return "no_edit"
+             if (ctx.reasoningHistory.length >= REASONING_LOOP_THRESHOLD) return "reasoning"
+             return "doom"
+           }
+           return "none"
+         },
         updateToolCall,
         completeToolCall,
         process,
