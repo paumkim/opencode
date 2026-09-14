@@ -22,6 +22,8 @@ import { OpenAIOptions } from "./utils/openai-options"
 import { Lifecycle } from "./utils/lifecycle"
 import { ToolSchemaProjection } from "./utils/tool-schema"
 import { ToolStream } from "./utils/tool-stream"
+import { TextToolCall } from "./utils/text-tool-call"
+import { TextReasoning } from "./utils/text-reasoning"
 
 const ADAPTER = "openai-chat"
 const IMAGE_MIMES = new Set<string>(ProviderShared.IMAGE_MIMES)
@@ -166,6 +168,11 @@ interface ParserState {
   readonly usage?: Usage
   readonly finishReason?: FinishReason
   readonly lifecycle: Lifecycle.State
+  /** Accumulated assistant text so text-embedded tool calls can be extracted at halt. */
+  readonly text: string
+  /** Whether the model is declared to emit text-embedded tool calls / reasoning. */
+  readonly textToolCall: boolean
+  readonly textReasoning: boolean
 }
 
 const invalid = ProviderShared.invalidRequest
@@ -419,9 +426,12 @@ const step = (state: ParserState, event: OpenAIChatEvent) =>
     if (delta?.reasoning_content)
       lifecycle = Lifecycle.reasoningDelta(lifecycle, events, "reasoning-0", delta.reasoning_content)
 
+    let text = state.text
+
     if (delta?.content) {
       lifecycle = Lifecycle.reasoningEnd(lifecycle, events, "reasoning-0")
       lifecycle = Lifecycle.textDelta(lifecycle, events, "text-0", delta.content)
+      text += delta.content
     }
 
     if (toolDeltas.length) lifecycle = Lifecycle.reasoningEnd(lifecycle, events, "reasoning-0")
@@ -454,6 +464,9 @@ const step = (state: ParserState, event: OpenAIChatEvent) =>
         usage,
         finishReason,
         lifecycle,
+        text,
+        textToolCall: state.textToolCall,
+        textReasoning: state.textReasoning,
       },
       events,
     ] as const
@@ -461,9 +474,29 @@ const step = (state: ParserState, event: OpenAIChatEvent) =>
 
 const finishEvents = (state: ParserState): ReadonlyArray<LLMEvent> => {
   const events: LLMEvent[] = []
-  const hasToolCalls = state.toolCallEvents.length > 0
+  const hasStructuredToolCalls = state.toolCallEvents.length > 0
+  // Plain assistant text was already streamed delta-by-delta through
+  // `Lifecycle.textDelta` in `step`, so it is never re-emitted here. Only
+  // envelopes embedded in the accumulated text are rewritten at halt: the
+  // surrounding prose has already been published and must not be duplicated.
+  const text = state.text
+
+  // Text-embedded reasoning / tool-call extraction is opt-in per model via
+  // `ModelCompatibility.textToolCall` / `textReasoning`. Structured providers
+  // (native OpenAI, DeepSeek, etc.) never run it, so a stray `<thinking>`
+  // block in ordinary chat text is left untouched. This is what keeps the
+  // auto-correction from rewriting normal prose for the vast majority of
+  // models — it only fires for the families that actually emit envelopes.
+  if (state.textReasoning) {
+    const reasoning = TextReasoning.parse(text)
+    if (reasoning) events.push(...TextReasoning.toEvents(reasoning))
+  }
+  const extracted = state.textToolCall ? TextToolCall.parse(text) : undefined
+  if (extracted) events.push(...TextToolCall.toEvents(extracted))
+
+  const hasToolCalls = hasStructuredToolCalls || (extracted?.length ?? 0) > 0
   const reason = state.finishReason === "stop" && hasToolCalls ? "tool-calls" : state.finishReason
-  const lifecycle = state.toolCallEvents.length ? Lifecycle.stepStart(state.lifecycle, events) : state.lifecycle
+  const lifecycle = hasToolCalls ? Lifecycle.stepStart(state.lifecycle, events) : state.lifecycle
   events.push(...state.toolCallEvents)
   if (reason) Lifecycle.finish(lifecycle, events, { reason, usage: state.usage })
   return events
@@ -486,7 +519,14 @@ export const protocol = Protocol.make({
   },
   stream: {
     event: Protocol.jsonEvent(OpenAIChatEvent),
-    initial: () => ({ tools: ToolStream.empty<number>(), toolCallEvents: [], lifecycle: Lifecycle.initial() }),
+    initial: (request: LLMRequest) => ({
+      tools: ToolStream.empty<number>(),
+      toolCallEvents: [],
+      lifecycle: Lifecycle.initial(),
+      text: "",
+      textToolCall: request.model.compatibility?.textToolCall !== undefined,
+      textReasoning: request.model.compatibility?.textReasoning !== undefined,
+    }),
     step,
     onHalt: finishEvents,
   },
