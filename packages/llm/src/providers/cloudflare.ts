@@ -3,7 +3,7 @@ import * as OpenAICompatibleChat from "../protocols/openai-compatible-chat"
 import { Auth } from "../route/auth"
 import { AuthOptions, type AtLeastOne, type ProviderAuthOption } from "../route/auth-options"
 import type { RouteDefaultsInput } from "../route/client"
-import { ProviderID, type ModelID } from "../schema"
+import { ProviderID, type ModelID, type ModelCompatibility } from "../schema"
 
 export const aiGatewayID = ProviderID.make("cloudflare-ai-gateway")
 export const workersAIID = ProviderID.make("cloudflare-workers-ai")
@@ -98,7 +98,8 @@ const configureAIGateway = (options: AIGatewayOptions) => {
   })
   return {
     id: aiGatewayID,
-    model: (modelID: string | ModelID) => route.model({ id: modelID }),
+    model: (modelID: string | ModelID, compatibility?: ModelCompatibility.Input) =>
+      route.model({ id: modelID, ...(compatibility !== undefined ? { compatibility } : {}) }),
     configure: configureAIGateway,
   }
 }
@@ -111,7 +112,8 @@ const configureWorkersAI = (options: WorkersAIOptions) => {
   })
   return {
     id: workersAIID,
-    model: (modelID: string | ModelID) => route.model({ id: modelID }),
+    model: (modelID: string | ModelID, compatibility?: ModelCompatibility.Input) =>
+      route.model({ id: modelID, ...(compatibility !== undefined ? { compatibility } : {}) }),
     configure: configureWorkersAI,
   }
 }

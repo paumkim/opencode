@@ -1,6 +1,6 @@
 import { AuthOptions, type ProviderAuthOption } from "../route/auth-options"
 import type { Route, RouteDefaultsInput } from "../route/client"
-import { ProviderID, type ModelID } from "../schema"
+import { ProviderID, type ModelID, type ModelCompatibility } from "../schema"
 import * as OpenAIChat from "../protocols/openai-chat"
 import * as OpenAIResponses from "../protocols/openai-responses"
 import { withOpenAIOptions, type OpenAIProviderOptionsInput } from "./openai-options"
@@ -39,11 +39,16 @@ export const configure = (input: Config = {}) => {
   const responsesWebSocketRoute = configuredRoute(OpenAIResponses.webSocketRoute, input)
   const chatRoute = configuredRoute(OpenAIChat.route, input)
   const modelDefaults = defaults(input)
-  const responses = (id: string | ModelID) =>
-    responsesRoute.with(withOpenAIOptions(id, modelDefaults, { textVerbosity: true })).model({ id })
-  const responsesWebSocket = (id: string | ModelID) =>
-    responsesWebSocketRoute.with(withOpenAIOptions(id, modelDefaults, { textVerbosity: true })).model({ id })
-  const chat = (id: string | ModelID) => chatRoute.with(withOpenAIOptions(id, modelDefaults)).model({ id })
+  const responses = (id: string | ModelID, compatibility?: ModelCompatibility.Input) =>
+    responsesRoute
+      .with(withOpenAIOptions(id, modelDefaults, { textVerbosity: true }))
+      .model({ id, ...(compatibility !== undefined ? { compatibility } : {}) })
+  const responsesWebSocket = (id: string | ModelID, compatibility?: ModelCompatibility.Input) =>
+    responsesWebSocketRoute
+      .with(withOpenAIOptions(id, modelDefaults, { textVerbosity: true }))
+      .model({ id, ...(compatibility !== undefined ? { compatibility } : {}) })
+  const chat = (id: string | ModelID, compatibility?: ModelCompatibility.Input) =>
+    chatRoute.with(withOpenAIOptions(id, modelDefaults)).model({ id, ...(compatibility !== undefined ? { compatibility } : {}) })
 
   return {
     id,

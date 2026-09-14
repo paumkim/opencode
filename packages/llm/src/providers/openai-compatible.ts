@@ -1,4 +1,4 @@
-import { ProviderID, type ModelID } from "../schema"
+import { ProviderID, type ModelID, type ModelCompatibility } from "../schema"
 import * as OpenAICompatibleChat from "../protocols/openai-compatible-chat"
 import type { RouteDefaultsInput } from "../route/client"
 import { AuthOptions, type ProviderAuthOption } from "../route/auth-options"
@@ -30,7 +30,8 @@ export const configure = (input: GenericModelOptions) => {
   })
   return {
     id: ProviderID.make(provider),
-    model: (modelID: string | ModelID) => route.model({ id: modelID, provider: ProviderID.make(provider) }),
+    model: (modelID: string | ModelID, compatibility?: ModelCompatibility.Input) =>
+      route.model({ id: modelID, provider: ProviderID.make(provider), ...(compatibility !== undefined ? { compatibility } : {}) }),
     configure,
   }
 }

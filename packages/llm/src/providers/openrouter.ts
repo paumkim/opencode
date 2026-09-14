@@ -4,7 +4,7 @@ import { Endpoint } from "../route/endpoint"
 import { Framing } from "../route/framing"
 import { Protocol } from "../route/protocol"
 import { AuthOptions, type ProviderAuthOption } from "../route/auth-options"
-import { ProviderID, type ModelID, type ProviderOptions } from "../schema"
+import { ProviderID, type ModelID, type ModelCompatibility, type ProviderOptions } from "../schema"
 import * as OpenAICompatibleProfiles from "./openai-compatible-profile"
 import * as OpenAIChat from "../protocols/openai-chat"
 import { isRecord } from "../protocols/shared"
@@ -89,7 +89,8 @@ export const configure = (input: ModelOptions = {}) => {
   const route = configuredRoute(input)
   return {
     id,
-    model: (modelID: string | ModelID) => route.model({ id: modelID }),
+    model: (modelID: string | ModelID, compatibility?: ModelCompatibility.Input) =>
+    route.model({ id: modelID, ...(compatibility !== undefined ? { compatibility } : {}) }),
     configure,
   }
 }

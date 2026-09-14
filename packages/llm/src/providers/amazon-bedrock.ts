@@ -1,6 +1,6 @@
 import type { RouteDefaultsInput } from "../route/client"
 import { Auth } from "../route/auth"
-import { ProviderID, type ModelID } from "../schema"
+import { ProviderID, type ModelID, type ModelCompatibility } from "../schema"
 import * as BedrockConverse from "../protocols/bedrock-converse"
 import type { BedrockCredentials } from "../protocols/bedrock-converse"
 
@@ -34,7 +34,8 @@ export const configure = (input: Config = {}) => {
   const route = configuredRoute(input)
   return {
     id,
-    model: (modelID: string | ModelID) => route.model({ id: modelID }),
+    model: (modelID: string | ModelID, compatibility?: ModelCompatibility.Input) =>
+    route.model({ id: modelID, ...(compatibility !== undefined ? { compatibility } : {}) }),
     configure,
   }
 }

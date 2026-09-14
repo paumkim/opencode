@@ -722,6 +722,31 @@ describe("OpenAI Chat route", () => {
       }),
     )
 
+    it.effect("accepts compatibility through the typed facade like Model.update", () =>
+      Effect.gen(function* () {
+        // The widened facade factory must be equivalent to post-processing the
+        // model object — both must opt the model into text extraction.
+        const viaFacade = OpenAI.configure({ baseURL: "https://api.openai.test/v1/", apiKey: "test" }).chat(
+          "gpt-4o-mini",
+          { textToolCall: "dots" },
+        )
+        const viaUpdate = Model.update(model, { compatibility: { textToolCall: "dots" } })
+        expect(viaFacade.compatibility?.textToolCall).toBe("dots")
+        expect(viaUpdate.compatibility?.textToolCall).toBe("dots")
+
+        const body = sseEvents(
+          deltaChunk({ role: "assistant", content: "Run it.\n" }),
+          deltaChunk({ content: '<tool_call>{"name":"bash","arguments":{"command":"ls"}}</tool_call>Done.' }),
+          finishChunk("stop"),
+        )
+        const response = yield* LLMClient.generate(
+          LLM.request({ id: "req_facade_compat", model: viaFacade, prompt: "run" }),
+        ).pipe(Effect.provide(fixedResponse(body)))
+
+        expect(response.toolCalls).toMatchObject([{ type: "tool-call", name: "bash", input: { command: "ls" } }])
+      }),
+    )
+
     it.effect("one malformed envelope does not drop the well-formed ones", () =>
       Effect.gen(function* () {
         const body = sseEvents(

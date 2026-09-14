@@ -1,6 +1,6 @@
 import { AuthOptions, type ProviderAuthOption } from "../route/auth-options"
 import type { RouteDefaultsInput } from "../route/client"
-import { ProviderID, type ModelID } from "../schema"
+import { ProviderID, type ModelID, type ModelCompatibility } from "../schema"
 import * as OpenAICompatibleProfiles from "./openai-compatible-profile"
 import * as OpenAICompatibleChat from "../protocols/openai-compatible-chat"
 import * as OpenAIResponses from "../protocols/openai-responses"
@@ -39,8 +39,10 @@ const configuredChatRoute = (input: ModelOptions) => {
 export const configure = (input: ModelOptions = {}) => {
   const responsesRoute = configuredResponsesRoute(input)
   const chatRoute = configuredChatRoute(input)
-  const responses = (modelID: string | ModelID) => responsesRoute.model({ id: modelID })
-  const chat = (modelID: string | ModelID) => chatRoute.model({ id: modelID })
+  const responses = (modelID: string | ModelID, compatibility?: ModelCompatibility.Input) =>
+    responsesRoute.model({ id: modelID, ...(compatibility !== undefined ? { compatibility } : {}) })
+  const chat = (modelID: string | ModelID, compatibility?: ModelCompatibility.Input) =>
+    chatRoute.model({ id: modelID, ...(compatibility !== undefined ? { compatibility } : {}) })
   return {
     id,
     model: responses,

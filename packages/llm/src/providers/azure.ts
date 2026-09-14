@@ -1,7 +1,7 @@
 import { Auth } from "../route/auth"
 import { type AtLeastOne, type ProviderAuthOption } from "../route/auth-options"
 import type { Route as RouteDef, RouteDefaultsInput } from "../route/client"
-import { ProviderID, type ModelID } from "../schema"
+import { ProviderID, type ModelID, type ModelCompatibility } from "../schema"
 import * as OpenAIChat from "../protocols/openai-chat"
 import * as OpenAIResponses from "../protocols/openai-responses"
 import { withOpenAIOptions, type OpenAIProviderOptionsInput } from "./openai-options"
@@ -89,15 +89,20 @@ export const configure = (input: Config) => {
   const configuredChatRoute = configuredRoute(chatRoute, input)
   const modelDefaults = defaults(input)
 
-  const responses = (modelID: string | ModelID) =>
-    configuredResponsesRoute.with(withOpenAIOptions(modelID, modelDefaults)).model({ id: modelID })
+  const responses = (modelID: string | ModelID, compatibility?: ModelCompatibility.Input) =>
+    configuredResponsesRoute
+      .with(withOpenAIOptions(modelID, modelDefaults))
+      .model({ id: modelID, ...(compatibility !== undefined ? { compatibility } : {}) })
 
-  const chat = (modelID: string | ModelID) =>
-    configuredChatRoute.with(withOpenAIOptions(modelID, modelDefaults)).model({ id: modelID })
+  const chat = (modelID: string | ModelID, compatibility?: ModelCompatibility.Input) =>
+    configuredChatRoute
+      .with(withOpenAIOptions(modelID, modelDefaults))
+      .model({ id: modelID, ...(compatibility !== undefined ? { compatibility } : {}) })
 
   return {
     id,
-    model: (modelID: string | ModelID) => (input.useCompletionUrls === true ? chat(modelID) : responses(modelID)),
+    model: (modelID: string | ModelID, compatibility?: ModelCompatibility.Input) =>
+      input.useCompletionUrls === true ? chat(modelID, compatibility) : responses(modelID, compatibility),
     responses,
     chat,
     configure,

@@ -1,7 +1,7 @@
 import type { RouteDefaultsInput } from "../route/client"
 import { Auth } from "../route/auth"
 import type { ProviderAuthOption } from "../route/auth-options"
-import { ProviderID, type ModelID } from "../schema"
+import { ProviderID, type ModelID, type ModelCompatibility } from "../schema"
 import * as AnthropicMessages from "../protocols/anthropic-messages"
 
 export const id = ProviderID.make("anthropic")
@@ -26,7 +26,8 @@ export const configure = (input: Config = {}) => {
   const route = configuredRoute(input)
   return {
     id,
-    model: (modelID: string | ModelID) => route.model({ id: modelID }),
+    model: (modelID: string | ModelID, compatibility?: ModelCompatibility.Input) =>
+    route.model({ id: modelID, ...(compatibility !== undefined ? { compatibility } : {}) }),
     configure,
   }
 }
