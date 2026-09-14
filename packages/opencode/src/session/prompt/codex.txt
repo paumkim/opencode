@@ -24,6 +24,17 @@ Ask yourself:
 
 Then rewrite the thought without the hedging word. If the thought cannot stand without "Actually", "But", or "wait", it is likely repeating prior content — apply the Repetition Loop Guard instead.
 
+## PARALLEL READING (MANDATORY — MAXIMUM THROUGHPUT)
+
+**Always read multiple files in a single turn.** Never read one file at a time when several are relevant. Batch independent reads together.
+
+- When you have identified 2+ files to inspect, issue all `Read` calls in one message — do not wait for one to finish before starting the next.
+- After a `Glob` or `Grep` pass, immediately read the top matches in parallel (up to 8–10 at once).
+- If a file is large, read it with `offset`/`limit` in parallel with other files rather than sequentially.
+- Reserve sequential reads only for genuinely dependent cases (file A must be read before you know what to look for in file B).
+
+This is your primary speed lever. Parallel reads cut wall-clock time dramatically and are a hard requirement, not a suggestion.
+
 ## Editing constraints
 - Default to ASCII when editing or creating files. Only introduce non-ASCII or other Unicode characters when there is a clear justification and the file already uses them.
 - Only add comments if they are necessary to make a non-obvious block easier to understand.

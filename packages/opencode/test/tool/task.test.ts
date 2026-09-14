@@ -98,6 +98,7 @@ const seed = Effect.fn("TaskToolTest.seed")(function* (title = "Pinned") {
 
 function stubOps(opts?: {
   onPrompt?: (input: SessionPrompt.PromptInput) => void
+  onCompact?: (input: Parameters<TaskPromptOps["compact"]>[0]) => void
   text?: string
   error?: NonNullable<SessionV1.Assistant["error"]>
   toolError?: string
@@ -110,6 +111,7 @@ function stubOps(opts?: {
         opts?.onPrompt?.(input)
         return reply(input, opts?.text ?? "done", opts?.error, opts?.toolError)
       }),
+    compact: (input) => Effect.sync(() => opts?.onCompact?.(input)),
   }
 }
 
@@ -436,6 +438,7 @@ describe("tool.task", () => {
             ready.resolve(input)
             return cancelled.promise
           }).pipe(Effect.as(reply(input, "cancelled"))),
+        compact: () => Effect.void,
       }
 
       const fiber = yield* def
@@ -707,6 +710,7 @@ describe("tool.task", () => {
             return reply(input, "background done")
           })
         },
+        compact: () => Effect.void,
       }
 
       const fiber = yield* def

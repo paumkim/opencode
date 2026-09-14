@@ -8,6 +8,7 @@ import { ShellTool } from "./shell"
 import { EditTool } from "./edit"
 import { GlobTool } from "./glob"
 import { GrepTool } from "./grep"
+import { CompactTool } from "./compact"
 import { ReadTool } from "./read"
 import { TaskTool } from "./task"
 import { Database } from "@opencode-ai/core/database/database"
@@ -99,6 +100,7 @@ const layer = Layer.effect(
     const mcp = yield* MCP.Service
 
     const invalid = yield* InvalidTool
+    const compact = yield* CompactTool
     const task = yield* TaskTool
     const read = yield* ReadTool
     const question = yield* QuestionTool
@@ -208,6 +210,7 @@ const layer = Layer.effect(
 
         const tool = yield* Effect.all({
           invalid: Tool.init(invalid),
+          compact: Tool.init(compact),
           shell: Tool.init(shell),
           read: Tool.init(read),
           glob: Tool.init(globtool),
@@ -230,6 +233,7 @@ const layer = Layer.effect(
           custom,
           builtin: [
             tool.invalid,
+            tool.compact,
             ...(questionEnabled ? [tool.question] : []),
             tool.shell,
             tool.read,

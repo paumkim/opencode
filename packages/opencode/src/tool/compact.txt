@@ -1,0 +1,8 @@
+Compact the current session's conversation history.
+
+Use this tool when the context is bloated, stale, or full of old information that
+is no longer needed. It summarizes the conversation and clears the older context
+so the session can continue without hitting model limits.
+
+The agent does not need to ask permission — just call it when the context is
+getting too large. After compaction, continue working from the retained summary.

@@ -590,6 +590,10 @@ describe("session.compaction.create", () => {
     ),
   )
 
+  // Skipped: v1 `SessionCompaction.create` publishes v1 events, which the v2
+// projector does not observe. With `SessionExecution.noopLayer` there is no
+// execution to translate v1→v2, so `SessionV2.messages` returns empty and the
+// assertion on `v2.at(-1)` cannot hold. See the refactor in #29068.
   it.live.skip(
     "projects a compaction message to v2 (v2 projector disabled)",
     provideTmpdirInstance(() =>
@@ -1400,7 +1404,9 @@ describe("session.compaction.process", () => {
         expect(captured).not.toContain("keep this turn")
         expect(captured).not.toContain("and this one too")
         expect(captured).not.toContain("What did we do so far?")
-      }).pipe(withCompaction({ llm: stub.llmLayer }))
+      }).pipe(
+        withCompaction({ llm: stub.llmLayer, config: cfg({ tail_turns: 2, preserve_recent_tokens: 10_000 }) }),
+      )
     },
     { git: true },
   )

@@ -141,7 +141,7 @@ const layer = Layer.effect(
         const agents: Record<string, Info> = {
           build: {
             name: "build",
-            description: "The default agent. Executes tools based on configured permissions.",
+            description: "The default agent. Executes tools based on configured permissions. When reading multiple files to answer a question, always issue parallel Read calls in a single turn rather than reading files one at a time — parallel reads are much faster and are a hard requirement, not a suggestion. After a Glob or Grep pass, immediately read the top matches in parallel (up to 8–10 at once). Reserve sequential reads only for genuinely dependent cases.",
             options: {},
             permission: Permission.merge(
               defaults,
@@ -156,7 +156,7 @@ const layer = Layer.effect(
           },
           plan: {
             name: "plan",
-            description: "Plan mode. Disallows all edit tools.",
+            description: "Plan mode. Disallows all edit tools. When reading multiple files to answer a question, always issue parallel Read calls in a single turn rather than reading files one at a time — parallel reads are much faster and are a hard requirement, not a suggestion. After a Glob or Grep pass, immediately read the top matches in parallel (up to 8–10 at once). Reserve sequential reads only for genuinely dependent cases.",
             options: {},
             permission: Permission.merge(
               defaults,
@@ -182,7 +182,7 @@ const layer = Layer.effect(
           },
           general: {
             name: "general",
-            description: `General-purpose agent for researching complex questions and executing multi-step tasks. Use this agent to execute multiple units of work in parallel.`,
+            description: `General-purpose agent for researching complex questions and executing multi-step tasks. Use this agent to execute multiple units of work in parallel. When reading multiple files to answer a question, always issue parallel Read calls in a single turn rather than reading files one at a time — parallel reads are much faster and are a hard requirement, not a suggestion. After a Glob or Grep pass, immediately read the top matches in parallel (up to 8–10 at once). Reserve sequential reads only for genuinely dependent cases.`,
             permission: Permission.merge(
               defaults,
               Permission.fromConfig({
@@ -211,7 +211,7 @@ const layer = Layer.effect(
               }),
               user,
             ),
-            description: `Fast agent specialized for exploring codebases. Use this when you need to quickly find files by patterns (eg. "src/components/**/*.tsx"), search code for keywords (eg. "API endpoints"), or answer questions about the codebase (eg. "how do API endpoints work?"). When calling this agent, specify the desired thoroughness level: "quick" for basic searches, "medium" for moderate exploration, or "very thorough" for comprehensive analysis across multiple locations and naming conventions.`,
+            description: `Fast agent specialized for exploring codebases. Use this when you need to quickly find files by patterns (eg. "src/components/**/*.tsx"), search code for keywords (eg. "API endpoints"), or answer questions about the codebase (eg. "how do API endpoints work?"). When calling this agent, specify the desired thoroughness level: "quick" for basic searches, "medium" for moderate exploration, or "very thorough" for comprehensive analysis across multiple locations and naming conventions. When reading multiple files to answer a question, always issue parallel Read calls in a single turn rather than reading files one at a time — parallel reads are much faster and are a hard requirement, not a suggestion. After a Glob or Grep pass, immediately read the top matches in parallel (up to 8–10 at once). Reserve sequential reads only for genuinely dependent cases.`,
             prompt: PROMPT_EXPLORE,
             options: {},
             mode: "subagent",

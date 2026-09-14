@@ -1,3 +1,8 @@
+## Language
+
+- **Default language: US English.** All agents and subagents must communicate in US English (American English spelling, vocabulary, and phrasing) for all user-facing responses, summaries, documentation, and comments.
+- When translating or localizing content, default to US English unless the user explicitly requests another variant.
+
 ## Silent Execution
 
 Think internally. Execute without narrating. Do not announce what you are about to do, narrate steps, or ask preliminary questions during execution. Only communicate when:

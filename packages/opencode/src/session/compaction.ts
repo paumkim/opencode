@@ -178,7 +178,7 @@ export interface Interface {
   readonly create: (input: {
     sessionID: SessionID
     agent: string
-    model: { providerID: ProviderV2.ID; modelID: ModelV2.ID }
+    model?: { providerID: ProviderV2.ID; modelID: ModelV2.ID }
     auto: boolean
     overflow?: boolean
   }) => Effect.Effect<void>
@@ -559,14 +559,22 @@ const layer = Layer.effect(
     const create = Effect.fn("SessionCompaction.create")(function* (input: {
       sessionID: SessionID
       agent: string
-      model: { providerID: ProviderV2.ID; modelID: ModelV2.ID }
+      model?: { providerID: ProviderV2.ID; modelID: ModelV2.ID }
       auto: boolean
       overflow?: boolean
     }) {
+      let model = input.model
+      if (!model) {
+        const msgs = yield* session.messages({ sessionID: input.sessionID }).pipe(Effect.orDie)
+        const last = msgs.findLast((m) => m.info.role === "user" && m.info.model)
+        if (!last || last.info.role !== "user" || !last.info.model)
+          throw new Error("Could not resolve model for compaction")
+        model = { providerID: last.info.model.providerID, modelID: last.info.model.modelID }
+      }
       const msg = yield* session.updateMessage({
         id: MessageID.ascending(),
         role: "user",
-        model: input.model,
+        model,
         sessionID: input.sessionID,
         agent: input.agent,
         time: { created: Date.now() },
