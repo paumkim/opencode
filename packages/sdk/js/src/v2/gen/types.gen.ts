@@ -1688,7 +1688,10 @@ export type AgentConfig = {
   variant?: string
   temperature?: number
   top_p?: number
+  frequency_penalty?: number
+  presence_penalty?: number
   prompt?: string
+  context?: "minimal" | "full"
   tools?: {
     [key: string]: boolean
   }
@@ -1710,6 +1713,8 @@ export type AgentConfig = {
     | unknown
     | string
     | number
+    | "minimal"
+    | "full"
     | {
         [key: string]: boolean
       }
@@ -2020,6 +2025,7 @@ export type Config = {
     tail_turns?: number
     preserve_recent_tokens?: number
     reserved?: number
+    threshold?: number
   }
   experimental?: {
     disable_paste_summary?: boolean
@@ -2029,6 +2035,14 @@ export type Config = {
     continue_loop_on_deny?: boolean
     mcp_timeout?: number
     policies?: Array<ConfigV2ExperimentalPolicy>
+    max_subagent_depth?: number
+    checkpoint?: {
+      enabled?: boolean
+      auto?: boolean
+    }
+    max_steps?: number
+    length_continue?: boolean
+    stream_delay?: number
   }
 }
 
@@ -2366,6 +2380,7 @@ export type Agent = {
   }
   variant?: string
   prompt?: string
+  context?: "minimal" | "full"
   options: {
     [key: string]: unknown
   }
@@ -2774,7 +2789,7 @@ export type SessionHistory = {
   hasMore: boolean
 }
 
-export type SessionDurableEventStream = string
+export type SessionDurableEvent1 = string
 
 export type SessionMessagesResponse = {
   data: Array<SessionMessage>
@@ -2944,8 +2959,6 @@ export type V2Event =
   | WorktreeFailed
   | ServerConnected
   | GlobalDisposed
-
-export type V2EventStream = string
 
 export type ForbiddenError = {
   _tag: "ForbiddenError"
@@ -3897,6 +3910,7 @@ export type AgentV2Info = {
   model?: ModelRef
   request: ProviderRequest
   system?: string
+  context?: "minimal" | "full"
   description?: string
   mode: "subagent" | "primary" | "all"
   hidden: boolean
@@ -7096,6 +7110,8 @@ export type BadRequestError = {
     kind?: "Params" | "Headers" | "Query" | "Body" | "Payload"
   }
 }
+
+export type VStream = string
 
 export type AuthRemoveData = {
   body?: never
@@ -11909,7 +11925,7 @@ export type V2SessionEventsResponses = {
   200: {
     id: string
     event: string
-    data: SessionDurableEventStream
+    data: SessionDurableEvent1
   }
 }
 
@@ -12992,7 +13008,7 @@ export type V2EventSubscribeResponses = {
   /**
    * Event stream
    */
-  200: V2Event
+  200: VStream
 }
 
 export type V2EventSubscribeResponse = V2EventSubscribeResponses[keyof V2EventSubscribeResponses]

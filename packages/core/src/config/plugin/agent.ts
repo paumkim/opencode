@@ -34,6 +34,7 @@ const agentKeys = new Set([
   "variant",
   "request",
   "system",
+  "context",
   "description",
   "mode",
   "hidden",
@@ -100,6 +101,7 @@ export const Plugin = define({
                 Object.assign(agent.request.body, item.request.body ?? {})
               }
               if (item.system !== undefined) agent.system = item.system
+              if (item.context !== undefined) agent.context = item.context
               if (item.description !== undefined) agent.description = item.description
               if (item.mode !== undefined) agent.mode = item.mode
               if (item.hidden !== undefined) agent.hidden = item.hidden
