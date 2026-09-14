@@ -26,6 +26,14 @@ target
 .scripts
 .direnv/
 
+# Local side-project source (skills under projects/ are tracked intentionally)
+projects/autonomous-robots/package.json
+projects/autonomous-robots/src/
+projects/autonomous-robots/test/
+projects/autonomous-robots/tsconfig.json
+projects/autonomous-robots/bun.lock
+.agents/
+
 # Local dev files
 opencode-dev
 UPCOMING_CHANGELOG.md
