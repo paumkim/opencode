@@ -96,6 +96,33 @@ describe("TextToolCall", () => {
   test("returns undefined when no envelope present", () => {
     expect(TextToolCall.parse("just text")).toBeUndefined()
   })
+
+  test("does not crash on malformed JSON inside a complete <tool_call> tag", () => {
+    // A truncated/invalid arguments blob must not throw out of parse: the
+    // harness has a repair path downstream, and a parse-time throw would drop
+    // every well-formed call in the same turn.
+    const text =
+      '<tool_call>{"name":"read","arguments":{"path":"/a"}}</tool_call>' +
+      '<tool_call>{"name":"write","arguments":{"path":}}</tool_call>'
+
+    expect(() => TextToolCall.parse(text)).not.toThrow()
+    const result = TextToolCall.parse(text)
+    expect(result).toBeDefined()
+    expect(result).toHaveLength(1)
+    expect(result![0].name).toBe("read")
+  })
+
+  test("does not crash on malformed JSON in a bare stream-tail <tool_call>", () => {
+    const text =
+      '<tool_call>{"name":"read","arguments":{"path":"/a"}}</tool_call>' +
+      '<tool_call>{"name":"write","arguments":{"path":'
+
+    expect(() => TextToolCall.parse(text)).not.toThrow()
+    const result = TextToolCall.parse(text)
+    expect(result).toBeDefined()
+    expect(result).toHaveLength(1)
+    expect(result![0].name).toBe("read")
+  })
 })
 
 describe("TextReasoning", () => {

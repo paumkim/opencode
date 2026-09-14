@@ -9,7 +9,7 @@ import { ProviderShared } from "../../src/protocols/shared"
 import { Auth, LLMClient } from "../../src/route"
 import { it } from "../lib/effect"
 import { dynamicResponse, fixedResponse, truncatedStream } from "../lib/http"
-import { deltaChunk, usageChunk } from "../lib/openai-chunks"
+import { deltaChunk, finishChunk, usageChunk } from "../lib/openai-chunks"
 import { sseEvents } from "../lib/sse"
 
 const TargetJson = Schema.fromJsonString(Schema.Unknown)
@@ -19,6 +19,12 @@ const decodeJson = Schema.decodeUnknownSync(TargetJson)
 const model = OpenAIChat.route
   .with({ endpoint: { baseURL: "https://api.openai.test/v1/" }, auth: Auth.bearer("test") })
   .model({ id: "gpt-4o-mini" })
+
+// A model opted into text-embedded tool calls. Native structured providers
+// never run the envelope parser; only models carrying this compatibility flag
+// do, so a stray `<tool_call>` in ordinary prose is left untouched for the
+// ~90% of models that emit structured tool calls.
+const textToolCallModel = Model.update(model, { compatibility: { textToolCall: "dots" } })
 
 const request = LLM.request({
   id: "req_1",
@@ -653,6 +659,91 @@ describe("OpenAI Chat route", () => {
       expect(error.message).toContain("HTTP 400")
     }),
   )
+
+  describe("text-embedded tool calls (opt-in)", () => {
+    it.effect("extracts a dots_function_call envelope from accumulated text", () =>
+      Effect.gen(function* () {
+        const body = sseEvents(
+          deltaChunk({ role: "assistant", content: "Let me list the directory.\n" }),
+          deltaChunk({ content: "dots_function_call\ninvoke name=\"bash\">\nparameter name=\"command\">ls -la\n/invoke\n/dots_function_call\nDone." }),
+          deltaChunk({}, "stop"),
+        )
+        const response = yield* LLMClient.generate(
+          LLM.request({ id: "req_text_tool", model: textToolCallModel, prompt: "list" }),
+        ).pipe(Effect.provide(fixedResponse(body)))
+
+        expect(response.toolCalls).toMatchObject([
+          { type: "tool-call", name: "bash", input: { command: "ls -la" } },
+        ])
+        // The surrounding prose is preserved in the streamed text. The
+        // envelope is rewritten into a canonical tool-call event at halt; the
+        // model's literal text is left intact so the transcript matches what
+        // the provider actually emitted.
+        expect(response.text).toContain("Let me list the directory.")
+        expect(response.text).toContain("Done.")
+        expect(response.text).toContain("dots_function_call")
+      }),
+    )
+
+    it.effect("extracts a <tool_call> JSON envelope from accumulated text", () =>
+      Effect.gen(function* () {
+        const body = sseEvents(
+          deltaChunk({ role: "assistant", content: "I'll run it.\n" }),
+          deltaChunk({ content: '<tool_call>{"name":"bash","arguments":{"command":"ls -la"}}</tool_call>Done.' }),
+          deltaChunk({}, "stop"),
+        )
+        const response = yield* LLMClient.generate(
+          LLM.request({ id: "req_text_tool_json", model: textToolCallModel, prompt: "run" }),
+        ).pipe(Effect.provide(fixedResponse(body)))
+
+        expect(response.toolCalls).toMatchObject([
+          { type: "tool-call", name: "bash", input: { command: "ls -la" } },
+        ])
+        expect(response.text).toContain("I'll run it.")
+        expect(response.text).toContain("Done.")
+        expect(response.text).toContain("<tool_call>")
+      }),
+    )
+
+    it.effect("does not run envelope parsing for native structured providers", () =>
+      Effect.gen(function* () {
+        // No compatibility flag: a stray <tool_call> in prose must stay prose,
+        // not be rewritten into a tool call.
+        const body = sseEvents(
+          deltaChunk({ role: "assistant", content: 'Sure: <tool_call>{"name":"bash"}</tool_call>' }),
+          deltaChunk({}, "stop"),
+        )
+        const response = yield* LLMClient.generate(
+          LLM.request({ id: "req_native", model, prompt: "x" }),
+        ).pipe(Effect.provide(fixedResponse(body)))
+
+        expect(response.toolCalls).toEqual([])
+        expect(response.text).toBe('Sure: <tool_call>{"name":"bash"}</tool_call>')
+      }),
+    )
+
+    it.effect("one malformed envelope does not drop the well-formed ones", () =>
+      Effect.gen(function* () {
+        const body = sseEvents(
+          deltaChunk({ role: "assistant", content: "" }),
+          deltaChunk({
+            content:
+              '<tool_call>{"name":"read","arguments":{"path":"/a"}}</tool_call>' +
+              '<tool_call>{"name":"write","arguments":{"path":}}</tool_call>',
+          }),
+          finishChunk("stop"),
+        )
+        const response = yield* LLMClient.generate(
+          LLM.request({ id: "req_text_tool_malformed", model: textToolCallModel, prompt: "x" }),
+        ).pipe(Effect.provide(fixedResponse(body)))
+
+        // The malformed blob is skipped; the well-formed call still lands.
+        expect(response.toolCalls).toMatchObject([
+          { type: "tool-call", name: "read", input: { path: "/a" } },
+        ])
+      }),
+    )
+  })
 
   it.effect("short-circuits the upstream stream when the consumer takes a prefix", () =>
     Effect.gen(function* () {

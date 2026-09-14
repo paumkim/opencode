@@ -2,6 +2,21 @@ import { LLMEvent, type ProviderMetadata } from "../../schema"
 import { ProviderShared } from "../shared"
 
 /**
+ * Decode one JSON blob, swallowing malformed input. A single bad envelope
+ * must never crash the whole parse — the harness already has a repair path
+ * (`correctToolInput`) for malformed arguments downstream, and a parse-time
+ * throw would drop every well-formed call in the same turn along with it.
+ */
+const safeDecode = (json: string): Record<string, unknown> | undefined => {
+  try {
+    const decoded = ProviderShared.decodeJson(json)
+    return ProviderShared.isRecord(decoded) ? decoded : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
  * Some models emit tool calls as raw text instead of structured `tool_calls`.
  * opencode's protocol boundary expects structured `tool-call` events, so a
  * model that emits text-only tool calls appears to chat forever: the XML
@@ -82,8 +97,8 @@ const parseToolCallTag = (text: string): TextToolCall[] => {
   const calls: TextToolCall[] = []
   const seen = new Set<string>()
   const push = (json: string) => {
-    const decoded = ProviderShared.decodeJson(json)
-    if (!ProviderShared.isRecord(decoded)) return
+    const decoded = safeDecode(json)
+    if (!decoded) return
     const name = decoded.name
     const args = decoded.arguments
     if (typeof name !== "string") return
