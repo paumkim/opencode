@@ -1,6 +1,6 @@
 export * as Tool from "./tool"
 
-import { ToolDefinition, ToolFailure, ToolOutput, type ToolCall } from "@opencode-ai/llm"
+import { correctToolInput, ToolDefinition, ToolFailure, ToolOutput, type ToolCall } from "@opencode-ai/llm"
 import { Effect, JsonSchema, Schema } from "effect"
 import type { AgentV2 } from "../agent"
 import type { SessionMessage } from "../session/message"
@@ -88,9 +88,24 @@ export function make<
       definitions.set(name, definition)
       return definition
     },
-    settle: (call, context) =>
-      Schema.decodeUnknownEffect(config.input)(call.input).pipe(
-        Effect.mapError((error) => new ToolFailure({ message: `Invalid tool input: ${error.message}` })),
+    settle: (call, context) => {
+      // Harness-side auto-correction: the model does not always emit valid
+      // JSON for a tool call. Try a conservative repair against the declared
+      // schema before failing; unrepairable failures surface as tool errors so
+      // the model can self-correct on the next turn instead of executing with
+      // wrong arguments.
+      const corrected = correctToolInput(call.input, Schema.toJsonSchemaDocument(config.input).schema)
+      const decoded = corrected.repaired
+        ? Effect.succeed(corrected.input as unknown as Schema.Schema.Type<typeof config.input>)
+        : Schema.decodeUnknownEffect(config.input)(call.input)
+      return decoded.pipe(
+        Effect.mapError((error) =>
+          new ToolFailure({
+            message: corrected.repaired
+              ? `Invalid tool input (repaired: ${corrected.message ?? "unknown"}): ${error.message}`
+              : `Invalid tool input: ${error.message}`,
+          }),
+        ),
         Effect.flatMap((input) =>
           config.execute(input, context).pipe(
             Effect.flatMap((output) =>
@@ -126,7 +141,8 @@ export function make<
             })),
           ),
         ),
-      ),
+      )
+    },
   })
   return tool
 }

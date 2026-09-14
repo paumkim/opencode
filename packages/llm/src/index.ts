@@ -10,6 +10,7 @@ export type {
 } from "./route/client"
 export * from "./schema"
 export { Tool, ToolFailure, toDefinitions } from "./tool"
+export { correctToolInput } from "./protocols/utils/tool-correct"
 export { ToolRuntime } from "./tool-runtime"
 export type { DispatchResult as ToolDispatchResult, ToolSettlement } from "./tool-runtime"
 export type {
