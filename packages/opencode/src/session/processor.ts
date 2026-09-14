@@ -141,6 +141,13 @@ const layer = Layer.effect(
     const checkpoint = yield* Checkpoint.Service
     const database = yield* Database.Service
 
+    // Repetition streaks persist across turns. create() runs once per
+    // assistant message, so per-turn state cannot catch a model that repeats
+    // identical text or reasoning across prompts. These are keyed by session
+    // and reset only when the model takes real progress (a tool call).
+    const textLoop = new Map<SessionID, { text: string; count: number }>()
+    const reasoningLoop = new Map<SessionID, { text: string; count: number }>()
+
     const create = Effect.fn("SessionProcessor.create")(function* (input: Input) {
       // Pre-capture snapshot before the LLM stream starts. The AI SDK
       // may execute tools internally before emitting start-step events,
@@ -157,8 +164,6 @@ const layer = Layer.effect(
         needsCompaction: false,
         currentText: undefined,
         reasoningMap: {},
-        reasoningHistory: [],
-        textHistory: [],
         loopDetected: false,
         hasEditInStep: false,
         noEditStreak: 0,
@@ -365,17 +370,22 @@ case "reasoning-end": {
                }
                const reasoning = ctx.reasoningMap[value.id]
                if (reasoning?.text.trim()) {
-                 ctx.reasoningHistory.push(reasoning.text)
-                 const recent = ctx.reasoningHistory.slice(-REASONING_LOOP_THRESHOLD)
-                 if (
-                   recent.length === REASONING_LOOP_THRESHOLD &&
-                   recent.every((text) => text === recent[0])
-                 ) {
+                 const key = ctx.sessionID
+                 const entry = reasoningLoop.get(key) ?? { text: reasoning.text, count: 0 }
+                 if (entry.text === reasoning.text) {
+                   entry.count++
+                 } else {
+                   entry.text = reasoning.text
+                   entry.count = 1
+                 }
+                 reasoningLoop.set(key, entry)
+                 if (entry.count >= REASONING_LOOP_THRESHOLD) {
                    ctx.loopDetected = true
                    yield* Effect.logError("reasoning_loop", {
                      "session.id": ctx.sessionID,
                      messageID: ctx.assistantMessage.id,
-                     text: recent[0].slice(0, 200),
+                     text: reasoning.text.slice(0, 200),
+                     count: entry.count,
                    })
                  }
                }
@@ -660,21 +670,26 @@ case "reasoning-end": {
               ctx.currentText.time = { start: ctx.currentText.time?.start ?? end, end }
             }
             if (value.providerMetadata) ctx.currentText.metadata = value.providerMetadata
-            if (ctx.currentText.text.trim()) {
-              ctx.textHistory.push(ctx.currentText.text)
-              const recentTexts = ctx.textHistory.slice(-TEXT_LOOP_THRESHOLD)
-              if (
-                recentTexts.length === TEXT_LOOP_THRESHOLD &&
-                recentTexts.every((text) => text === recentTexts[0])
-              ) {
-                ctx.loopDetected = true
-                yield* Effect.logError("text_loop", {
-                  "session.id": ctx.sessionID,
-                  messageID: ctx.assistantMessage.id,
-                  text: recentTexts[0],
-                })
-              }
-            }
+if (ctx.currentText.text.trim()) {
+               const key = ctx.sessionID
+               const entry = textLoop.get(key) ?? { text: ctx.currentText.text, count: 0 }
+               if (entry.text === ctx.currentText.text) {
+                 entry.count++
+               } else {
+                 entry.text = ctx.currentText.text
+                 entry.count = 1
+               }
+               textLoop.set(key, entry)
+               if (entry.count >= TEXT_LOOP_THRESHOLD) {
+                 ctx.loopDetected = true
+                 yield* Effect.logError("text_loop", {
+                   "session.id": ctx.sessionID,
+                   messageID: ctx.assistantMessage.id,
+                   text: ctx.currentText.text,
+                   count: entry.count,
+                 })
+               }
+             }
             yield* session.updatePart(ctx.currentText)
             ctx.currentText = undefined
             return
@@ -784,8 +799,6 @@ case "reasoning-end": {
           yield* Effect.gen(function* () {
             ctx.currentText = undefined
             ctx.reasoningMap = {}
-            // reasoningHistory is intentionally NOT reset here: it accumulates across turns so a model repeating identical thinking 3x triggers reasoning_loop.
-            // textHistory is intentionally NOT reset here: it accumulates across turns so a model repeating identical output 3x triggers text_loop.
             ctx.loopDetected = false
             yield* status.set(ctx.sessionID, { type: "busy" })
             const stream = llm.stream(streamInput)
@@ -871,7 +884,7 @@ get loopReason() {
                if (unique / ctx.recentTools.length <= OSCILLATION_UNIQUE_RATIO) return "oscillation"
              }
              if (ctx.noEditStreak >= NO_EDIT_STREAK_THRESHOLD) return "no_edit"
-             if (ctx.reasoningHistory.length >= REASONING_LOOP_THRESHOLD) return "reasoning"
+             if (reasoningLoop.get(ctx.sessionID)?.count && reasoningLoop.get(ctx.sessionID)!.count >= REASONING_LOOP_THRESHOLD) return "reasoning"
              return "doom"
            }
            return "none"
