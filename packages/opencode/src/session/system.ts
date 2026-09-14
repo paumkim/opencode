@@ -3,17 +3,18 @@ import { Context, Effect, Layer } from "effect"
 
 import { InstanceState } from "@/effect/instance-state"
 
-import PROMPT_ANTHROPIC from "./prompt/anthropic.txt"
-import PROMPT_DEFAULT from "./prompt/default.txt"
-import PROMPT_BEAST from "./prompt/beast.txt"
-import PROMPT_GEMINI from "./prompt/gemini.txt"
-import PROMPT_GPT from "./prompt/gpt.txt"
-import PROMPT_ASTRA from "./prompt/gpt-astra.txt"
-import PROMPT_KIMI from "./prompt/kimi.txt"
-import PROMPT_META from "./prompt/meta.txt"
-
-import PROMPT_CODEX from "./prompt/codex.txt"
-import PROMPT_TRINITY from "./prompt/trinity.txt"
+import {
+  PROMPT_ANTHROPIC,
+  PROMPT_BEAST,
+  PROMPT_CODEX,
+  PROMPT_DEFAULT,
+  PROMPT_GEMINI,
+  PROMPT_GPT,
+  PROMPT_ASTRA,
+  PROMPT_KIMI,
+  PROMPT_META,
+  PROMPT_TRINITY,
+} from "./prompt/system-prompts"
 import type { Provider } from "@/provider/provider"
 import type { Agent } from "@/agent/agent"
 import { Permission } from "@/permission"

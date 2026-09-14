@@ -85,6 +85,9 @@ function loopBreakMessage(
     case "reasoning":
       msg = "You are repeating the same reasoning/thinking content across turns. Stop circling. Produce a concrete answer, make a tool call, or report your findings now."
       break
+    case "alternation":
+      msg = "You are alternating between the same two outputs without making progress. Stop cycling. Pick one direction and commit to it — either complete the task or report what is blocking you."
+      break
     default:
       msg = "You appear to be repeating the same tool call. Stop, then make an actual code change (edit/write/apply_patch) to progress the task. If the task is genuinely read-only, respond with your findings and stop."
   }
@@ -1174,9 +1177,9 @@ const layer = Layer.effect(
 
           if (
             lastAssistant?.finish &&
-            !["tool-calls"].includes(lastAssistant.finish) &&
+            !["tool-calls", "unknown"].includes(lastAssistant.finish) &&
             !hasToolCalls &&
-            lastUser.id < lastAssistant.id
+            lastAssistant.parentID === lastUser.id
           ) {
             const orphan = lastAssistantMsg?.parts.find(
               (part): part is SessionV1.ToolPart => part.type === "tool" && isOrphanedInterruptedTool(part),
