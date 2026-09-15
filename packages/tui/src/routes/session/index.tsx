@@ -20,6 +20,7 @@ import { mkdir, writeFile } from "node:fs/promises"
 import { useRoute, useRouteData } from "../../context/route"
 import { useProject } from "../../context/project"
 import { useSync } from "../../context/sync"
+import { useData } from "../../context/data"
 import { useEvent } from "../../context/event"
 import { SplitBorder } from "../../ui/border"
 import { useTuiPaths, useTuiTerminalEnvironment } from "../../context/runtime"
@@ -1357,6 +1358,7 @@ function UserMessage(props: {
 }) {
   const ctx = use()
   const local = useLocal()
+  const data = useData()
   const text = createMemo(() => {
     const texts = props.parts
       .map((x) => {
@@ -1444,7 +1446,9 @@ function UserMessage(props: {
         <box
           marginTop={1}
           border={["top"]}
-          title=" Compaction "
+          title={data.session.compactionCount(props.message.sessionID) > 0
+            ? ` Compaction Total:${data.session.compactionCount(props.message.sessionID)} `
+            : " Compaction "}
           titleAlignment="center"
           borderColor={theme.borderActive}
         />

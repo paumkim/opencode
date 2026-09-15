@@ -40,6 +40,7 @@ type Data = {
     message: Record<string, SessionMessage[]>
     permission: Record<string, PermissionV2Request[]>
     question: Record<string, QuestionV2Request[]>
+    compactionCount: Record<string, number>
   }
   project: {
     permission: Record<string, PermissionSavedInfo[]>
@@ -64,6 +65,7 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
         message: {},
         permission: {},
         question: {},
+        compactionCount: {},
       },
       project: {
         permission: {},
@@ -388,6 +390,7 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
               time: { created: event.data.timestamp },
             })
           })
+          result.session.incrementCompactionCount(event.data.sessionID)
           break
         case "reference.updated":
           void result.location.reference.refresh()
@@ -430,6 +433,12 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
             const result = await sdk.client.v2.session.messages({ sessionID }, { throwOnError: true })
             setStore("session", "message", sessionID, result.data.data)
           },
+        },
+        compactionCount(sessionID: string) {
+          return store.session.compactionCount[sessionID] ?? 0
+        },
+        incrementCompactionCount(sessionID: string) {
+          setStore("session", "compactionCount", sessionID, (count) => (count ?? 0) + 1)
         },
         permission: {
           list(sessionID: string) {

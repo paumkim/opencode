@@ -239,6 +239,14 @@ export function SessionTurn(
 
   const compaction = createMemo(() => parts().find((part) => part.type === "compaction"))
 
+  const compactionCount = createMemo(() => {
+    const messages = allMessages() ?? emptyMessages
+    return messages.reduce((count, msg) => {
+      const msgParts = list(data.store.part?.[msg.id], emptyParts)
+      return count + msgParts.filter((p) => p.type === "compaction").length
+    }, 0)
+  })
+
   const diffs = createMemo(() => {
     const files = message()?.summary?.diffs
     if (!files?.length) return emptyDiffs
@@ -281,7 +289,7 @@ export function SessionTurn(
       for (let i = 0; i < messages.length; i++) {
         const item = messages[i]
         if (!item) continue
-        if (item.role === "assistant" && item.parentID === msg.id) result.push(item as AssistantMessage)
+        if (item.role === "assistant" && item.parentID === msg.id) result.push(item)
       }
       return result
     },
@@ -291,7 +299,10 @@ export function SessionTurn(
 
   const interrupted = createMemo(() => assistantMessages().some((m) => m.error?.name === "MessageAbortedError"))
   const divider = createMemo(() => {
-    if (compaction()) return i18n.t("ui.messagePart.compaction")
+    if (compaction()) {
+      const count = compactionCount()
+      return count > 0 ? `${i18n.t("ui.messagePart.compaction")} Total:${count}` : i18n.t("ui.messagePart.compaction")
+    }
     if (interrupted()) return i18n.t("ui.message.interrupted")
     return ""
   })
