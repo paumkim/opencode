@@ -4,6 +4,7 @@ import { Image } from "@/image/image"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { Cause, Deferred, Duration, Effect, Exit, Layer, Context, Scope, Schema } from "effect"
 import * as Stream from "effect/Stream"
+import path from "node:path"
 import { Agent } from "@/agent/agent"
 import { Config } from "@/config/config"
 import { Permission } from "@/permission"
@@ -26,7 +27,6 @@ import { isRecord } from "@/util/record"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { Database } from "@opencode-ai/core/database/database"
 import { Usage, type LLMEvent } from "@opencode-ai/llm"
-import { InstanceState } from "@/effect/instance-state"
 
 const DOOM_LOOP_THRESHOLD = 3
 const TEXT_LOOP_THRESHOLD = 3
@@ -172,7 +172,6 @@ const layer = Layer.effect(
     const events = yield* EventV2Bridge.Service
     const checkpoint = yield* Checkpoint.Service
     const database = yield* Database.Service
-    const instanceState = yield* InstanceState
 
     // Repetition streaks persist across turns. create() runs once per
     // assistant message, so per-turn state cannot catch a model that repeats
@@ -300,6 +299,40 @@ reasoningMap: {},
         }
         yield* settleToolCall(toolCallID)
         return true
+      })
+
+      const saveToolLearning = Effect.fn("SessionProcessor.saveToolLearning")(function* (input: {
+        tool: string
+        sessionID: string
+        success: boolean
+        error?: string
+        output?: string
+        args?: any
+      }) {
+        try {
+          const home = globalThis.process.env.HOME ?? "/root"
+          const file = path.join(home, ".term", ".agents", "data", "term-memory", "tool-learnings.jsonl")
+          const entry = {
+            time: new Date().toISOString(),
+            sessionID: input.sessionID,
+            tool: input.tool,
+            success: input.success,
+            error: input.error,
+            output: input.output,
+            args: input.args,
+          }
+          const line = JSON.stringify(entry) + "\n"
+          yield* Effect.tryPromise({
+            try: async () => {
+              const fs = await import("node:fs/promises")
+              await fs.mkdir(path.join(home, ".term", ".agents", "data", "term-memory"), { recursive: true })
+              await fs.appendFile(file, line, "utf-8")
+            },
+            catch: (e) => new Error(String(e)),
+          }).pipe(Effect.ignore)
+        } catch {
+          // Never let learning failures affect tool execution
+        }
       })
 
       const finishReasoning = Effect.fn("SessionProcessor.finishReasoning")(function* (reasoningID: string) {
@@ -575,11 +608,27 @@ const reasoning = ctx.reasoningMap[value.id]
             }
             yield* completeToolCall(value.id, output)
             ctx.stateChanged = true
+            const toolName = toolCall?.part.tool ?? value.name
+            yield* saveToolLearning({
+              tool: toolName,
+              sessionID: ctx.sessionID,
+              success: true,
+              output: rawOutput.output,
+              args: input,
+            }).pipe(Effect.ignore)
             return
           }
 
           case "tool-error": {
+            const errToolCall = yield* readToolCall(value.id)
             yield* failToolCall(value.id, value.error ?? new Error(value.message))
+            yield* saveToolLearning({
+              tool: errToolCall?.part.tool ?? value.name,
+              sessionID: ctx.sessionID,
+              success: false,
+              error: errorMessage(value.error ?? new Error(value.message)),
+              args: errToolCall?.part.state.input,
+            }).pipe(Effect.ignore)
             return
           }
 
