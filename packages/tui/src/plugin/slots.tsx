@@ -30,9 +30,9 @@ export function createSlots() {
   return {
     Slot,
     setup(api: HostPluginApi): HostSlots {
-      const registry = createSolidSlotRegistry<RuntimeSlotMap>(
+      const registry = createSolidSlotRegistry<RuntimeSlotMap, TuiSlotContext>(
         api.renderer,
-        { theme: api.theme },
+        { theme: api.theme } as TuiSlotContext,
         {
           onPluginError(event) {
             console.error("[tui.slot] plugin error", {
@@ -51,7 +51,7 @@ export function createSlots() {
       return {
         register(plugin: HostSlotPlugin) {
           if (!isHostSlotPlugin(plugin)) return () => {}
-          return registry.register(plugin)
+          return registry.register(plugin as Parameters<typeof registry.register>[0])
         },
         dispose() {
           setView(() => empty)

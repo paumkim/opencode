@@ -11,6 +11,7 @@ import { WorkspaceTable } from "../control-plane/workspace.sql"
 import { SessionMessage } from "./message"
 import { SessionMessageUpdater } from "./message-updater"
 import { SessionInput } from "./input"
+import { SessionContextEpoch } from "./context-epoch"
 import { WorkspaceV2 } from "../workspace"
 import { MessageTable, PartTable, SessionInputTable, SessionMessageTable, SessionTable } from "./sql"
 import type { DeepMutable } from "../schema"
@@ -342,7 +343,7 @@ const layer = Layer.effectDiscard(
           .where(eq(SessionTable.id, event.data.sessionID))
           .run()
           .pipe(Effect.orDie)
-        yield* SessionContextEpoch.reset(db, event.data.sessionID)
+        yield* SessionContextEpoch.reset(db, event.data.sessionID).pipe(Effect.orDie)
         yield* run(db, event)
       }),
     )

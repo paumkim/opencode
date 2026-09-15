@@ -75,20 +75,20 @@ console.log("--- Search service (warm) ---")
 
 for (const q of FILE_QUERIES) {
   const t = performance.now()
-  const r = await run(FileSystem.Service.use((svc) => svc.find({ query: q, limit: FILE_LIMIT })))
+  const r = await run(FileSystem.Service.use((svc) => svc.find({ query: q, limit: FILE_LIMIT }))) as string[]
   console.log(`[Search.find] "${q}": ${(performance.now() - t).toFixed(1)}ms (${r.length} results)`)
 }
 
 for (const q of GREP_QUERIES) {
   const t = performance.now()
-  const r = await run(FileSystem.Service.use((svc) => svc.grep({ pattern: q, limit: GREP_LIMIT })))
-  console.log(`[Search.grep] "${q}": ${(performance.now() - t).toFixed(1)}ms (${r.length} matches)`)
+  const r = await run(FileSystem.Service.use((svc) => svc.grep({ pattern: q, limit: GREP_LIMIT }))) as number
+  console.log(`[Search.grep] "${q}": ${(performance.now() - t).toFixed(1)}ms (${r} matches)`)
 }
 
 for (const q of GLOB_QUERIES) {
   const t = performance.now()
-  const r = await run(FileSystem.Service.use((svc) => svc.glob({ pattern: q, limit: GLOB_LIMIT })))
-  console.log(`[Search.glob] "${q}": ${(performance.now() - t).toFixed(1)}ms (${r.length} files)`)
+  const r = await run(FileSystem.Service.use((svc) => svc.glob({ pattern: q, limit: GLOB_LIMIT }))) as number
+  console.log(`[Search.glob] "${q}": ${(performance.now() - t).toFixed(1)}ms (${r} files)`)
 }
 
 process.exit(0)

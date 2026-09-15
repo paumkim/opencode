@@ -116,7 +116,7 @@ type Variant = {
   dark: HexColor | RefName
   light: HexColor | RefName
 }
-type ColorValue = HexColor | Variant | RGBA
+type ColorValue = HexColor | Variant | RGBA | string
 export type ThemeJson = {
   $schema?: string
   defs?: Record<string, HexColor | RefName>
@@ -255,12 +255,12 @@ export function resolveTheme(theme: ThemeJson, mode: "dark" | "light") {
       if (next === undefined) {
         throw new Error(`Color reference "${c}" not found in defs or theme`)
       }
-      return resolveColor(next, [...chain, c])
+      return resolveColor(next as ColorValue, [...chain, c])
     }
     if (typeof c === "number") {
       return ansiToRgba(c)
     }
-    return resolveColor(c[mode], chain)
+    return resolveColor(c[mode] as ColorValue, chain)
   }
 
   const resolved = Object.fromEntries(

@@ -406,9 +406,9 @@ export const {
             event.properties.messageID,
             produce((draft) => {
               const part = draft[result.index]
-              const field = event.properties.field as keyof typeof part
-              const existing = part[field] as string | undefined
-              ;(part[field]) = (existing ?? "") + event.properties.delta
+               const field = event.properties.field as keyof typeof part
+               const existing = (part[field] as string | undefined) ?? ""
+               ;(part[field] as string) = existing + event.properties.delta
             }),
           )
           break

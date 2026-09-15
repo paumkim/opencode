@@ -6,10 +6,10 @@ export function stripPromptPartIDs<Part extends { id: string; messageID: string;
 }
 
 export function expandPastedTextPlaceholders(text: string, parts: readonly unknown[]) {
-  return parts.reduce((result, part) => {
-    if (!isPastedTextPart(part)) return result
-    return result.replace(part.source.text.value, part.text)
-  }, text)
+  return parts.reduce<{ result: string; part: unknown }>((acc, part) => {
+    if (!isPastedTextPart(part)) return acc
+    return { result: acc.result.replace(part.source.text.value, part.text), part }
+  }, { result: text, part: null }).result
 }
 
 function isPastedTextPart(part: unknown): part is { type: "text"; text: string; source: { text: { value: string } } } {

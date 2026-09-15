@@ -136,8 +136,8 @@ function subagent(input: {
   } satisfies FooterSubagentTab
 }
 
-function footerState(input: Partial<FooterState> = {}) {
-  return createSignal({
+function footerState(input: Partial<FooterState> = {}): () => FooterState {
+  const initial: FooterState = {
     phase: "idle",
     status: "",
     queue: 0,
@@ -148,7 +148,8 @@ function footerState(input: Partial<FooterState> = {}) {
     interrupt: 0,
     exit: 0,
     ...input,
-  })[0]
+  }
+  return createSignal(initial)[0]
 }
 
 async function renderFooter(
