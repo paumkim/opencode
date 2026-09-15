@@ -140,6 +140,11 @@ export const RunCommand = effectCmd({
         array: true,
         default: [],
       })
+      .option("debug", {
+        describe: "debug mode: DEBUG logs, print-logs, JSON streaming, and thinking blocks",
+        type: "boolean",
+        default: false,
+      })
       .option("command", {
         describe: "the command to run, use message for args",
         type: "string",
@@ -272,7 +277,13 @@ export const RunCommand = effectCmd({
       const rawMessage = [...args.message, ...(args["--"] || [])].join(" ")
       const interactive = args.mini
       const auto = args.auto || args.yolo || args["dangerously-skip-permissions"]
-      const thinking = interactive ? (args.thinking ?? true) : (args.thinking ?? false)
+      const debug = args.debug || false
+      const thinking = debug
+        ? true
+        : interactive
+          ? (args.thinking ?? true)
+          : (args.thinking ?? false)
+      const format = debug && !interactive ? "json" : (args.format ?? "default")
       const die = (message: string): never => {
         UI.error(message)
         process.exit(1)
@@ -301,7 +312,7 @@ export const RunCommand = effectCmd({
         die("--demo requires --mini")
       }
 
-      if (interactive && args.format === "json") {
+      if (interactive && format === "json") {
         die("--mini cannot be used with --format json")
       }
 
@@ -676,7 +687,7 @@ export const RunCommand = effectCmd({
         const sessionID = sess.id
 
         function emit(type: string, data: Record<string, unknown>) {
-          if (args.format === "json") {
+            if (format === "json") {
             process.stdout.write(
               JSON.stringify({
                 type,
@@ -708,7 +719,7 @@ export const RunCommand = effectCmd({
               event.type === "message.updated" &&
               event.properties.sessionID === sessionID &&
               event.properties.info.role === "assistant" &&
-              args.format !== "json" &&
+              format !== "json" &&
               toggles.get("start") !== true
             ) {
               UI.empty()
@@ -735,7 +746,7 @@ export const RunCommand = effectCmd({
                 part.type === "tool" &&
                 part.tool === "task" &&
                 part.state.status === "running" &&
-                args.format !== "json"
+                format !== "json"
               ) {
                 if (toggles.get(part.id) === true) continue
                 await tool(part)
@@ -993,6 +1004,7 @@ export async function runMini(input: MiniCommandInput) {
     model: input.model,
     agent: input.agent,
     format: "default",
+    debug: false,
     file: undefined,
     title: undefined,
     attach: input.attach,
