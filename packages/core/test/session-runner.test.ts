@@ -98,6 +98,34 @@ const client = Layer.succeed(
 )
 const model = Model.make({ id: "fake-model", provider: "fake", route: OpenAIChat.route })
 const replacementModel = Model.make({ id: "replacement", provider: "fake", route: OpenAIChat.route })
+const modelInfo = ModelV2.Info.make({
+  id: ModelV2.ID.make("fake-model"),
+  providerID: ProviderV2.ID.make("fake"),
+  name: "Fake Model",
+  api: { id: ModelV2.ID.make("fake-model"), type: "native", settings: {} },
+  capabilities: { tools: true, input: ["text"], output: ["text"] },
+  request: { headers: {}, body: {} },
+  variants: [],
+  time: { released: 0 },
+  cost: [],
+  status: "active",
+  enabled: true,
+  limit: { context: 100_000, output: 100_000 },
+})
+const replacementModelInfo = ModelV2.Info.make({
+  id: ModelV2.ID.make("replacement"),
+  providerID: ProviderV2.ID.make("fake"),
+  name: "Replacement Model",
+  api: { id: ModelV2.ID.make("replacement"), type: "native", settings: {} },
+  capabilities: { tools: true, input: ["text"], output: ["text"] },
+  request: { headers: {}, body: {} },
+  variants: [],
+  time: { released: 0 },
+  cost: [],
+  status: "active",
+  enabled: true,
+  limit: { context: 100_000, output: 100_000 },
+})
 const compactModel = Model.make({
   id: "compact",
   provider: "fake",
@@ -154,8 +182,12 @@ const echo = Layer.effectDiscard(
 const echoNode = makeLocationNode({ name: "test/session-runner-tools", layer: echo, deps: [ToolRegistry.node] })
 let modelResolveHook = Effect.void
 let currentModel = model
-const models = SessionRunnerModel.layerWith((session) =>
-  modelResolveHook.pipe(Effect.as(session.model?.id === "replacement" ? replacementModel : currentModel)),
+let currentModelInfo = modelInfo
+const models = SessionRunnerModel.layerWith(
+  (session) =>
+    modelResolveHook.pipe(Effect.as(session.model?.id === "replacement" ? replacementModel : currentModel)),
+  (session) =>
+    Effect.succeed(session.model?.id === "replacement" ? replacementModelInfo : currentModelInfo ?? modelInfo),
 )
 const systemContextKey = SystemContext.Key.make("test/context")
 let systemBaseline = "Initial context"
@@ -309,34 +341,56 @@ const insertSession = (id: SessionV2.ID) =>
       .pipe(Effect.orDie)
   })
 
-const setup = Effect.gen(function* () {
-  const { db } = yield* Database.Service
-  response = []
-  systemBaseline = "Initial context"
-  systemRemoved = false
-  systemUnavailable = false
-  systemLoadHook = Effect.void
-  modelResolveHook = Effect.void
-  currentModel = model
-  skillBaselines.clear()
-  responses = undefined
-  streamFailure = undefined
-  responseStream = undefined
-  streamGate = undefined
-  streamStarted = undefined
-  toolExecutionGate = undefined
-  toolExecutionsStarted = undefined
-  toolExecutionsReady = 5
-  activeToolExecutions = 0
-  maxActiveToolExecutions = 0
-  yield* db
-    .insert(ProjectTable)
-    .values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] })
-    .onConflictDoNothing()
-    .run()
-    .pipe(Effect.orDie)
-  yield* insertSession(sessionID)
-})
+ const setup = Effect.gen(function* () {
+   const { db } = yield* Database.Service
+   response = []
+   systemBaseline = "Initial context"
+   systemRemoved = false
+   systemUnavailable = false
+   systemLoadHook = Effect.void
+   modelResolveHook = Effect.void
+   currentModel = model
+   currentModelInfo = modelInfo
+   skillBaselines.clear()
+   responses = undefined
+   streamFailure = undefined
+   responseStream = undefined
+   streamGate = undefined
+   streamStarted = undefined
+   toolExecutionGate = undefined
+   toolExecutionsStarted = undefined
+   toolExecutionsReady = 5
+   activeToolExecutions = 0
+   maxActiveToolExecutions = 0
+   requests.length = 0
+   yield* db
+     .insert(ProjectTable)
+     .values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] })
+     .onConflictDoNothing()
+     .run()
+     .pipe(Effect.orDie)
+   yield* db
+     .delete(SessionContextEpochTable)
+     .where(eq(SessionContextEpochTable.session_id, sessionID))
+     .run()
+     .pipe(Effect.orDie)
+   yield* db
+     .delete(SessionInputTable)
+     .where(eq(SessionInputTable.session_id, sessionID))
+     .run()
+     .pipe(Effect.orDie)
+   yield* db
+     .delete(SessionMessageTable)
+     .where(eq(SessionMessageTable.session_id, sessionID))
+     .run()
+     .pipe(Effect.orDie)
+   yield* db
+     .delete(EventTable)
+     .where(eq(EventTable.aggregate_id, sessionID))
+     .run()
+     .pipe(Effect.orDie)
+   yield* insertSession(sessionID)
+ })
 
 const providerUnavailable = () =>
   new LLMError({

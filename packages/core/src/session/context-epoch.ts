@@ -48,10 +48,7 @@ const prepareOnce = Effect.fnUntraced(function* (
     { concurrency: "unbounded" },
   )
   if (!stored) {
-    const generation = yield* SystemContext.initialize(value).pipe(
-      Effect.catchTag("SystemContext.InitializationBlocked", () => Effect.succeed(undefined)),
-    )
-    if (generation === undefined) return
+    const generation = yield* SystemContext.initialize(value)
     const baselineSeq = yield* insert(db, sessionID, generation)
     return { baseline: generation.baseline, baselineSeq }
   }
@@ -86,11 +83,7 @@ const initializeOnce = Effect.fnUntraced(function* (
   sessionID: SessionSchema.ID,
 ) {
   if (yield* exists(db, sessionID)) return
-  const generation = yield* context.pipe(
-    Effect.flatMap(SystemContext.initialize),
-    Effect.catchTag("SystemContext.InitializationBlocked", () => Effect.succeed(undefined)),
-  )
-  if (generation === undefined) return
+  const generation = yield* context.pipe(Effect.flatMap(SystemContext.initialize))
   const baselineSeq = yield* insert(db, sessionID, generation)
   return { baseline: generation.baseline, baselineSeq }
 })

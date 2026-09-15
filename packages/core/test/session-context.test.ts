@@ -46,24 +46,10 @@ describe("SessionRunnerLLM", () => {
 
       expect(State.requests.map((request) => request.system.map((part) => part.text))).toEqual([
         [
-          `Initial context
-
-Model: Fake Model (fake/fake-model)
-Context window: 100000 tokens
-Tools: yes
-Input modalities: text
-Output modalities: text
-Status: active`,
+          `Initial context`,
         ],
         [
-          `Initial context
-
-Model: Fake Model (fake/fake-model)
-Context window: 100000 tokens
-Tools: yes
-Input modalities: text
-Output modalities: text
-Status: active`,
+          `Initial context`,
         ],
       ])
       expect(State.requests[1]?.messages.map((message) => message.role)).toEqual(["user", "user", "system"])
@@ -102,14 +88,7 @@ Status: active`,
 
       expect(State.requests.at(-1)?.system.map((part) => part.text)).toEqual([
         "Build agent instructions",
-        `Initial context
-
-Model: Fake Model (fake/fake-model)
-Context window: 100000 tokens
-Tools: yes
-Input modalities: text
-Output modalities: text
-Status: active`,
+        `Initial context`,
       ])
     }),
   )
@@ -138,14 +117,7 @@ Status: active`,
 
       expect(State.requests.at(-1)?.system.map((part) => part.text)).toEqual([
         "Reviewer instructions",
-        `Initial context
-
-Model: Fake Model (fake/fake-model)
-Context window: 100000 tokens
-Tools: yes
-Input modalities: text
-Output modalities: text
-Status: active`,
+        `Initial context`,
       ])
       expect((yield* session.messages({ sessionID }))[0]).toMatchObject({ type: "assistant", agent: "reviewer" })
     }),
@@ -177,14 +149,7 @@ Status: active`,
 
       expect(State.requests.at(-1)?.system.map((part) => part.text)).toEqual([
         "Reviewer instructions",
-        `Initial context
-
-Model: Fake Model (fake/fake-model)
-Context window: 100000 tokens
-Tools: yes
-Input modalities: text
-Output modalities: text
-Status: active`,
+        `Initial context`,
       ])
       expect((yield* session.messages({ sessionID }))[0]).toMatchObject({ type: "assistant", agent: "reviewer" })
     }),
@@ -215,26 +180,12 @@ Status: active`,
         [
           `Initial context
 
-Build skills
-
-Model: Fake Model (fake/fake-model)
-Context window: 100000 tokens
-Tools: yes
-Input modalities: text
-Output modalities: text
-Status: active`,
+Build skills`,
         ],
         [
           `Initial context
 
-Build skills
-
-Model: Fake Model (fake/fake-model)
-Context window: 100000 tokens
-Tools: yes
-Input modalities: text
-Output modalities: text
-Status: active`,
+Build skills`,
         ],
       ])
     }),
@@ -270,14 +221,7 @@ Status: active`,
         [
           `Initial context
 
-Build skills
-
-Model: Fake Model (fake/fake-model)
-Context window: 100000 tokens
-Tools: yes
-Input modalities: text
-Output modalities: text
-Status: active`,
+Build skills`,
         ],
       ])
     }),
@@ -309,14 +253,7 @@ Status: active`,
       expect(State.requests.map((request) => request.model)).toEqual([model])
       expect(State.requests.map((request) => request.system.map((part) => part.text))).toEqual([
         [
-          `Initial context
-
-Model: Fake Model (fake/fake-model)
-Context window: 100000 tokens
-Tools: yes
-Input modalities: text
-Output modalities: text
-Status: active`,
+          `Initial context`,
         ],
       ])
     }),
@@ -368,43 +305,24 @@ Status: active`,
 
       expect(State.requests.map((request) => request.system.map((part) => part.text))).toEqual([
         [
-          `Initial context
-
-Model: Fake Model (fake/fake-model)
-Context window: 100000 tokens
-Tools: yes
-Input modalities: text
-Output modalities: text
-Status: active`,
+          `Initial context`,
         ],
         [
-          `Initial context
-
-Model: Fake Model (fake/fake-model)
-Context window: 100000 tokens
-Tools: yes
-Input modalities: text
-Output modalities: text
-Status: active`,
+          `Initial context`,
         ],
         [
-          `Replacement context
-
-Model: Replacement Model (fake/replacement)
-Context window: 100000 tokens
-Tools: yes
-Input modalities: text
-Output modalities: text
-Status: active`,
+          `Initial context`,
         ],
       ])
       expect(State.requests[1]?.messages.map((message) => message.role)).toEqual(["user", "user", "system"])
-      expect(State.requests[2]?.messages.filter((message) => message.role === "system")).toHaveLength(1)
+      expect(State.requests[2]?.messages.filter((message) => message.role === "system")).toHaveLength(2)
       expect((yield* session.context(sessionID)).map((message) => message.type)).toEqual([
         "user",
         "user",
+        "system",
         "model-switched",
         "user",
+        "system",
       ])
       yield* replaySessionProjection(sessionID)
       expect(yield* session.messages({ sessionID })).toHaveLength(6)
@@ -439,34 +357,13 @@ Status: active`,
 
       expect(State.requests.map((request) => request.system.map((part) => part.text))).toEqual([
         [
-          `Initial context
-
-Model: Fake Model (fake/fake-model)
-Context window: 100000 tokens
-Tools: yes
-Input modalities: text
-Output modalities: text
-Status: active`,
+          `Initial context`,
         ],
         [
-          `Initial context
-
-Model: Fake Model (fake/fake-model)
-Context window: 100000 tokens
-Tools: yes
-Input modalities: text
-Output modalities: text
-Status: active`,
+          `Initial context`,
         ],
         [
-          `Initial context
-
-Model: Fake Model (fake/fake-model)
-Context window: 100000 tokens
-Tools: yes
-Input modalities: text
-Output modalities: text
-Status: active`,
+          `Initial context`,
         ],
       ])
     }),

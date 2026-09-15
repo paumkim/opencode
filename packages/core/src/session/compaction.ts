@@ -146,36 +146,33 @@ const select = (
   if (conversation.length === 0) return
   let total = 0
   let split = conversation.length
-  let splitPrefix = ""
-  let splitSuffix = ""
   for (let index = conversation.length - 1; index >= 0; index--) {
     const next = total + Token.estimate(conversation[index])
-    if (next > tokens) {
-      const remaining = Math.max(0, tokens - total) * 4
-      if (remaining > 0) {
-        splitPrefix = conversation[index].slice(0, -remaining)
-        splitSuffix = conversation[index].slice(-remaining)
-        split = index + 1
-      }
-      break
-    }
+    if (next > tokens) break
     total = next
     split = index
   }
   return {
-    head: [...conversation.slice(0, split), splitPrefix].filter(Boolean).join("\n\n"),
-    recent: [splitSuffix, ...conversation.slice(split)].filter(Boolean).join("\n\n"),
+    head: conversation.slice(0, split).join("\n\n"),
+    recent: conversation.slice(split).join("\n\n"),
   }
 }
 
-export const buildPrompt = (input: { readonly previousSummary?: string; readonly context: readonly string[] }) =>
-  [
-    input.previousSummary
-      ? `Update the anchored summary below using the conversation history above.\nPreserve still-true details, remove stale details, and merge in the new facts.\n<previous-summary>\n${input.previousSummary}\n</previous-summary>`
-      : "Create a new anchored summary from the conversation history.",
+export const buildPrompt = (input: { readonly previousSummary?: string; readonly context: readonly string[] }) => {
+  const conversation = `Here is the conversation so far:\n\n<conversation>\n${input.context.join("\n\n")}\n</conversation>`
+  if (!input.previousSummary)
+    return [
+      conversation,
+      "Create a new anchored summary from the conversation history in the <conversation> tags above so another coding agent can continue the work.",
+      SUMMARY_TEMPLATE,
+    ].join("\n\n")
+  return [
+    conversation,
+    `Here is the summary of the conversation before the <conversation> above:\n\n<prior-summary>\n${input.previousSummary}\n</prior-summary>`,
+    "Update the anchored summary below using the conversation history above. Preserve still-true details, remove stale details, and merge in new facts.",
     SUMMARY_TEMPLATE,
-    ...input.context,
   ].join("\n\n")
+}
 
 export const make = (dependencies: Dependencies) => {
   const config = settings(dependencies.config)
@@ -206,6 +203,7 @@ export const make = (dependencies: Dependencies) => {
       .stream(
         LLM.request({
           model: input.model,
+          http: input.request.http,
           messages: [Message.user(summaryPrompt)],
           tools: [],
           generation: { maxTokens: summaryOutput },

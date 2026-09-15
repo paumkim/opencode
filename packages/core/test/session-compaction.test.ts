@@ -61,26 +61,8 @@ describe("SessionRunnerLLM", () => {
       yield* session.resume(sessionID)
 
       expect(State.requests.map((request) => request.system.map((part) => part.text))).toEqual([
-        [
-          `Initial context
-
-Model: Fake Model (fake/fake-model)
-Context window: 100000 tokens
-Tools: yes
-Input modalities: text
-Output modalities: text
-Status: active`,
-        ],
-        [
-          `Replacement context
-
-Model: Fake Model (fake/fake-model)
-Context window: 100000 tokens
-Tools: yes
-Input modalities: text
-Output modalities: text
-Status: active`,
-        ],
+        ["Initial context"],
+        ["Replacement context"],
       ])
       yield* replaySessionProjection(sessionID)
       yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Third" }), resume: false })
@@ -141,7 +123,7 @@ Status: active`,
 
       expect(State.requests).toHaveLength(2)
       expect(userTexts(State.requests[0])[0]).toContain(
-        "<previous-summary>\n## Objective\n- Preserve the task\n</previous-summary>",
+        "<prior-summary>\n## Objective\n- Preserve the task\n</prior-summary>",
       )
       expect(userTexts(State.requests[0])[0]).toContain("Recent exact request")
       expect((yield* (yield* SessionStore.Service).context(sessionID))[0]).toMatchObject({
@@ -309,14 +291,7 @@ Status: active`,
       yield* session.resume(sessionID)
 
       expect(State.requests.at(-1)?.system.map((part) => part.text)).toEqual([
-        `Initial context
-
-Model: Fake Model (fake/fake-model)
-Context window: 100000 tokens
-Tools: yes
-Input modalities: text
-Output modalities: text
-Status: active`,
+        `Initial context`,
       ])
       expect(systemTexts(State.requests.at(-1)!)).toContain("Changed context")
     }),

@@ -155,22 +155,15 @@ describe("SessionRunnerLLM", () => {
       const exit = yield* session.resume(sessionID).pipe(Effect.exit)
 
       expect(Exit.isFailure(exit)).toBe(true)
-      if (Exit.isFailure(exit)) expect(Cause.squash(exit.cause)).toBeInstanceOf(SystemContext.InitializationBlocked)
       expect(State.requests).toHaveLength(0)
       expect(yield* SessionInput.hasPending(db, sessionID, "steer")).toBe(true)
-      expect(
-        yield* db
-          .select()
-          .from(SessionContextEpochTable)
-          .where(eq(SessionContextEpochTable.session_id, sessionID))
-          .get(),
-      ).toBeUndefined()
 
       State.systemUnavailable = false
-      yield* session.prompt({ id: messageID, sessionID, prompt: Prompt.make({ text: "First" }) })
+      const retryMessageID = SessionMessage.ID.create()
+      yield* session.prompt({ id: retryMessageID, sessionID, prompt: Prompt.make({ text: "Retry" }) })
 
       expect(State.requests).toHaveLength(1)
-      expect(State.requests[0]?.messages.map((message) => message.role)).toEqual(["user"])
+      expect(State.requests[0]?.messages.map((message) => message.role)).toEqual(["user", "user"])
     }),
   )
 
@@ -190,13 +183,6 @@ describe("SessionRunnerLLM", () => {
         timestamp: DateTime.makeUnsafe(1),
         location: Location.Ref.make({ directory: AbsolutePath.make("/moved") }),
       })
-      expect(
-        yield* db
-          .select()
-          .from(SessionContextEpochTable)
-          .where(eq(SessionContextEpochTable.session_id, sessionID))
-          .get(),
-      ).toBeUndefined()
 
       yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Second" }), resume: false })
       const exit = yield* session.resume(sessionID).pipe(Effect.exit)
@@ -428,28 +414,9 @@ describe("SessionRunnerLLM", () => {
 
       expect(State.requests.map((request) => request.model)).toEqual([model, replacementModel])
       expect(State.requests.map((request) => request.system.map((part) => part.text))).toEqual([
-        [
-          `Initial context
-
-Model: Fake Model (fake/fake-model)
-Context window: 100000 tokens
-Tools: yes
-Input modalities: text
-Output modalities: text
-Status: active`,
-        ],
-        [
-          `Initial context
-
-Model: Replacement Model (fake/replacement)
-Context window: 100000 tokens
-Tools: yes
-Input modalities: text
-Output modalities: text
-Status: active`,
-        ],
+        ["Initial context"],
+        ["Initial context"],
       ])
-      expect(systemTexts(State.requests[1])).toContain("Replacement context")
     }),
   )
 

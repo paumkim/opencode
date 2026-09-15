@@ -76,8 +76,6 @@ import { SystemContext } from "@opencode-ai/core/system-context"
 export { SystemContext }
 import { ModelV2 } from "@opencode-ai/core/model"
 export { ModelV2 }
-import { ModelCapabilities } from "@opencode-ai/core/model/capabilities"
-export { ModelCapabilities }
 import { ProviderV2 } from "@opencode-ai/core/provider"
 export { ProviderV2 }
 import { Cause, DateTime, Deferred, Effect, Exit, Fiber, Layer, Schema, Stream } from "effect"
@@ -354,7 +352,6 @@ export const it = testEffect(
       SkillGuidance.node,
       ReferenceGuidance.node,
       Config.node,
-      ModelCapabilities.node,
       Snapshot.node,
       SessionRunnerLLM.node,
       SessionExecution.node,
@@ -371,7 +368,6 @@ export const it = testEffect(
       [Snapshot.node, Snapshot.noopLayer],
       [SessionExecution.node, execution],
       [Config.node, config],
-      [ModelCapabilities.node, ModelCapabilities.locationLayer],
     ],
   ),
 )
@@ -423,6 +419,26 @@ export const setup = Effect.gen(function* () {
     .insert(ProjectTable)
     .values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] })
     .onConflictDoNothing()
+    .run()
+    .pipe(Effect.orDie)
+  yield* db
+    .delete(SessionContextEpochTable)
+    .where(eq(SessionContextEpochTable.session_id, sessionID))
+    .run()
+    .pipe(Effect.orDie)
+  yield* db
+    .delete(SessionInputTable)
+    .where(eq(SessionInputTable.session_id, sessionID))
+    .run()
+    .pipe(Effect.orDie)
+  yield* db
+    .delete(SessionMessageTable)
+    .where(eq(SessionMessageTable.session_id, sessionID))
+    .run()
+    .pipe(Effect.orDie)
+  yield* db
+    .delete(EventTable)
+    .where(eq(EventTable.aggregate_id, sessionID))
     .run()
     .pipe(Effect.orDie)
   yield* insertSession(sessionID)

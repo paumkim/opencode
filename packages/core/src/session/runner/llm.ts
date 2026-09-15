@@ -15,7 +15,7 @@ import { Database } from "../../database/database"
 import { EventV2 } from "../../event"
 import { Location } from "../../location"
 import { ModelV2 } from "../../model"
-import { ModelCapabilities } from "../../model/capabilities"
+import { PermissionV2 } from "../../permission"
 import { ProviderV2 } from "../../provider"
 import { QuestionV2 } from "../../question"
 import { SystemContext } from "../../system-context/index"
@@ -102,7 +102,6 @@ const layer = Layer.effect(
     const location = yield* Location.Service
     const systemContext = yield* SystemContextRegistry.Service
     const skillGuidance = yield* SkillGuidance.Service
-    const modelCapabilities = yield* ModelCapabilities.Service
     const referenceGuidance = yield* ReferenceGuidance.Service
     const config = yield* Config.Service
     const snapshots = yield* Snapshot.Service
@@ -142,6 +141,14 @@ const layer = Layer.effect(
     const awaitToolFibers = (fibers: FiberSet.FiberSet<void, ToolOutputStore.Error>) =>
       Effect.raceFirst(FiberSet.join(fibers), FiberSet.awaitEmpty(fibers))
 
+    // Match V1: declining a user prompt halts the loop instead of becoming model-facing tool output.
+    const isUserDeclined = (cause: Cause.Cause<unknown>) =>
+      cause.reasons.some(
+        (reason) =>
+          Cause.isDieReason(reason) &&
+          (reason.defect instanceof PermissionV2.DeclinedError || reason.defect instanceof QuestionV2.RejectedError),
+      )
+
     // Match V1: dismissing a question halts the loop instead of becoming model-facing tool output.
     const isQuestionRejected = (cause: Cause.Cause<unknown>) =>
       cause.reasons.some((reason) => Cause.isDieReason(reason) && reason.defect instanceof QuestionV2.RejectedError)
@@ -168,7 +175,6 @@ const layer = Layer.effect(
           ? systemContext.loadExcept([SystemContext.Key.make("core/instructions")])
           : systemContext.load(),
         skillGuidance.load(agent),
-        modelCapabilities.load(model),
         referenceGuidance.load(),
       ], {
         concurrency: "unbounded",
@@ -210,6 +216,13 @@ const layer = Layer.effect(
       const promptCacheKey = /^ses_[0-9a-f]{64}$/.test(session.id) ? session.id.slice(4) : session.id
       const request = LLM.request({
         model,
+        http: {
+          headers: {
+            "x-session-affinity": session.id,
+            "X-Session-Id": session.id,
+            ...(session.parentID ? { "x-parent-session-id": session.parentID } : {}),
+          },
+        },
         providerOptions: { openai: { promptCacheKey } },
         system: [agent.info?.system, system.baseline]
           .filter((part): part is string => part !== undefined && part.length > 0)
@@ -300,6 +313,11 @@ const layer = Layer.effect(
           }
           if (stream._tag === "Failure" && Cause.hasInterrupts(stream.cause)) yield* FiberSet.clear(toolFibers)
           const settled = yield* restore(awaitToolFibers(toolFibers)).pipe(Effect.exit)
+          if (settled._tag === "Failure" && isUserDeclined(settled.cause)) {
+            yield* FiberSet.clear(toolFibers)
+            yield* withPublication(publisher.failUnsettledTools("Tool execution interrupted"))
+            return yield* Effect.interrupt
+          }
           if (settled._tag === "Failure" && isQuestionRejected(settled.cause)) {
             yield* FiberSet.clear(toolFibers)
             yield* withPublication(publisher.failUnsettledTools("Tool execution interrupted"))
@@ -430,8 +448,8 @@ export const node = makeLocationNode({
     Location.node,
     SystemContextRegistry.node,
     SkillGuidance.node,
-    ModelCapabilities.node,
     ReferenceGuidance.node,
+    PermissionV2.node,
     Config.node,
     Snapshot.node,
     Database.node,
