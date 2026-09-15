@@ -26,6 +26,7 @@ import { isRecord } from "@/util/record"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { Database } from "@opencode-ai/core/database/database"
 import { Usage, type LLMEvent } from "@opencode-ai/llm"
+import { InstanceState } from "@/effect/instance-state"
 
 const DOOM_LOOP_THRESHOLD = 3
 const TEXT_LOOP_THRESHOLD = 3
@@ -171,6 +172,7 @@ const layer = Layer.effect(
     const events = yield* EventV2Bridge.Service
     const checkpoint = yield* Checkpoint.Service
     const database = yield* Database.Service
+    const instanceState = yield* InstanceState
 
     // Repetition streaks persist across turns. create() runs once per
     // assistant message, so per-turn state cannot catch a model that repeats

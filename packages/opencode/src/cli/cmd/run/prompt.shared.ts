@@ -52,6 +52,10 @@ export function isNewCommand(input: string): boolean {
   return input.trim().toLowerCase() === "/new"
 }
 
+export function isReloadCommand(input: string): boolean {
+  return input.trim().toLowerCase() === "/reload"
+}
+
 export function isModelsCommand(input: string): boolean {
   return input.trim().toLowerCase().startsWith("/models")
 }

@@ -55,6 +55,7 @@ type RunRuntimeInput = {
   replay?: boolean
   replayLimit?: number
   demo?: RunInput["demo"]
+  onReload?: () => void
 }
 
 type RunLocalInput = {
@@ -74,6 +75,7 @@ type RunLocalInput = {
   replay?: boolean
   replayLimit?: number
   demo?: RunInput["demo"]
+  onReload?: () => void
 }
 
 type StreamTransportModule = Pick<
@@ -337,26 +339,27 @@ async function runInteractiveRuntime(input: RunRuntimeInput, deps: RunRuntimeDep
         variants: state.variants,
       }
     },
-    onInterrupt: () => {
-      if (!hasSession(input, state) || state.aborting) {
-        return
-      }
+      onInterrupt: () => {
+        if (!hasSession(input, state) || state.aborting) {
+          return
+        }
 
-      state.aborting = true
-      void ctx.sdk.session
-        .abort({
-          sessionID: state.sessionID,
-        })
-        .catch(() => {})
-        .finally(() => {
-          state.aborting = false
-        })
-    },
-    onBackground: () => {
-      if (!hasSession(input, state)) return
-      void ctx.sdk.experimental.session.background({ sessionID: state.sessionID }).catch(() => {})
-    },
-    onSubagentSelect: (sessionID) => {
+        state.aborting = true
+        void ctx.sdk.session
+          .abort({
+            sessionID: state.sessionID,
+          })
+          .catch(() => {})
+          .finally(() => {
+            state.aborting = false
+          })
+      },
+      onBackground: () => {
+        if (!hasSession(input, state)) return
+        void ctx.sdk.experimental.session.background({ sessionID: state.sessionID }).catch(() => {})
+      },
+      onReload: input.onReload,
+      onSubagentSelect: (sessionID) => {
       state.selectSubagent?.(sessionID)
       log?.write("subagent.select", {
         sessionID,
@@ -748,6 +751,7 @@ export async function runInteractiveLocalMode(input: RunLocalInput): Promise<voi
     replay: input.replay,
     replayLimit: input.replayLimit,
     demo: input.demo,
+    onReload: input.onReload,
     resolveSession: () => {
       if (session) {
         return session
@@ -785,7 +789,7 @@ export async function runInteractiveLocalMode(input: RunLocalInput): Promise<voi
 
 // Attach mode. Uses the caller-provided SDK client directly.
 export async function runInteractiveMode(
-  input: RunInput & { createSession?: CreateSession },
+  input: RunInput & { createSession?: CreateSession; onReload?: () => void },
   deps?: RunRuntimeDeps,
 ): Promise<void> {
   return runInteractiveRuntime(
@@ -797,6 +801,7 @@ export async function runInteractiveMode(
       replay: input.replay,
       replayLimit: input.replayLimit,
       demo: input.demo,
+      onReload: input.onReload,
       boot: async () => ({
         sdk: input.sdk,
         directory: input.directory,

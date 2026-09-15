@@ -18,6 +18,7 @@ import {
   displayCharAt,
   displaySlice,
   isExitCommand,
+  isReloadCommand,
   mentionTriggerIndex,
   isNewCommand,
   movePromptHistory,
@@ -75,6 +76,7 @@ type PromptInput = {
   onInputClear: () => void
   onExitRequest?: () => boolean
   onExit: () => void
+  onReload?: () => void
   onSkillMenu: () => void
   onRows: (rows: number) => void
   onStatus: (text: string) => void
@@ -417,6 +419,7 @@ export function createPromptState(input: PromptInput): PromptState {
         description: "compose in your external editor",
       } satisfies SlashOption,
       { kind: "slash", name: "new", display: "/new", description: "start a new session" } satisfies SlashOption,
+      { kind: "slash", name: "reload", display: "/reload", description: "reload configuration" } satisfies SlashOption,
       { kind: "slash", name: "exit", display: "/exit", description: "close OpenCode" } satisfies SlashOption,
     ]
     const hidden = new Set(builtins.map((item) => item.name))
@@ -861,7 +864,7 @@ export function createPromptState(input: PromptInput): PromptState {
 
       const cursor = area.cursorOffset
       const head = slashHead(area.plainText)
-      const local = !shell() && (next.name === "new" || next.name === "exit")
+      const local = !shell() && (next.name === "new" || next.name === "exit" || next.name === "reload")
       const separator = !shell() && !local && head && /\s/.test(area.plainText[head.end] ?? "") ? "" : " "
       const text = `/${next.name}${separator}`
 
@@ -1182,6 +1185,11 @@ export function createPromptState(input: PromptInput): PromptState {
     const command = next.mode === "shell" ? undefined : selectedCommand(next.text, next.command)
     if (!command && next.mode !== "shell" && isExitCommand(next.text)) {
       input.onExit()
+      return
+    }
+
+    if (!command && next.mode !== "shell" && isReloadCommand(next.text)) {
+      input.onReload?.()
       return
     }
 

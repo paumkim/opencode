@@ -74,6 +74,7 @@ export type LifecycleInput = {
   onVariantSelect?: (variant: string | undefined) => CycleResult | void | Promise<CycleResult | void>
   onInterrupt?: () => void
   onBackground?: () => void
+  onReload?: () => void
   onSubagentSelect?: (sessionID: string | undefined) => void
 }
 
@@ -254,6 +255,7 @@ export async function createRuntimeLifecycle(input: LifecycleInput): Promise<Lif
       onVariantSelect: input.onVariantSelect,
       onInterrupt: input.onInterrupt,
       onBackground: input.onBackground,
+      onReload: input.onReload,
       onEditorOpen: async ({ value }) => {
         if (closed || renderer.isDestroyed) {
           return

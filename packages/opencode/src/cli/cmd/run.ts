@@ -25,6 +25,9 @@ import { Filesystem } from "@/util/filesystem"
 import { createOpencodeClient, type OpencodeClient, type ToolPart } from "@opencode-ai/sdk/v2"
 import { FormatError, FormatUnknownError } from "../error"
 import { INTERACTIVE_INPUT_ERROR, resolveInteractiveStdin } from "./run/runtime.stdin"
+import { AppRuntime } from "@/effect/app-runtime"
+import { Config } from "@/config/config"
+import { disposeAllInstancesAndEmitGlobalDisposed } from "@/server/global-lifecycle"
 
 type ModelInput = Parameters<OpencodeClient["session"]["prompt"]>[0]["model"]
 
@@ -47,6 +50,16 @@ function resolveRunInput(value?: string, piped?: string): string | undefined {
   }
 
   return value + "\n" + piped
+}
+
+const reload = async () => {
+  await AppRuntime.runPromise(
+    Effect.gen(function* () {
+      const cfg = yield* Config.Service
+      yield* cfg.invalidate()
+      yield* disposeAllInstancesAndEmitGlobalDisposed({ swallowErrors: true })
+    }),
+  )
 }
 
 type FilePart = {
@@ -908,6 +921,7 @@ export const RunCommand = effectCmd({
             thinking,
             backgroundSubagents: flags.experimentalBackgroundSubagents,
             demo: args.demo,
+            onReload: reload,
           })
         } catch (error) {
           dieInteractive(error)
@@ -945,6 +959,7 @@ export const RunCommand = effectCmd({
             thinking,
             backgroundSubagents: flags.experimentalBackgroundSubagents,
             demo: args.demo,
+            onReload: reload,
           })
         } catch (error) {
           dieInteractive(error)
