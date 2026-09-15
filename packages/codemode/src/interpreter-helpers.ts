@@ -4,7 +4,7 @@ import { DiagnosticCategory, ModuleKind, ScriptTarget, flattenDiagnosticMessageT
 import { copyIn, copyOut, isBlockedMember, ToolReference, ToolRuntime, ToolRuntimeError, type HostTools, type SafeObject, type Services } from "./tool-runtime.js"
 import { ToolError } from "./tool-error.js"
 import { isSandboxValue, SandboxDate, SandboxMap, SandboxPromise, SandboxRegExp, SandboxSet } from "./values.js"
-import type { DiagnosticKind, Diagnostic, ExecutionLimits } from "./types.js"
+import type { DiagnosticKind, Diagnostic, ExecutionLimits } from "./codemode.js"
 
 export type ResolvedExecutionLimits = { readonly timeoutMs: number | undefined; readonly maxToolCalls: number | undefined; readonly maxOutputBytes: number | undefined }
 
@@ -290,7 +290,7 @@ export const validateLimit = <Value extends number | undefined>(
   minimum: number,
 ): Value => {
   if (value !== undefined && (!Number.isSafeInteger(value) || value < minimum)) {
-    throw new RangeError(`${name} must be a safe integer greater than or equal to ${minimum}.`)
+    throw new RangeError(`${String(name)} must be a safe integer greater than or equal to ${minimum}.`)
   }
   return value
 }

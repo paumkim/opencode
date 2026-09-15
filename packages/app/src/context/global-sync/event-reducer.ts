@@ -381,7 +381,7 @@ export function applyDirectoryEvent(input: {
           const part = draft[result.index]
           const field = props.field as keyof typeof part
           const existing = part[field] as string | undefined
-          ;(part[field]) = (existing ?? "") + props.delta
+          ;(part[field] as string) = (existing ?? "") + props.delta
         }),
       )
       break

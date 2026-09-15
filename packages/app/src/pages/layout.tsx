@@ -2189,7 +2189,7 @@ export default function LegacyLayout(props: ParentProps) {
         <div
           class="shrink-0 px-3 py-3"
           classList={{
-            hidden: store.gettingStartedDismissed || !(providers.all().size > 0 && providers.paid().length === 0),
+            hidden: store.gettingStartedDismissed || !(providers.all().size > 0 && Array.from(providers.paid()).length === 0),
           }}
         >
           <div class="rounded-xl bg-background-base shadow-xs-border-base" data-component="getting-started">

@@ -106,7 +106,7 @@ function ProviderTip() {
     () =>
       serverSync().child(sdk().directory)[0].provider_ready &&
       persistedReady() &&
-      providers.paid().length === 0 &&
+      Array.from(providers.paid()).length === 0 &&
       Date.now() - persistedState.dismissedAt >= providerTipDismissalDuration,
   )
   const [ref, setRef] = createSignal<HTMLDivElement>()

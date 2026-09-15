@@ -1225,7 +1225,7 @@ export function createServerSession(
             if (!draft) return
             const part = draft[result.index]
             const field = props.field as keyof typeof part
-            ;(part[field]) = ((part[field] as string | undefined) ?? "") + props.delta
+            ;(part[field] as string) = ((part[field] as string | undefined) ?? "") + props.delta
           }),
         )
         return

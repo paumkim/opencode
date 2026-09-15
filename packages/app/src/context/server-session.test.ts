@@ -130,7 +130,7 @@ function rootMessageClient(
 }
 
 const retryImmediately: typeof retry = async (task, options) => {
-  const attempts = options.attempts ?? 3
+  const attempts = (options?.attempts ?? 3)
   for (let attempt = 0; ; attempt++) {
     try {
       return await task()
