@@ -19,7 +19,7 @@ export default function BlackWorkspace() {
       ? new Intl.NumberFormat(language.tag(language.locale()), {
           notation: "compact",
           compactDisplay: "short",
-        }).format(githubData()!.stars!)
+        }).format(githubData()!.stars)
       : config.github.starsFormatted.compact,
   )
 

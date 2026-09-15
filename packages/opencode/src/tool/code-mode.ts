@@ -48,7 +48,7 @@ function groupByServer(mcpTools: Record<string, MCP.McpTool>, servers: readonly 
       key,
       server,
       local,
-      tool: mcpTools[key]!,
+      tool: mcpTools[key],
     }
     groups.set(server, [...(groups.get(server) ?? []), entry])
   }
@@ -65,7 +65,7 @@ export function describeCatalog(mcpTools: Record<string, MCP.McpTool>, servers: 
 }
 
 const lastSegment = (uri: string) => {
-  const trimmed = uri.split(/[?#]/, 1)[0]!.replace(/\/+$/, "")
+  const trimmed = uri.split(/[?#]/, 1)[0].replace(/\/+$/, "")
   const segment = trimmed.slice(trimmed.lastIndexOf("/") + 1)
   return segment.length > 0 ? segment : undefined
 }

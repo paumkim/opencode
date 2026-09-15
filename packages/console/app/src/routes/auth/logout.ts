@@ -10,7 +10,7 @@ export async function GET(event: APIEvent) {
       delete val.account?.[current]
       const first = Object.keys(val.account ?? {})[0]
       val.current = first
-      event!.locals.actor = undefined
+      event.locals.actor = undefined
       return val
     })
   return redirect("/zen")

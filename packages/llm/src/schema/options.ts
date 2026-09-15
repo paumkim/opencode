@@ -166,8 +166,18 @@ export namespace ModelDefaults {
 export const ModelToolSchemaCompatibility = Schema.Literals(["gemini", "moonshot"])
 export type ModelToolSchemaCompatibility = Schema.Schema.Type<typeof ModelToolSchemaCompatibility>
 
+/** Models that emit tool calls as raw XML inside assistant text. */
+export const TextToolCallProvider = Schema.Literals(["dots", "nex-agi"])
+export type TextToolCallProvider = Schema.Schema.Type<typeof TextToolCallProvider>
+
+/** Models that emit chain-of-thought as plain text content instead of reasoning. */
+export const TextReasoningProvider = Schema.Literals(["dots", "nex-agi"])
+export type TextReasoningProvider = Schema.Schema.Type<typeof TextReasoningProvider>
+
 export class ModelCompatibility extends Schema.Class<ModelCompatibility>("LLM.ModelCompatibility")({
   toolSchema: Schema.optional(ModelToolSchemaCompatibility),
+  textToolCall: Schema.optional(TextToolCallProvider),
+  textReasoning: Schema.optional(TextReasoningProvider),
 }) {}
 
 export namespace ModelCompatibility {

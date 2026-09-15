@@ -71,10 +71,10 @@ const layer = Layer.effect(
           const contextMatch = block.match(/\*\*Context:\*\* (.+)/)
           const timeMatch = block.match(/## (.+)/)
           return {
-            timestamp: timeMatch ? new Date(timeMatch[1]!).getTime() : 0,
-            decision: decisionMatch ? decisionMatch[1]! : "",
-            rationale: rationaleMatch ? rationaleMatch[1]! : "",
-            context: contextMatch ? contextMatch[1]! : "",
+            timestamp: timeMatch ? new Date(timeMatch[1]).getTime() : 0,
+            decision: decisionMatch ? decisionMatch[1] : "",
+            rationale: rationaleMatch ? rationaleMatch[1] : "",
+            context: contextMatch ? contextMatch[1] : "",
           }
         })
         .filter((e) => e.decision)

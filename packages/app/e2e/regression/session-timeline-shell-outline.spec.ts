@@ -188,10 +188,10 @@ async function captureCardEdges(page: Page, card: Locator) {
           return {
             luminance:
               indexes
-                .map((index) => (pixels[index]! + pixels[index + 1]! + pixels[index + 2]!) / 3)
+                .map((index) => (pixels[index] + pixels[index + 1] + pixels[index + 2]) / 3)
                 .reduce((sum, value) => sum + value, 0) / width,
             magenta:
-              indexes.filter((index) => pixels[index]! > 200 && pixels[index + 1]! < 180 && pixels[index + 2]! > 200)
+              indexes.filter((index) => pixels[index] > 200 && pixels[index + 1] < 180 && pixels[index + 2] > 200)
                 .length / width,
           }
         })
@@ -199,8 +199,8 @@ async function captureCardEdges(page: Page, card: Locator) {
       const pixels = context.getImageData(0, 0, image.naturalWidth, image.naturalHeight).data
       const columns = new Uint32Array(image.naturalWidth)
       for (let index = 0; index < pixels.length; index += 4) {
-        if (pixels[index]! <= 200 || pixels[index + 1]! >= 180 || pixels[index + 2]! <= 200) continue
-        columns[(index / 4) % image.naturalWidth] = columns[(index / 4) % image.naturalWidth]! + 1
+        if (pixels[index] <= 200 || pixels[index + 1] >= 180 || pixels[index + 2] <= 200) continue
+        columns[(index / 4) % image.naturalWidth] = columns[(index / 4) % image.naturalWidth] + 1
       }
       const top = box.y * scale.y
       const bottom = (box.y + box.height) * scale.y
@@ -210,7 +210,7 @@ async function captureCardEdges(page: Page, card: Locator) {
         box,
         luminance: {
           top: Math.min(...topRows.map((row) => row.luminance)),
-          bottom: rows([Math.ceil(bottom) - 1])[0]!.luminance,
+          bottom: rows([Math.ceil(bottom) - 1])[0].luminance,
         },
         magenta: {
           top: Math.max(...topRows.map((row) => row.magenta)),

@@ -138,7 +138,7 @@ export async function setupTimeline(
         },
       }),
     )
-    if (settings.newLayoutDesigns === false) {
+    if (!settings.newLayoutDesigns) {
       localStorage.setItem("app-version.v1", JSON.stringify({ version: "1.17.20" }))
     }
   }, input.settings ?? {})

@@ -1894,7 +1894,7 @@ export function inlineCodeKind(text: string): "path" | "url" | undefined {
   if (text === "/") return
   if (/^\/[a-z][a-z0-9-]*$/i.test(text)) return
   if (/\s/.test(text)) return
-  if (/[()\[\]{}*+=<>|&^"';]/.test(text)) return
+  if (/[()[\]{}*+=<>|&^"';]/.test(text)) return
   if (/[/\\]/.test(text) || /^\.\.?[/\\]/.test(text) || hasPathExtension(text) || hasPathFileName(text)) return "path"
 }
 

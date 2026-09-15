@@ -245,8 +245,8 @@ test.describe("regression: session timeline local row state", () => {
       return result
     })
 
-    expect(samples[0]!.trigger).toBeLessThan(samples[0]!.diff)
-    expect(samples.every((sample) => Math.abs(sample.trigger - samples[0]!.trigger) <= 1)).toBe(true)
+    expect(samples[0].trigger).toBeLessThan(samples[0].diff)
+    expect(samples.every((sample) => Math.abs(sample.trigger - samples[0].trigger) <= 1)).toBe(true)
     expect(samples.every((sample) => sample.trigger < sample.bottom)).toBe(true)
   })
 })

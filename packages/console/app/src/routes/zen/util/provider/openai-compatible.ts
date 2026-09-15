@@ -146,7 +146,7 @@ export function toOaCompatibleRequest(body: CommonRequest) {
   const toImg = (p: any) => {
     if (!p || typeof p !== "object") return undefined
     if (p.type === "image_url" && p.image_url) return { type: "image_url", image_url: p.image_url }
-    const s = (p as any).source
+    const s = (p).source
     if (!s || typeof s !== "object") return undefined
     if (s.type === "url" && typeof s.url === "string") return { type: "image_url", image_url: { url: s.url } }
     if (s.type === "base64" && typeof s.media_type === "string" && typeof s.data === "string")
@@ -223,9 +223,9 @@ export function toOaCompatibleRequest(body: CommonRequest) {
 export function fromOaCompatibleResponse(resp: any): CommonResponse {
   if (!resp || typeof resp !== "object") return resp
 
-  if (!Array.isArray((resp as any).choices)) return resp
+  if (!Array.isArray((resp).choices)) return resp
 
-  const choice = (resp as any).choices[0]
+  const choice = (resp).choices[0]
   if (!choice) return resp
 
   const message = choice.message
@@ -266,7 +266,7 @@ export function fromOaCompatibleResponse(resp: any): CommonResponse {
   })()
 
   const usage = (() => {
-    const u = (resp as any).usage
+    const u = (resp).usage
     if (!u) return undefined
     return {
       prompt_tokens: u.prompt_tokens,
@@ -279,10 +279,10 @@ export function fromOaCompatibleResponse(resp: any): CommonResponse {
   })()
 
   return {
-    id: (resp as any).id,
+    id: (resp).id,
     object: "chat.completion" as const,
     created: Math.floor(Date.now() / 1000),
-    model: (resp as any).model,
+    model: (resp).model,
     choices: [
       {
         index: 0,
@@ -339,9 +339,9 @@ export function toOaCompatibleResponse(resp: CommonResponse) {
   const tcs = blocks
     .filter((b) => b && b.type === "tool_use")
     .map((b) => {
-      const name = (b as any).name
+      const name = (b).name
       const args = (() => {
-        const inp = (b as any).input
+        const inp = (b).input
         if (typeof inp === "string") return inp
         try {
           return JSON.stringify(inp ?? {})
@@ -350,8 +350,8 @@ export function toOaCompatibleResponse(resp: CommonResponse) {
         }
       })()
       const tid =
-        typeof (b as any).id === "string" && (b as any).id.length > 0
-          ? (b as any).id
+        typeof (b).id === "string" && (b).id.length > 0
+          ? (b).id
           : `toolu_${Math.random().toString(36).slice(2)}`
       return { id: tid, type: "function" as const, function: { name, arguments: args } }
     })

@@ -595,7 +595,7 @@ export function buildRetentionEntries(rows: RetentionMetricRow[]): RetentionEntr
   const cohortDates = [...new Set(rows.map((row) => row.cohortDate))].toSorted().slice(-RETENTION_COHORT_WEEKS)
   const aggregate = rows
     .filter((row) => cohortDates.includes(row.cohortDate))
-    .reduce<Map<string, Omit<RetentionEntry, "author" | "rate" | "rank">>>((result, row) => {
+    .reduce((result, row) => {
       const current = result.get(row.model)
       result.set(row.model, {
         model: row.model,

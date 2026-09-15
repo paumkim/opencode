@@ -1274,6 +1274,43 @@ function reasoningTurn(text: string): LLMEvent[] {
   ]
 }
 
+// Reasoning turn with no tool call at all — the model circles in its head and
+// then stops. This is the case the original per-turn array detector missed.
+function reasoningOnlyTurn(text: string): LLMEvent[] {
+  return [
+    LLMEvent.stepStart({ index: 0 }),
+    LLMEvent.reasoningStart({ id: "reasoning-1" }),
+    LLMEvent.reasoningDelta({ id: "reasoning-1", text }),
+    LLMEvent.reasoningEnd({ id: "reasoning-1" }),
+    LLMEvent.stepFinish({ index: 0, reason: "stop" }),
+    LLMEvent.finish({ reason: "stop" }),
+  ]
+}
+
+// A provider-executed tool that completes with a real result. Unlike
+// `toolTurn` (which leaves the call pending), this sets `stateChanged` so the
+// cross-turn streak detectors reset on real progress.
+function providerToolTurn(name: string, input: Record<string, unknown>): LLMEvent[] {
+  providerCallId++
+  const id = `call-${providerCallId}`
+  return [
+    LLMEvent.stepStart({ index: 0 }),
+    LLMEvent.toolInputStart({ id, name }),
+    LLMEvent.toolInputEnd({ id, name }),
+    LLMEvent.toolCall({ id, name, input, providerExecuted: true }),
+    LLMEvent.toolResult({
+      id,
+      name,
+      result: { type: "json", value: { ok: true } },
+      providerExecuted: true,
+    }),
+    LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }),
+    LLMEvent.finish({ reason: "tool-calls" }),
+  ]
+}
+
+let providerCallId = 0
+
 itReasoning.live(
   "session.processor effect tests detect repeated reasoning loop",
   () =>
@@ -1421,6 +1458,167 @@ itNoEdit.instance(
       expect(value.result).toBe("continue")
       expect(handle.loopDetected).toBe(false)
       expect(handle.noEditStreak).toBe(0)
+    }),
+  { config: cfg },
+)
+
+itReasoning.live(
+  "session.processor effect tests detect repeated reasoning loop with no tool call",
+  () =>
+    provideTmpdirInstance(
+      (dir) =>
+        Effect.gen(function* () {
+          const { processors, session, provider } = yield* boot()
+
+          const chat = yield* session.create({})
+          const parent = yield* user(chat.id, "reasoning only loop")
+          const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+          const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+          const handle = yield* processors.create({
+            assistantMessage: msg,
+            sessionID: chat.id,
+            model: mdl,
+          })
+
+          const input = {
+            user: {
+              id: parent.id,
+              sessionID: chat.id,
+              role: "user" as const,
+              time: parent.time,
+              agent: parent.agent,
+              model: { providerID: ref.providerID, modelID: ref.modelID },
+            } satisfies SessionV1.User,
+            sessionID: chat.id,
+            model: mdl,
+            agent: agent(),
+            system: [],
+            messages: [{ role: "user" as const, content: "reasoning only loop" }],
+            tools: {},
+          }
+
+          pushReasoningLLM(reasoningOnlyTurn("circling the same thought"))
+          pushReasoningLLM(reasoningOnlyTurn("circling the same thought"))
+          pushReasoningLLM(reasoningOnlyTurn("circling the same thought"))
+
+          yield* handle.process(input)
+          yield* handle.process(input)
+          const value = yield* handle.process(input)
+
+          expect(value.result).toBe("continue")
+          expect(handle.loopDetected).toBe(true)
+          expect(handle.loopReason).toBe("reasoning")
+        }),
+      { config: cfg },
+    ),
+)
+
+itNoEdit.instance(
+  "session.processor effect tests detect alternating text across turns",
+  () =>
+    provideTmpdirInstance(
+      (dir) =>
+        Effect.gen(function* () {
+          const { processors, session, provider } = yield* boot()
+
+          const chat = yield* session.create({})
+          const parent = yield* user(chat.id, "alternating text")
+          const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+          const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+          const handle = yield* processors.create({
+            assistantMessage: msg,
+            sessionID: chat.id,
+            model: mdl,
+          })
+
+          const input = {
+            user: {
+              id: parent.id,
+              sessionID: chat.id,
+              role: "user" as const,
+              time: parent.time,
+              agent: parent.agent,
+              model: { providerID: ref.providerID, modelID: ref.modelID },
+            } satisfies SessionV1.User,
+            sessionID: chat.id,
+            model: mdl,
+            agent: agent(),
+            system: [],
+            messages: [{ role: "user" as const, content: "alternating text" }],
+            tools: {},
+          }
+
+          // A → B → A → B → A → B — never three consecutive identicals, so
+          // the text/reasoning streak detectors miss it. Only the new
+          // alternation detector should fire.
+          pushLLM(textTurn("option one"))
+          pushLLM(textTurn("option two"))
+          pushLLM(textTurn("option one"))
+          pushLLM(textTurn("option two"))
+          pushLLM(textTurn("option one"))
+          pushLLM(textTurn("option two"))
+
+          yield* handle.process(input)
+          yield* handle.process(input)
+          yield* handle.process(input)
+          yield* handle.process(input)
+          yield* handle.process(input)
+          const value = yield* handle.process(input)
+
+          expect(value.result).toBe("continue")
+          expect(handle.loopDetected).toBe(true)
+          expect(handle.loopReason).toBe("alternation")
+        }),
+      { config: cfg },
+    ),
+)
+
+itNoEdit.instance(
+  "session.processor effect tests reset text/reasoning streaks on state-changing tool result",
+  () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const { processors, session, provider } = yield* boot()
+
+      const chat = yield* session.create({})
+      const parent = yield* user(chat.id, "reset on progress")
+      const msg = yield* assistant(chat.id, parent.id, path.resolve(test.directory))
+      const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+      const handle = yield* processors.create({
+        assistantMessage: msg,
+        sessionID: chat.id,
+        model: mdl,
+      })
+
+      const input = {
+        user: {
+          id: parent.id,
+          sessionID: chat.id,
+          role: "user" as const,
+          time: parent.time,
+          agent: parent.agent,
+          model: { providerID: ref.providerID, modelID: ref.modelID },
+        } satisfies SessionV1.User,
+        sessionID: chat.id,
+        model: mdl,
+        agent: agent(),
+        system: [],
+        messages: [{ role: "user" as const, content: "reset on progress" }],
+        tools: {},
+      }
+
+      // Two identical text turns, then a state-changing edit. The text streak
+      // should reset, and the edit also clears the no-edit streak.
+      pushLLM(textTurn("reading files"))
+      pushLLM(textTurn("reading files"))
+      pushLLM(providerToolTurn("write", { path: "a.txt", content: "x" }))
+
+      yield* handle.process(input)
+      yield* handle.process(input)
+      const value = yield* handle.process(input)
+
+      expect(value.result).toBe("continue")
+      expect(handle.loopDetected).toBe(false)
     }),
   { config: cfg },
 )

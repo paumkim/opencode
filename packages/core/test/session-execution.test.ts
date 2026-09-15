@@ -449,7 +449,7 @@ Output modalities: text
 Status: active`,
         ],
       ])
-      expect(systemTexts(State.requests[1]!)).toContain("Replacement context")
+      expect(systemTexts(State.requests[1])).toContain("Replacement context")
     }),
   )
 

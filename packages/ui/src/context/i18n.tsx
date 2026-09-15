@@ -35,7 +35,7 @@ export function pluralCategory(locale: string, count: number): UiPluralCategory 
 }
 
 export function pluralKey(key: UiI18nPluralKey, category: UiPluralCategory) {
-  return `${key}.${category}` as UiI18nPluralLookupKey
+  return `${key}.${category}`
 }
 
 function resolveTemplate(text: string, params?: UiI18nParams) {
@@ -57,7 +57,7 @@ const fallback: UiI18n = {
     fallback.t(pluralKey(key, pluralCategory(fallback.locale(), count)), { ...params, count }),
 }
 
-const Context = createContext<UiI18n>(fallback)
+const Context = createContext(fallback)
 
 function UiI18nProvider(props: ParentProps<{ value: UiI18n }>) {
   return (

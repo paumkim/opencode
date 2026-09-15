@@ -18,7 +18,7 @@ const GLOB_LIMIT = 50
 const run = <A, R>(effect: Effect.Effect<A, unknown, R>) =>
   AppRuntime.runPromise(
     InstanceStore.Service.use((store) => store.provide({ directory: dir }, effect as never)),
-  ) as Promise<A>
+  )
 
 // --- raw Fff picker ---
 const t0 = performance.now()

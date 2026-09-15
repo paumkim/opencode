@@ -53,13 +53,13 @@ test.describe("timeline visual lifecycle stability", () => {
     await waitForVisualSettle(page, [`[data-timeline-part-id="${followingID}"]`])
     await startVisualProbe(page, regions)
     await timeline.sendAll([
-      { event: partUpdated(shell(ids[0]!, "completed", "")), delay: 180 },
-      { event: partUpdated(shell(ids[2]!, "running", lines(10))), delay: 70 },
-      { event: partUpdated(shell(ids[1]!, "running", lines(2))), delay: 110 },
-      { event: partUpdated(shell(ids[2]!, "running", lines(25))), delay: 80 },
-      { event: partUpdated(shell(ids[1]!, "completed", lines(2))), delay: 260 },
-      { event: partUpdated(shell(ids[2]!, "running", lines(50))), delay: 100 },
-      { event: partUpdated(shell(ids[2]!, "completed", lines(50))), delay: 450 },
+      { event: partUpdated(shell(ids[0], "completed", "")), delay: 180 },
+      { event: partUpdated(shell(ids[2], "running", lines(10))), delay: 70 },
+      { event: partUpdated(shell(ids[1], "running", lines(2))), delay: 110 },
+      { event: partUpdated(shell(ids[2], "running", lines(25))), delay: 80 },
+      { event: partUpdated(shell(ids[1], "completed", lines(2))), delay: 260 },
+      { event: partUpdated(shell(ids[2], "running", lines(50))), delay: 100 },
+      { event: partUpdated(shell(ids[2], "completed", lines(50))), delay: 450 },
       { event: messageUpdated(completedAssistantInfo(assistant.info)), delay: 100 },
       { event: status("idle"), delay: 700 },
     ])

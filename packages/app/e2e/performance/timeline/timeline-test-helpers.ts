@@ -121,7 +121,7 @@ function reviewPatch(file: string, before: string, after: string) {
     `+++ b/${file}`,
     `@@ -1,${beforeLines.length} +1,${afterLines.length} @@`,
     ...beforeLines.flatMap((line, index) => {
-      const next = afterLines[index]!
+      const next = afterLines[index]
       if (line === next) return [` ${line}`]
       return [`-${line}`, `+${next}`]
     }),

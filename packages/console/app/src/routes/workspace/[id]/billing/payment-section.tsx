@@ -84,7 +84,7 @@ export function PaymentSection() {
               </tr>
             </thead>
             <tbody>
-              <For each={payments()!}>
+              <For each={payments()}>
                 {(payment) => {
                   const date = new Date(payment.timeCreated)
                   const amount =

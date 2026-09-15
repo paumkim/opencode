@@ -12,7 +12,7 @@ import { testEffect } from "../lib/effect"
 
 const it = testEffect(
   LayerNode.compile(LayerNode.group([httpClient, Truncate.node, Agent.node]), [
-    [httpClient, FetchHttpClient.layer as Layer.Layer<HttpClient.HttpClient>],
+    [httpClient, FetchHttpClient.layer],
   ]),
 )
 

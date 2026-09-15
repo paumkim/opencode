@@ -11,8 +11,8 @@ for (const profile of [
       messages: [
         userMessage(),
         assistantMessage([
-          toolPart(ids[0]!, "read", "completed", { filePath: "src/a.ts" }),
-          toolPart(ids[1]!, "glob", "completed", { path: ".", pattern: "**/*.ts" }),
+          toolPart(ids[0], "read", "completed", { filePath: "src/a.ts" }),
+          toolPart(ids[1], "glob", "completed", { path: ".", pattern: "**/*.ts" }),
         ]),
       ],
       locale: profile.locale,

@@ -257,11 +257,11 @@ describe("Session", () => {
       }
 
       const beforeWrap = yield* Effect.acquireRelease(
-        session.fork({ sessionID: created.id, messageID: MessageID.make(ids[1]!) }),
+        session.fork({ sessionID: created.id, messageID: MessageID.make(ids[1]) }),
         (info) => session.remove(info.id).pipe(Effect.ignore),
       )
       const afterWrap = yield* Effect.acquireRelease(
-        session.fork({ sessionID: created.id, messageID: MessageID.make(ids[2]!) }),
+        session.fork({ sessionID: created.id, messageID: MessageID.make(ids[2]) }),
         (info) => session.remove(info.id).pipe(Effect.ignore),
       )
 

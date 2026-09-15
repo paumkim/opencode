@@ -2,10 +2,8 @@ import type {
   Config,
   OpencodeClient,
   Path,
-  PermissionRequest,
   Project,
   ProviderAuthResponse,
-  QuestionRequest,
   ReferenceInfo,
   Session,
 } from "@opencode-ai/sdk/v2/client"
@@ -487,7 +485,7 @@ export async function bootstrapDirectory(input: {
           })().then((questions) => {
             const ids = questions.map((question) => question.sessionID)
             const grouped = groupBySession(
-              questions.filter((question) => !!question.id && !!question.sessionID) as QuestionRequest[],
+              questions.filter((question) => !!question.id && !!question.sessionID),
             )
             const warm = input.session
               ? Promise.all(ids.map((sessionID) => input.session!.resolve(sessionID))).then(() => undefined)

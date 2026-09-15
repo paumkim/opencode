@@ -12,7 +12,7 @@ type ServerProjectState = {
   lastProject: Record<string, string>
   recentlyClosed: Record<string, string[]>
 }
-const HEALTH_POLL_INTERVAL_MS = 10_000
+const _HEALTH_POLL_INTERVAL_MS = 10_000
 // The store retains more history than is displayed. Consumers filter recently closed entries
 // against the live project list (dropping deleted projects) and then cap the visible count via
 // RECENTLY_CLOSED_DISPLAY_LIMIT. Retaining extra history ensures entries that are temporarily

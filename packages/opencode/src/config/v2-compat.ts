@@ -410,7 +410,7 @@ function lowerCommand(input: Schema.Schema.Type<typeof Command>) {
   return { ...input, ...(input.model !== undefined ? lowerSelection(input.model) : {}) }
 }
 
-function decodeValue<S extends Schema.Codec<unknown, unknown, never, never>>(
+function decodeValue<S extends Schema.Codec<unknown, unknown, never>>(
   schema: S,
   value: unknown,
   path: string[],

@@ -16,7 +16,7 @@ export default function Black() {
   const i18n = useI18n()
   const language = useLanguage()
   const paused = createAsync(() => getPaused())
-  const [selected, setSelected] = createSignal<string | null>((params.plan as string) || null)
+  const [selected, setSelected] = createSignal((params.plan as string) || null)
   const [mounted, setMounted] = createSignal(false)
   const selectedPlan = createMemo(() => plans.find((p) => p.id === selected()))
 

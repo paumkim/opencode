@@ -74,8 +74,8 @@ test("forensic: proves detached same-node viewport leaves TanStack's bottom rang
     routeConnectedInCallback: false,
     nativeOffsetInCallback: 0,
   })
-  expect(pending.mutationEvents[0]!.callbackTime).toBeLessThanOrEqual(pending.operation.time)
-  expect(pending.mutationEvents[0]!.callbackFrame).toBeLessThanOrEqual(pending.operation.frame)
+  expect(pending.mutationEvents[0].callbackTime).toBeLessThanOrEqual(pending.operation.time)
+  expect(pending.mutationEvents[0].callbackFrame).toBeLessThanOrEqual(pending.operation.frame)
 
   const after = await resolveSuspension(page)
   expect(after.resourceState).toBe("ready")
@@ -100,8 +100,8 @@ test("forensic: proves detached same-node viewport leaves TanStack's bottom rang
     routeConnectedInCallback: true,
     nativeOffsetInCallback: 0,
   })
-  expect(after.mutationEvents[1]!.callbackTime).toBeLessThanOrEqual(after.operation.time)
-  expect(after.mutationEvents[1]!.callbackFrame).toBeLessThanOrEqual(after.operation.frame)
+  expect(after.mutationEvents[1].callbackTime).toBeLessThanOrEqual(after.operation.time)
+  expect(after.mutationEvents[1].callbackFrame).toBeLessThanOrEqual(after.operation.frame)
   expect(after.visibleRows).toBe(0)
   expect(after.minimumRowTop).toBeGreaterThan(50_000)
   expect(after.syntheticScrollDispatches).toBe(0)

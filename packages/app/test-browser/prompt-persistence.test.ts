@@ -82,7 +82,7 @@ test("moves legacy image data URLs into blobs and hydrates object URLs", async (
 
   await store.setItem("prompt", JSON.stringify({ prompt: [{ type: "image", dataUrl: "data:image/png;base64,YQ==" }] }))
   expect(documents.get("prompt")).not.toContain("dataUrl")
-  const value = JSON.parse((await store.getItem("prompt"))!)
+  const value = JSON.parse((await store.getItem("prompt")))
   expect(value.prompt[0].blob.id).toBe("1")
   expect(value.prompt[0].blob.url).toStartWith("blob:")
 })

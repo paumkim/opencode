@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { Cause, Effect, Schema } from "effect"
 import { CodeMode, Tool, toolError } from "../src/index.js"
 
-const run = (tool: Tool.Definition<never>) =>
+const run = (tool: Tool.Definition) =>
   Effect.runPromise(CodeMode.make({ tools: { host: { call: tool } } }).execute("return await tools.host.call({})"))
 
 class UnsafeHostError extends Schema.TaggedErrorClass<UnsafeHostError>()("UnsafeHostError", {

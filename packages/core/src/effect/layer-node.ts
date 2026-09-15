@@ -121,7 +121,7 @@ type CheckReplacementErrors<SourceError, ReplacementError> = [Exclude<Replacemen
 type CheckReplacement<Item> = Item extends readonly [Node<infer A, infer E, infer T>, infer Replacement]
   ? Replacement extends Node<NoInfer<A>, infer E2, T>
     ? CheckReplacementErrors<E, NoInfer<E2>>
-    : Replacement extends Layer.Layer<NoInfer<A>, infer E2, never>
+    : Replacement extends Layer.Layer<NoInfer<A>, infer E2>
       ? CheckReplacementErrors<E, NoInfer<E2>>
       : { readonly "Invalid replacement": Replacement }
   : { readonly "Invalid replacement": Item }

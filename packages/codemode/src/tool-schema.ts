@@ -96,8 +96,8 @@ const jsdoc = (description: string | undefined, tags: ReadonlyArray<string>, pad
   const lines = [...(description === undefined ? [] : description.split("\n")), ...tags].map((line) =>
     line.replaceAll("*/", "* /").replace(/\s+$/, ""),
   )
-  while (lines.length > 0 && lines[0]!.trim() === "") lines.shift()
-  while (lines.length > 0 && lines[lines.length - 1]!.trim() === "") lines.pop()
+  while (lines.length > 0 && lines[0].trim() === "") lines.shift()
+  while (lines.length > 0 && lines[lines.length - 1].trim() === "") lines.pop()
   if (lines.length === 0) return ""
   if (lines.length === 1) return `${pad}/** ${lines[0]} */\n`
   const body = lines.map((line) => `${pad} *${line === "" ? "" : ` ${line}`}`).join("\n")
@@ -114,7 +114,7 @@ const renderSchema = (
   const nested =
     schema.definitions === undefined && schema.$defs === undefined
       ? ctx
-      : { ...ctx, definitions: { ...ctx.definitions, ...(schema.definitions ?? {}), ...(schema.$defs ?? {}) } }
+      : { ...ctx, definitions: { ...ctx.definitions, ...schema.definitions, ...schema.$defs } }
   if (schema.$ref) {
     const segment = schema.$ref.match(/^#\/(?:\$defs|definitions)\/([^/]+)$/)?.[1]
     const name = segment === undefined ? undefined : JsonPointer.unescapeToken(segment)
@@ -211,7 +211,7 @@ export const toTypeScript = (schema: Schema.Top, decoded = false, pretty = false
 /** Renders a raw JSON Schema document as a TypeScript type string. */
 export const jsonSchemaToTypeScript = (schema: JsonSchema, pretty = false): string => {
   try {
-    return renderSchema(schema, { definitions: { ...(schema.definitions ?? {}), ...(schema.$defs ?? {}) }, pretty })
+    return renderSchema(schema, { definitions: { ...schema.definitions, ...schema.$defs }, pretty })
   } catch {
     return "unknown"
   }
@@ -240,7 +240,7 @@ export const inputProperties = <R>(definition: Definition<R>): Array<InputProper
         })
       : {
           schema: definition.input,
-          definitions: { ...(definition.input.definitions ?? {}), ...(definition.input.$defs ?? {}) },
+          definitions: { ...definition.input.definitions, ...definition.input.$defs },
         }
     const definitions = document.definitions ?? {}
     let schema = document.schema

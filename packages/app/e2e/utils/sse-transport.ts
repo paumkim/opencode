@@ -165,9 +165,9 @@ export async function installSseTransport<T>(
           connection.controller.enqueue(bytes)
           return encoded.map((item) => acknowledge(connection, item.bytes.byteLength, 1, item.delivery.options?.id))
         }
-        const output = chunks(encoded[0]!.bytes, input.cuts)
+        const output = chunks(encoded[0].bytes, input.cuts)
         output.forEach((chunk) => connection.controller.enqueue(chunk))
-        return acknowledge(connection, encoded[0]!.bytes.byteLength, output.length, encoded[0]!.delivery.options?.id)
+        return acknowledge(connection, encoded[0].bytes.byteLength, output.length, encoded[0].delivery.options?.id)
       }
 
       ;(window as BrowserTransport).__testSseTransport = { command }

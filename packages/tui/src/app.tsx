@@ -1073,7 +1073,7 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
       `Successfully updated to OpenCode v${result.data.version}. Please restart the application.`,
     )
 
-    void exit()
+     exit()
   })
 
   const plugin = createMemo(() => {

@@ -64,7 +64,7 @@ function harness(input: {
 }
 
 function serverNames(mcpTools: Record<string, MCP.McpTool>, servers?: string[]) {
-  return servers ?? [...new Set(Object.keys(mcpTools).map((key) => key.split("_")[0]!))]
+  return servers ?? [...new Set(Object.keys(mcpTools).map((key) => key.split("_")[0]))]
 }
 
 function build(
@@ -420,10 +420,10 @@ describe("code mode execute", () => {
       ["tool.execute.after", "b_tool", "call_code_mode/2"],
     ])
     const [before, after] = events
-    expect(before!.input.sessionID).toBe(ctx.sessionID)
-    expect(before!.output).toEqual({ args: { x: 1 } })
-    expect(after!.input.args).toEqual({ x: 1 })
-    expect(after!.output).toEqual({ content: [{ type: "text", text: "one" }] })
+    expect(before.input.sessionID).toBe(ctx.sessionID)
+    expect(before.output).toEqual({ args: { x: 1 } })
+    expect(after.input.args).toEqual({ x: 1 })
+    expect(after.output).toEqual({ content: [{ type: "text", text: "one" }] })
   })
 
   test("a failing before hook fails only that child call as a catchable in-program error", async () => {

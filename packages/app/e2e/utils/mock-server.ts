@@ -263,15 +263,15 @@ export async function mockOpenCodeServer(page: Page, config: MockServerConfig) {
 
     const messageMatch = path.match(/^\/session\/([^/]+)\/message\/([^/]+)$/)
     if (messageMatch) {
-      config.onMessage?.({ sessionID: messageMatch[1]!, messageID: messageMatch[2]! })
+      config.onMessage?.({ sessionID: messageMatch[1], messageID: messageMatch[2] })
       if (config.messageDelay !== undefined) await new Promise((resolve) => setTimeout(resolve, config.messageDelay))
-      const message = config.message?.(messageMatch[1]!, messageMatch[2]!)
+      const message = config.message?.(messageMatch[1], messageMatch[2])
       if (message === undefined) return json(route, { error: "Message not found" }, undefined, 404)
       return json(route, message)
     }
 
     const todoMatch = path.match(/^\/session\/([^/]+)\/todo$/)
-    if (todoMatch) return json(route, config.todos?.(todoMatch[1]!) ?? [])
+    if (todoMatch) return json(route, config.todos?.(todoMatch[1]) ?? [])
     if (/^\/session\/[^/]+\/(children|diff)$/.test(path)) return json(route, [])
 
     const currentMessagesMatch = path.match(/^\/api\/session\/([^/]+)\/message$/)
@@ -280,7 +280,7 @@ export async function mockOpenCodeServer(page: Page, config: MockServerConfig) {
       const before = token ? cursors.get(token) : undefined
       if (token && !before) return json(route, { error: "Invalid cursor" }, undefined, 400)
       config.onMessages?.({ sessionID: currentMessagesMatch[1], before, phase: "start" })
-      await config.beforeMessagesResponse?.({ sessionID: currentMessagesMatch[1]!, before })
+      await config.beforeMessagesResponse?.({ sessionID: currentMessagesMatch[1], before })
       if (config.messageDelay !== undefined) await new Promise((resolve) => setTimeout(resolve, config.messageDelay))
       const pageData = config.pageMessages(currentMessagesMatch[1], Number(url.searchParams.get("limit") ?? 50), before)
       config.onMessages?.({ sessionID: currentMessagesMatch[1], before, phase: "end" })
@@ -298,7 +298,7 @@ export async function mockOpenCodeServer(page: Page, config: MockServerConfig) {
       const before = token ? cursors.get(token) : undefined
       if (token && !before) return json(route, { error: "Invalid cursor" }, undefined, 400)
       config.onMessages?.({ sessionID: messagesMatch[1], before, phase: "start" })
-      await config.beforeMessagesResponse?.({ sessionID: messagesMatch[1]!, before })
+      await config.beforeMessagesResponse?.({ sessionID: messagesMatch[1], before })
       if (config.messageDelay !== undefined) await new Promise((resolve) => setTimeout(resolve, config.messageDelay))
       const limit = Number(url.searchParams.get("limit") ?? 80)
       const pageData = config.pageMessages(messagesMatch[1], limit, before)

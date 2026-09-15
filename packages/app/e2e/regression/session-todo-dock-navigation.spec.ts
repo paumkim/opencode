@@ -90,8 +90,8 @@ test("animates todo lifecycle without replaying it across session tabs", async (
   await switchSession(page, sourceID, sourceTitle)
   const openSamples = (await returningOpen).filter((sample) => sample.present)
   expect(openSamples.length).toBeGreaterThan(0)
-  expect(openSamples[0]!.opacity).toBeGreaterThan(0.98)
-  expect(openSamples[0]!.height).toBeGreaterThan(70)
+  expect(openSamples[0].opacity).toBeGreaterThan(0.98)
+  expect(openSamples[0].height).toBeGreaterThan(70)
   await expect(dock.locator('[data-state="in_progress"]')).toHaveCount(1)
 
   const completedTodos = activeTodos.map((todo) => ({ ...todo, status: "completed" }))

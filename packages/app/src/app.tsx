@@ -13,7 +13,6 @@ import {
   Navigate,
   Route,
   Router,
-  useLocation,
   useNavigate,
   useParams,
   useSearchParams,
@@ -37,7 +36,6 @@ import {
   Show,
 } from "solid-js"
 import { Dynamic } from "solid-js/web"
-import { makeEventListener } from "@solid-primitives/event-listener"
 import { CommandProvider, useCommand, type CommandOption } from "@/context/command"
 import { CommentsProvider } from "@/context/comments"
 import { FileProvider } from "@/context/file"

@@ -745,6 +745,117 @@ it.instance("loop stops provider overflow instead of auto-compacting when disabl
   }),
 )
 
+// End-to-end: the previous assistant turn consumed >= 90% of the model's usable
+// context (100k context - 10k output cap = 90k usable). The next user message
+// triggers the loop's overflow check, which enqueues an auto-compaction marker,
+// runs the compaction agent to produce a summary, injects a synthetic continue
+// prompt, and resumes the build agent with a fresh, compacted context.
+it.instance(
+  "auto-compacts and continues after the previous assistant turn overflowed",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+
+      const chat = yield* sessions.create({ title: "Overflow" })
+      const u1 = yield* user(chat.id, "hello")
+      const a1 = yield* sessions.updateMessage({
+        id: MessageID.ascending(),
+        role: "assistant",
+        parentID: u1.id,
+        sessionID: chat.id,
+        mode: "build",
+        agent: "build",
+        cost: 0,
+        path: { cwd: "/tmp", root: "/tmp" },
+        tokens: {
+          total: 90_000,
+          input: 85_000,
+          output: 5_000,
+          reasoning: 0,
+          cache: { read: 0, write: 0 },
+        },
+        modelID: ref.modelID,
+        providerID: ref.providerID,
+        time: { created: Date.now() },
+        finish: "end_turn",
+      })
+      yield* sessions.updatePart({
+        id: PartID.ascending(),
+        messageID: a1.id,
+        sessionID: chat.id,
+        type: "text",
+        text: "x".repeat(4_000),
+      })
+
+      // First LLM call: the compaction agent producing the anchored summary.
+      // Second LLM call: the build agent replying after the auto-continue prompt.
+      yield* llm.push(reply().text("summary").stop().item())
+      yield* llm.push(reply().text("final answer").stop().item())
+
+      const result = yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        parts: [{ type: "text", text: "current" }],
+      })
+
+      const messages = yield* sessions.messages({ sessionID: chat.id })
+      expect(messages.some((message) => message.parts.some((part) => part.type === "compaction"))).toBe(true)
+      expect(messages.some((message) => message.info.role === "assistant" && message.info.summary)).toBe(true)
+      expect(
+        messages.some((message) => message.info.role === "assistant" && message.info.finish === "stop"),
+      ).toBe(true)
+      if (result.info.role === "assistant") expect(result.info.finish).toBe("stop")
+    }),
+  { config: cfg },
+)
+
+// Provider-reported 413 context overflow mid-stream. With auto-compaction on,
+// the processor marks the turn for compaction, the loop enqueues an overflow
+// compaction marker, the compaction agent produces a summary, a synthetic
+// continue prompt is injected, and the build agent resumes with a compacted
+// context — instead of erroring out like the disabled path.
+it.instance(
+  "auto-compacts after a provider 413 context overflow",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({ title: "Overflow" })
+
+      // 1. build agent replies to the first user message
+      yield* llm.push(reply().text("hello reply").stop().item())
+      yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        parts: [{ type: "text", text: "hello" }],
+      })
+
+      // 2. the second user message overflows the provider (413)
+      yield* llm.error(413, { error: { message: "request entity too large" } })
+      // 3. compaction agent produces the anchored summary
+      yield* llm.push(reply().text("summary").stop().item())
+      // 4. build agent resumes after the auto-continue prompt
+      yield* llm.push(reply().text("final answer").stop().item())
+
+      const result = yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        parts: [{ type: "text", text: "current" }],
+      })
+
+      const messages = yield* sessions.messages({ sessionID: chat.id })
+      expect(messages.some((message) => message.parts.some((part) => part.type === "compaction"))).toBe(true)
+      expect(messages.some((message) => message.info.role === "assistant" && message.info.summary)).toBe(true)
+      expect(messages.some((message) => message.info.role === "assistant" && message.info.finish === "stop")).toBe(true)
+      expect(messages.some((message) => message.info.role === "assistant" && message.info.error)).toBe(false)
+      if (result.info.role === "assistant") expect(result.info.finish).toBe("stop")
+    }),
+  { config: cfg },
+)
+
 noLLMServer.instance.skip(
   "prompt emits v2 prompted and synthetic events (v2 projector disabled)",
   () =>
@@ -1047,7 +1158,7 @@ it.instance("subtask child inherits parent session external_directory allow", ()
 
     const kids = yield* sessions.children(chat.id)
     expect(kids).toHaveLength(1)
-    const child = kids[0]!
+    const child = kids[0]
     const rules = child.permission ?? []
     expect(rules).toEqual(
       expect.arrayContaining([{ permission: "external_directory", pattern: "/tmp/allowed/*", action: "allow" }]),

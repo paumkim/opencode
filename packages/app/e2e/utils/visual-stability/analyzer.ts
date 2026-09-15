@@ -88,7 +88,7 @@ export function analyzeVisualObservations<RegionName extends string>(
       for (const metric of ["top", "bottom", "width", "height"] as const) {
         const directions = visible
           .slice(1)
-          .map((sample, index) => sample[metric] - visible[index]![metric])
+          .map((sample, index) => sample[metric] - visible[index][metric])
           .filter((delta) => Math.abs(delta) > (invariant.tolerance ?? 1))
           .map(Math.sign)
         const reversals = directions.slice(1).filter((direction, index) => direction !== directions[index]).length
@@ -135,7 +135,7 @@ export function analyzeVisualObservations<RegionName extends string>(
   )) {
     for (const [before, after] of invariant.regions
       .slice(1)
-      .map((after, index) => [invariant.regions[index]!, after])) {
+      .map((after, index) => [invariant.regions[index], after])) {
       let maximum: { overlap: number; at: number } | undefined
       let inverted: { at: number } | undefined
       for (const sample of observations) {
@@ -201,7 +201,7 @@ function regions<RegionName extends string, Type extends VisualInvariant<RegionN
 ) {
   return invariants.flatMap((invariant) =>
     invariant.type === type && "regions" in invariant && invariant.regions !== "all" ? [...invariant.regions] : [],
-  ) as RegionName[]
+  )
 }
 
 function includes<RegionName extends string>(regions: readonly RegionName[] | "all", name: RegionName) {

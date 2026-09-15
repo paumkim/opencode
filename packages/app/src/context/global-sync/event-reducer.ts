@@ -148,7 +148,7 @@ export function applyDirectoryEvent(input: {
       const result = Binary.search(input.store.session, info.id, (s) => s.id)
       if (info.time.archived) {
         if (!result.found) break
-        if (input.store.session[result.index]!.time.archived === info.time.archived) break
+        if (input.store.session[result.index].time.archived === info.time.archived) break
         input.setStore(
           "session",
           produce((draft) => {
@@ -381,7 +381,7 @@ export function applyDirectoryEvent(input: {
           const part = draft[result.index]
           const field = props.field as keyof typeof part
           const existing = part[field] as string | undefined
-          ;(part[field] as string) = (existing ?? "") + props.delta
+          ;(part[field]) = (existing ?? "") + props.delta
         }),
       )
       break

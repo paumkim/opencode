@@ -20,8 +20,12 @@ const singleFlag = process.argv.includes("--single")
 const baselineFlag = process.argv.includes("--baseline")
 const skipInstall = process.argv.includes("--skip-install")
 const sourcemapsFlag = process.argv.includes("--sourcemaps")
+const embedWebUi = process.argv.includes("--embed-web-ui")
 const plugin = createSolidTransformPlugin()
-const skipEmbedWebUi = process.argv.includes("--skip-embed-web-ui")
+// Embedding the web UI bakes ~30 MB of assets into every binary. The runtime
+// already falls back to proxying app.opencode.ai when it is absent, so we skip
+// it by default and opt in only when explicitly requested.
+const skipEmbedWebUi = !embedWebUi
 
 const createEmbeddedWebUIBundle = async () => {
   console.log(`Building Web UI to embed in the binary`)

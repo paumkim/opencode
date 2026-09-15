@@ -14,7 +14,13 @@ const DEFAULT_KEEP_TOKENS = 8_000
 const DEFAULT_THRESHOLD = 0.89
 const TOOL_OUTPUT_MAX_CHARS = 2_000
 const SUMMARY_OUTPUT_TOKENS = 4_096
-const SUMMARY_TEMPLATE = `Output exactly the Markdown structure shown inside <template> and keep the section order unchanged. Do not include the <template> tags in your response.
+const SUMMARY_TEMPLATE = `You are an anchored context summarization assistant for coding sessions.
+
+Summarize only the conversation history you are given. The newest turns may be kept verbatim outside your summary, so focus on the older context that still matters for continuing the work.
+
+If the prompt includes a <previous-summary> block, treat it as the current anchored summary. Update it with the new history by preserving still-true details, removing stale details, and merging in new facts.
+
+Output exactly the Markdown structure shown inside <template> and keep the section order unchanged. Do not include the <template> tags in your response.
 <template>
 ## Objective
 - [one or two brief sentences describing what the user is trying to accomplish]
@@ -33,6 +39,9 @@ const SUMMARY_TEMPLATE = `Output exactly the Markdown structure shown inside <te
 ## Next Move
 1. [immediate concrete action, or "(none)"]
 2. [next action if known, or "(none)"]
+
+## Reasoning Notes
+- [WHY decisions were made, abandoned approaches with their reasons, and open hypotheses. Summarize reasoning outcomes tersely; never reproduce verbatim thinking traces.]
 </template>
 
 Rules:
@@ -41,7 +50,8 @@ Rules:
 - Preserve exact file paths, symbols, commands, error strings, URLs, and identifiers when known.
 - Put relevant files and symbols inside the section where they matter; do not add extra sections.
 - Re-state the user's most recent request in Current Request using their own wording and intent, not a paraphrase of what the agent thinks they wanted.
-- Do not mention the summary process or that context was compacted.`
+- Do not mention the summary process or that context was compacted.
+- Do not answer the conversation itself. Respond in the same language as the conversation.`
 
 type Entry = {
   readonly seq: number

@@ -81,15 +81,15 @@ test.describe("regression: session timeline context group resize", () => {
           type: "message.part.updated",
           properties: {
             part: contextTool(
-              contextIDs[index]!,
+              contextIDs[index],
               id("msg_assistant", 10),
-              ["read", "glob", "grep", "list"][index]!,
+              ["read", "glob", "grep", "list"][index],
               [
                 { filePath: "src/recent-a.ts" },
                 { path: directory, pattern: "**/*.ts" },
                 { path: directory, pattern: "Explored" },
                 { path: "src" },
-              ][index]!,
+              ][index],
             ),
           },
         },
@@ -247,21 +247,21 @@ function turn(index: number, target: boolean, status: "running" | "completed" = 
       parts: target
         ? [
             contextTool(
-              contextIDs[0]!,
+              contextIDs[0],
               assistantID,
               "read",
               { filePath: "src/recent-a.ts", offset: 0, limit: 120 },
               status,
             ),
-            contextTool(contextIDs[1]!, assistantID, "glob", { path: directory, pattern: "**/*.ts" }, status),
+            contextTool(contextIDs[1], assistantID, "glob", { path: directory, pattern: "**/*.ts" }, status),
             contextTool(
-              contextIDs[2]!,
+              contextIDs[2],
               assistantID,
               "grep",
               { path: directory, pattern: "Explored", include: "*.ts" },
               status,
             ),
-            contextTool(contextIDs[3]!, assistantID, "list", { path: "src" }, status),
+            contextTool(contextIDs[3], assistantID, "list", { path: "src" }, status),
             {
               id: followingTextID,
               sessionID,

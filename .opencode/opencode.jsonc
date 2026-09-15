@@ -12,7 +12,6 @@
       "description": "Contains opencode logs and data"
     }
   },
-  "plugin": ["@prevalentware/opencode-goal-plugin"],
   "experimental": { "stream_delay": 50 },
   "mcp": {},
   "tools": {

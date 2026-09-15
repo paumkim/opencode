@@ -23,7 +23,7 @@ export const todoState = (input: {
 
 export const todoDockAtBoundary = (state: ReturnType<typeof todoState>) => state === "open"
 
-const idle = { type: "idle" as const }
+const _idle = { type: "idle" as const }
 
 export function createSessionComposerController(options?: { closeMs?: number | (() => number) }) {
   const params = useParams()

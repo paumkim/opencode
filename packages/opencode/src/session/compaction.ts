@@ -155,7 +155,7 @@ function splitTurn(input: {
       if (size > input.budget) continue
       return {
         start,
-        id: input.messages[start]!.info.id,
+        id: input.messages[start].info.id,
       } satisfies Tail
     }
     return undefined
@@ -235,7 +235,7 @@ const layer = Layer.effect(
       let total = 0
       let keep: Tail | undefined
       for (let i = recent.length - 1; i >= 0; i--) {
-        const turn = recent[i]!
+        const turn = recent[i]
         // estimate lazily so cost stays proportional to the retained tail, not the whole session
         const size = yield* estimate({
           messages: input.messages.slice(turn.start, turn.end),

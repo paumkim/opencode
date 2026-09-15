@@ -9,7 +9,7 @@ describe("OauthCallbackPage", () => {
     })
 
     expect(html.match(/<\/script>/g)).toHaveLength(1)
-    expect(html).toContain(`xAI\\u003c/script>\\u003cscript>alert(\\\"provider\\\")\\u003c/script>`)
-    expect(html).toContain(`/token\\u003c/script>\\u003cscript>alert(\\\"path\\\")\\u003c/script>`)
+    expect(html).toContain(`xAI\\u003c/script>\\u003cscript>alert(\\"provider\\")\\u003c/script>`)
+    expect(html).toContain(`/token\\u003c/script>\\u003cscript>alert(\\"path\\")\\u003c/script>`)
   })
 })

@@ -37,7 +37,7 @@ test("parses split JSON and a split multibyte code point", async ({ page }) => {
   const timeline = await setupTimeline(page)
   const payload = partUpdated(textPart("prt_transport_split", "split snowman \u2603\u2603\u2603"))
   const encoded = new TextEncoder().encode(`data: ${JSON.stringify(payload)}\n\n`)
-  const snowman = new TextEncoder().encode("\u2603")[0]!
+  const snowman = new TextEncoder().encode("\u2603")[0]
   const multibyte = encoded.indexOf(snowman)
 
   const acknowledgement = await timeline.transport.split(payload, [9, multibyte + 1, multibyte + 2])

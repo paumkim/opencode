@@ -973,7 +973,7 @@ function listByProject(
 
       conditions.push(
         input.directory
-          ? or(...conds, and(isNull(SessionTable.path), eq(SessionTable.directory, input.directory))!)!
+          ? or(...conds, and(isNull(SessionTable.path), eq(SessionTable.directory, input.directory)))!
           : or(...conds)!,
       )
     }

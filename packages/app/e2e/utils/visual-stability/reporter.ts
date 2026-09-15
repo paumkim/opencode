@@ -46,7 +46,7 @@ async function attachViolationFrames<RegionName extends string>(
   ].slice(0, 6)
   for (const [violation, target] of targets.entries()) {
     const nearest = result.frames.reduce(
-      (best, frame, index) => (Math.abs(frame.at - target) < Math.abs(result.frames[best]!.at - target) ? index : best),
+      (best, frame, index) => (Math.abs(frame.at - target) < Math.abs(result.frames[best].at - target) ? index : best),
       0,
     )
     for (const [label, index] of [
@@ -54,8 +54,8 @@ async function attachViolationFrames<RegionName extends string>(
       ["violation", nearest],
       ["after", Math.min(result.frames.length - 1, nearest + 1)],
     ] as const) {
-      await testInfo.attach(`${name}-${violation + 1}-${label}-${Math.round(result.frames[index]!.at)}ms`, {
-        body: Buffer.from(result.frames[index]!.data, "base64"),
+      await testInfo.attach(`${name}-${violation + 1}-${label}-${Math.round(result.frames[index].at)}ms`, {
+        body: Buffer.from(result.frames[index].data, "base64"),
         contentType: "image/jpeg",
       })
     }

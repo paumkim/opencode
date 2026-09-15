@@ -19,11 +19,11 @@ export default function BlackLayout(props: RouteSectionProps) {
       ? new Intl.NumberFormat(language.tag(language.locale()), {
           notation: "compact",
           compactDisplay: "short",
-        }).format(githubData()!.stars!)
+        }).format(githubData()!.stars)
       : config.github.starsFormatted.compact,
   )
 
-  const [spotlightAnimationState, setSpotlightAnimationState] = createSignal<SpotlightAnimationState>({
+  const [spotlightAnimationState, setSpotlightAnimationState] = createSignal({
     time: 0,
     intensity: 0.5,
     pulseValue: 1,

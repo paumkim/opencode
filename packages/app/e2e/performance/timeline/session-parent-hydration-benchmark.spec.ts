@@ -61,7 +61,7 @@ benchmark("hydrates an orphaned latest turn after a cold session click", async (
       ),
     )
   }
-  const timing = results.map((result) => result.metrics.firstCorrectObservedMs!).sort((a, b) => a - b)
+  const timing = results.map((result) => result.metrics.firstCorrectObservedMs).sort((a, b) => a - b)
   report(
     {
       results: results.map((result) => ({ ...result.metrics, historyGateCount: result.historyGateCount })),

@@ -527,7 +527,7 @@ type SessionHeaderV2ActionsState = {
 }
 
 function SessionHeaderV2Actions(props: { state: SessionHeaderV2ActionsState }) {
-  const language = useLanguage()
+  const _language = useLanguage()
 
   return (
     <div class="flex items-center gap-2">

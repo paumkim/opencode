@@ -124,7 +124,7 @@ async function buildTool() {
   const server = new Server({ name: SERVER, version: "1.0.0" }, { capabilities: { tools: {} } })
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOL_DEFS }))
   server.setRequestHandler(CallToolRequestSchema, async (req) =>
-    handleCall(req.params.name, (req.params.arguments ?? {}) as Record<string, unknown>),
+    handleCall(req.params.name, (req.params.arguments ?? {})),
   )
 
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()

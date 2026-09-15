@@ -106,7 +106,7 @@ function dedupeDiagnostics(items: Diagnostic[]) {
 
 function configurationValue(settings: unknown, section?: string) {
   if (!section) return settings ?? null
-  const result = section.split(".").reduce<unknown>((acc, key) => {
+  const result = section.split(".").reduce((acc, key) => {
     if (!acc || typeof acc !== "object" || !(key in acc)) return undefined
     return (acc as Record<string, unknown>)[key]
   }, settings)

@@ -123,7 +123,7 @@ test.describe("timeline tool state stability", () => {
       { path: directory, pattern: "stability", include: "*.ts" },
       { path: "src" },
     ]
-    const context = ids.map((id, index) => toolPart(id, tools[index]!, "pending", inputs[index]!))
+    const context = ids.map((id, index) => toolPart(id, tools[index], "pending", inputs[index]))
     const timeline = await setupTimeline(page, {
       messages: [
         userMessage(),
@@ -151,15 +151,15 @@ test.describe("timeline tool state stability", () => {
     })
     await startVisualProbe(page, regions)
     for (const [index, delay] of [90, 260, 70, 380].entries()) {
-      await timeline.send(partUpdated(toolPart(ids[index]!, tools[index]!, "running", inputs[index]!)), delay)
+      await timeline.send(partUpdated(toolPart(ids[index], tools[index], "running", inputs[index])), delay)
     }
-    await timeline.send(partUpdated(toolPart(ids[1]!, tools[1]!, "completed", inputs[1]!)), 130)
-    await timeline.send(partUpdated(toolPart(ids[3]!, tools[3]!, "completed", inputs[3]!)), 210)
+    await timeline.send(partUpdated(toolPart(ids[1], tools[1], "completed", inputs[1])), 130)
+    await timeline.send(partUpdated(toolPart(ids[3], tools[3], "completed", inputs[3])), 210)
     await timeline.send(
-      partUpdated(toolPart(ids[0]!, tools[0]!, "error", inputs[0]!, { error: "Read interrupted" })),
+      partUpdated(toolPart(ids[0], tools[0], "error", inputs[0], { error: "Read interrupted" })),
       110,
     )
-    await timeline.send(partUpdated(toolPart(ids[2]!, tools[2]!, "completed", inputs[2]!)), 250)
+    await timeline.send(partUpdated(toolPart(ids[2], tools[2], "completed", inputs[2])), 250)
     await expect(group.locator('[data-component="tool-status-title"]')).toHaveAttribute("aria-label", "Explored")
     await timeline.send(status("idle"), 700)
     const trace = await stopVisualProbe<keyof typeof regions>(page)

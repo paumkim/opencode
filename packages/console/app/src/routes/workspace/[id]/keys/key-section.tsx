@@ -127,7 +127,7 @@ export function KeySection() {
               </tr>
             </thead>
             <tbody>
-              <For each={keys()!}>
+              <For each={keys()}>
                 {(key) => {
                   const [copied, setCopied] = createSignal(false)
                   // const submission = useSubmission(removeKey, ([fd]) => fd.get("id")?.toString() === key.id)

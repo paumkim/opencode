@@ -394,7 +394,7 @@ describe("plugin.xai", () => {
       const headless = hooks.auth!.methods.find(
         (m): m is Extract<typeof m, { type: "oauth" }> => m.type === "oauth" && m.label === "SuperGrok Subscription",
       )!
-      const result = await headless.authorize!()
+      const result = await headless.authorize()
 
       expect(result.method).toBe("auto")
       expect(result.url).toBe("https://x.ai/device?user_code=ABCD-1234")
@@ -417,7 +417,7 @@ describe("plugin.xai", () => {
       const headless = (await XaiAuthPlugin({} as any, serverOptions(server))).auth!.methods.find(
         (m): m is Extract<typeof m, { type: "oauth" }> => m.type === "oauth" && m.label === "SuperGrok Subscription",
       )!
-      expect((await headless.authorize!()).url).toBe("https://x.ai/device")
+      expect((await headless.authorize()).url).toBe("https://x.ai/device")
     })
 
     test("requestDeviceCode posts form body, validates fields, and surfaces endpoint errors", async () => {
@@ -579,7 +579,7 @@ describe("plugin.xai", () => {
       const headless = (await XaiAuthPlugin({} as any, serverOptions(server))).auth!.methods.find(
         (m): m is Extract<typeof m, { type: "oauth" }> => m.type === "oauth" && m.label === "SuperGrok Subscription",
       )!
-      expect(await ((await headless.authorize!()) as any).callback()).toEqual({ type: "failed" })
+      expect(await ((await headless.authorize()) as any).callback()).toEqual({ type: "failed" })
     })
   })
 })

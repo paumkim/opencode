@@ -65,10 +65,10 @@ test("expands and collapses a completed context group without overlap", async ({
     messages: [
       userMessage(),
       assistantMessage([
-        toolPart(ids[0]!, "read", "completed", { filePath: "src/a.ts" }),
-        toolPart(ids[1]!, "glob", "completed", { path: ".", pattern: "**/*.ts" }),
-        toolPart(ids[2]!, "grep", "completed", { path: ".", pattern: "stable" }),
-        toolPart(ids[3]!, "list", "completed", { path: "src" }),
+        toolPart(ids[0], "read", "completed", { filePath: "src/a.ts" }),
+        toolPart(ids[1], "glob", "completed", { path: ".", pattern: "**/*.ts" }),
+        toolPart(ids[2], "grep", "completed", { path: ".", pattern: "stable" }),
+        toolPart(ids[3], "list", "completed", { path: "src" }),
         textPart(followingID, "Following context expansion"),
       ]),
     ],

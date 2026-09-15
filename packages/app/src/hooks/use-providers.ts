@@ -60,14 +60,12 @@ export function useProviders(directory: Accessor<string | undefined>) {
     },
     paid: () => {
       const connected = new Set(providers().connected)
-      const paid = [
-        ...Iterable.filter(
+      const paid = Iterable.filter(
           providers().all,
           ([id]) =>
             connected.has(id) &&
             (id !== "opencode" || Object.values(providers().all.get(id)?.models ?? {}).some((m) => m.cost?.input)),
-        ),
-      ]
+        )
       return paid
     },
   }

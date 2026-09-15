@@ -260,7 +260,7 @@ export function StatusPopoverBody(props: { shown: Accessor<boolean> }) {
   const settings = useSettings()
   const protocol = useServerProtocol()
 
-  const fail = (err: unknown) => {
+  const _fail = (err: unknown) => {
     showToast({
       variant: "error",
       title: language.t("common.requestFailed"),

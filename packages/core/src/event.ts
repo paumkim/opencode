@@ -68,7 +68,7 @@ export const readAggregate = Effect.fn("EventV2.readAggregate")(function* <A>(
     readonly limit: number
     readonly manifest: {
       readonly definitions: ReadonlyMap<string, Definition>
-      readonly schema: Schema.Decoder<A, never>
+      readonly schema: Schema.Decoder<A>
     }
   },
 ) {

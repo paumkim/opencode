@@ -456,7 +456,7 @@ describe("revert + compact workflow", () => {
 
             const reverted = yield* revert.revert({
               sessionID: info.id,
-              messageID: MessageID.make(ids[target]!),
+              messageID: MessageID.make(ids[target]),
             })
             yield* revert.cleanup(reverted)
             const remaining = yield* session.messages({ sessionID: info.id })

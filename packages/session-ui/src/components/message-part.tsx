@@ -365,7 +365,7 @@ function getDirectory(path: string | undefined) {
 }
 
 import type { IconProps } from "@opencode-ai/ui/icon"
-import { normalize, resolveFileDiff } from "./session-diff"
+import { resolveFileDiff } from "./session-diff"
 
 export type ToolInfo = {
   icon: IconProps["name"]
@@ -445,7 +445,7 @@ function taskAgent(
   const color = agentColor(item?.color, agentThemeColors) ?? agentTones[key] ?? tone(key)
   const v2Color = agentColor(item?.color, v2AgentThemeColors) ?? v2Tone ?? color
   return {
-    name: item?.name ?? `${raw[0]!.toUpperCase()}${raw.slice(1)}`,
+    name: item?.name ?? `${raw[0].toUpperCase()}${raw.slice(1)}`,
     color,
     v2Color,
   }
@@ -650,14 +650,14 @@ function sameGroup(a: PartGroup, b: PartGroup) {
   }
   if (b.type !== "context") return false
   if (a.refs.length !== b.refs.length) return false
-  return a.refs.every((ref, i) => sameRef(ref, b.refs[i]!))
+  return a.refs.every((ref, i) => sameRef(ref, b.refs[i]))
 }
 
 export function sameGroups(a: readonly PartGroup[] | undefined, b: readonly PartGroup[] | undefined) {
   if (a === b) return true
   if (!a || !b) return false
   if (a.length !== b.length) return false
-  return a.every((item, i) => sameGroup(item, b[i]!))
+  return a.every((item, i) => sameGroup(item, b[i]))
 }
 
 export function groupParts(parts: { messageID: string; part: PartType }[]) {
@@ -939,7 +939,7 @@ export function Message(props: MessageProps) {
       <Match when={props.message.role === "user" && props.message}>
         {(userMessage) => (
           <UserMessageDisplay
-            message={userMessage() as UserMessage}
+            message={userMessage()}
             parts={props.parts}
             actions={props.actions}
             useV2Actions={props.useV2Actions}
@@ -950,7 +950,7 @@ export function Message(props: MessageProps) {
       <Match when={props.message.role === "assistant" && props.message}>
         {(assistantMessage) => (
           <AssistantMessageDisplay
-            message={assistantMessage() as AssistantMessage}
+            message={assistantMessage()}
             parts={props.parts}
             showAssistantCopyPartID={props.showAssistantCopyPartID}
             showReasoningSummaries={props.showReasoningSummaries}
@@ -1196,12 +1196,12 @@ export function UserMessageDisplay(props: {
   const busy = () => state.busy
 
   const textPart = createMemo(
-    () => props.parts?.find((p) => p.type === "text" && !(p as TextPart).synthetic) as TextPart | undefined,
+    () => props.parts?.find((p) => p.type === "text" && !(p).synthetic) as TextPart | undefined,
   )
 
   const text = createMemo(() => textPart()?.text || "")
 
-  const files = createMemo(() => (props.parts?.filter((p) => p.type === "file") as FilePart[]) ?? [])
+  const files = createMemo(() => (props.parts?.filter((p) => p.type === "file")) ?? [])
 
   const attachments = createMemo(() => files().filter(attached))
 
@@ -1209,7 +1209,7 @@ export function UserMessageDisplay(props: {
 
   const inlineFiles = createMemo(() => files().filter(inline))
 
-  const agents = createMemo(() => (props.parts?.filter((p) => p.type === "agent") as AgentPart[]) ?? [])
+  const agents = createMemo(() => (props.parts?.filter((p) => p.type === "agent")) ?? [])
 
   const model = createMemo(() => {
     const providerID = props.message.model?.providerID
@@ -1400,7 +1400,7 @@ function HighlightedText(props: { text: string; references: FilePart[]; agents: 
     const allRefs: { start: number; end: number; type: "file" | "agent" }[] = [
       ...props.references
         .filter((r) => r.source?.text?.start !== undefined && r.source?.text?.end !== undefined)
-        .map((r) => ({ start: r.source!.text!.start, end: r.source!.text!.end, type: "file" as const })),
+        .map((r) => ({ start: r.source!.text.start, end: r.source!.text.end, type: "file" as const })),
       ...props.agents
         .filter((a) => a.source?.start !== undefined && a.source?.end !== undefined)
         .map((a) => ({ start: a.source!.start, end: a.source!.end, type: "agent" as const })),
@@ -1658,19 +1658,19 @@ PART_MAPPING["text"] = function TextPartDisplay(props) {
   const part = () => props.part as TextPart
   const interrupted = createMemo(
     () =>
-      props.message.role === "assistant" && (props.message as AssistantMessage).error?.name === "MessageAbortedError",
+      props.message.role === "assistant" && (props.message).error?.name === "MessageAbortedError",
   )
 
   const model = createMemo(() => {
     if (props.message.role !== "assistant") return ""
-    const message = props.message as AssistantMessage
+    const message = props.message
     const match = data.store.provider?.all?.get(message.providerID)
     return match?.models?.[message.modelID]?.name ?? message.modelID
   })
 
   const duration = createMemo(() => {
     if (props.message.role !== "assistant") return ""
-    const message = props.message as AssistantMessage
+    const message = props.message
     const completed = message.time.completed
     const ms =
       typeof props.turnDurationMs === "number"
@@ -1691,7 +1691,7 @@ PART_MAPPING["text"] = function TextPartDisplay(props) {
 
   const meta = createMemo(() => {
     if (props.message.role !== "assistant") return ""
-    const agent = (props.message as AssistantMessage).agent
+    const agent = (props.message).agent
     const items = [
       agent ? agent[0]?.toUpperCase() + agent.slice(1) : "",
       model(),
@@ -1702,7 +1702,7 @@ PART_MAPPING["text"] = function TextPartDisplay(props) {
   })
 
   const streaming = createMemo(
-    () => props.message.role === "assistant" && typeof (props.message as AssistantMessage).time.completed !== "number",
+    () => props.message.role === "assistant" && typeof (props.message).time.completed !== "number",
   )
   const text = () => readPartText(data.store.part_text_accum_delta, part())
   const isLastTextPart = createMemo(() => {
@@ -1760,7 +1760,7 @@ PART_MAPPING["reasoning"] = function ReasoningPartDisplay(props) {
   const data = useData()
   const part = () => props.part as ReasoningPart
   const streaming = createMemo(
-    () => props.message.role === "assistant" && typeof (props.message as AssistantMessage).time.completed !== "number",
+    () => props.message.role === "assistant" && typeof (props.message).time.completed !== "number",
   )
   const text = () => readPartText(data.store.part_text_accum_delta, part())
 
@@ -2219,7 +2219,7 @@ ToolRegistry.register({
                 </div>
                 <Show when={!pending() && props.input.filePath?.includes("/")}>
                   <div data-slot="message-part-path">
-                    <span data-slot="message-part-directory">{getDirectory(props.input.filePath!)}</span>
+                    <span data-slot="message-part-directory">{getDirectory(props.input.filePath)}</span>
                   </div>
                 </Show>
               </div>
@@ -2236,7 +2236,7 @@ ToolRegistry.register({
               path={path()}
               actions={
                 <Show when={!pending() && props.metadata.filediff}>
-                  <DiffChanges changes={props.metadata.filediff!} />
+                  <DiffChanges changes={props.metadata.filediff} />
                 </Show>
               }
             >
@@ -2286,7 +2286,7 @@ ToolRegistry.register({
                 </div>
                 <Show when={!pending() && props.input.filePath?.includes("/")}>
                   <div data-slot="message-part-path">
-                    <span data-slot="message-part-directory">{getDirectory(props.input.filePath!)}</span>
+                    <span data-slot="message-part-directory">{getDirectory(props.input.filePath)}</span>
                   </div>
                 </Show>
               </div>

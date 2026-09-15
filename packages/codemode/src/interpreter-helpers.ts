@@ -723,7 +723,7 @@ export const invokeStringMethod = (value: string, name: string, args: Array<unkn
         break
       }
       if (args[0] instanceof SandboxRegExp) {
-        result = value.split((args[0] as SandboxRegExp).regex, optNum(1))
+        result = value.split((args[0]).regex, optNum(1))
         break
       }
       const requestedLimit = optNum(1)
@@ -759,7 +759,7 @@ export const invokeStringMethod = (value: string, name: string, args: Array<unkn
         )
       }
       if (args[0] instanceof SandboxRegExp) {
-        const pattern = (args[0] as SandboxRegExp).regex
+        const pattern = (args[0]).regex
         const replacement = str(1)
         if (name === "replaceAll" && !pattern.global) {
           throw new InterpreterRuntimeError(
@@ -986,7 +986,7 @@ export const invokeObjectMethod = (name: string, args: Array<unknown>, node: Ast
       // checkpoint would serialize a Map to {}).
       if (args[0] instanceof SandboxMap) {
         const out: Record<string, unknown> = Object.create(null)
-        for (const [key, item] of (args[0] as SandboxMap).map.entries()) guardedSet(out, coerceToString(key), item)
+        for (const [key, item] of (args[0]).map.entries()) guardedSet(out, coerceToString(key), item)
         return out
       }
       const pairs = boundedData(args[0], "Object.fromEntries input")
@@ -1104,8 +1104,8 @@ export const invokeArrayStatic = (name: string, args: Array<unknown>, node: AstN
       }
       // Map/Set materialize directly (the data checkpoint would serialize them to {}).
       if (args[0] instanceof SandboxMap)
-        return Array.from((args[0] as SandboxMap).map.entries(), ([key, item]) => [key, item])
-      if (args[0] instanceof SandboxSet) return Array.from((args[0] as SandboxSet).set.values())
+        return Array.from((args[0]).map.entries(), ([key, item]) => [key, item])
+      if (args[0] instanceof SandboxSet) return Array.from((args[0]).set.values())
       const source = boundedData(args[0], "Array.from input")
       if (typeof source === "string") return Array.from(source)
       if (Array.isArray(source)) return [...source]

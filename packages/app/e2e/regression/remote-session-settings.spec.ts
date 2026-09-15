@@ -174,8 +174,8 @@ async function mockServers(page: Page, permissionRequests: string[], permissionR
       permissionResponses.push({
         origin: url.origin,
         directory: requestDirectory ?? undefined,
-        sessionID: response[1]!,
-        permissionID: response[2]!,
+        sessionID: response[1],
+        permissionID: response[2],
         body: route.request().postDataJSON(),
       })
       return json(route, true)

@@ -6,13 +6,14 @@ import type {
   ToolOutput as ToolOutputType,
 } from "./schema"
 import { ToolDefinition, ToolFailure, ToolOutput } from "./schema"
+import { ToolCorrector } from "./protocols/utils/tool-correct"
 
 /**
  * Schema constraint for tool parameters / success values: no decoding or
  * encoding services are allowed. Tools should be self-contained — anything
  * beyond pure data conversion belongs in the handler closure.
  */
-export type ToolSchema<T> = Schema.Codec<T, any, never, never>
+export type ToolSchema<T> = Schema.Codec<T, any, never>
 export interface ToolExecuteContext {
   readonly id: ToolCallPart["id"]
   readonly name: ToolCallPart["name"]
@@ -66,6 +67,22 @@ export interface Tool<Parameters extends ToolSchema<any>, Success extends ToolSc
   readonly _legacyResult: boolean
   /** @internal */
   readonly _definition: ToolDefinitionClass
+  /**
+   * Harness-side repair for malformed tool arguments. The model does not
+   * always emit valid JSON for a tool call: some gateways double-encode
+   * arguments, some models drop required keys, some emit `null` where a
+   * scalar is expected. Rather than fail the turn, the harness attempts a
+   * conservative repair against the tool's declared JSON Schema and surfaces
+   * unrepairable failures as tool errors so the model can self-correct.
+   *
+   * Returns the (possibly repaired) input plus a log message; `repaired`
+   * indicates whether any heuristic fired.
+   */
+  readonly correct: (input: unknown) => {
+    readonly input: Record<string, unknown>
+    readonly repaired: boolean
+    readonly message?: string
+  }
 }
 
 export type AnyTool = Tool<any, any>
@@ -164,6 +181,7 @@ export function make(config: {
 }): AnyTool
 export function make(config: TypedToolConfig | DynamicToolConfig): AnyTool {
   if ("jsonSchema" in config) {
+    const schema = config.jsonSchema
     return {
       description: config.description,
       parameters: Schema.Unknown as ToolSchema<unknown>,
@@ -176,6 +194,10 @@ export function make(config: TypedToolConfig | DynamicToolConfig): AnyTool {
       _project: (parameters, callID, output) =>
         project(config.toModelOutput, config.toStructuredOutput, parameters, callID, output),
       _legacyResult: config.toModelOutput === undefined && config.toStructuredOutput === undefined,
+      correct: (input) => {
+        const result = ToolCorrector.correctToolInput(input, schema)
+        return { input: result.input, repaired: result.repaired, message: result.message }
+      },
       _definition: new ToolDefinition({
         name: "",
         description: config.description,
@@ -184,6 +206,7 @@ export function make(config: TypedToolConfig | DynamicToolConfig): AnyTool {
       }),
     }
   }
+  const schema = toJsonSchema(config.parameters)
   return {
     description: config.description,
     parameters: config.parameters,
@@ -196,6 +219,10 @@ export function make(config: TypedToolConfig | DynamicToolConfig): AnyTool {
     _project: (parameters, callID, output) =>
       project(config.toModelOutput, config.toStructuredOutput, parameters, callID, output),
     _legacyResult: false,
+    correct: (input) => {
+      const result = ToolCorrector.correctToolInput(input, schema)
+      return { input: result.input, repaired: result.repaired, message: result.message }
+    },
     _definition: new ToolDefinition({
       name: "",
       description: config.description,

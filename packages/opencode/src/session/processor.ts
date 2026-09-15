@@ -36,6 +36,13 @@ const OSCILLATION_WINDOW = 8
 const OSCILLATION_UNIQUE_RATIO = 0.35
 const EDIT_TOOLS = new Set(["edit", "write", "apply_patch"])
 
+// Alternation detection: a model that bounces between two states (e.g. text A
+// → text B → text A → text B) never produces three consecutive identical
+// outputs, so the text/reasoning streak detectors miss it. Track the last N
+// turn signatures and flag when the pattern is a strict alternation.
+const ALTERNATION_WINDOW = 6
+const ALTERNATION_MIN_UNIQUE = 2
+
 // Build a stable fingerprint for a tool call so we can detect cycles that
 // aren't strictly consecutive (e.g. read A → read B → read A → read B).
 function toolFingerprint(toolName: string, input: unknown): string {
@@ -56,6 +63,29 @@ function toolFingerprint(toolName: string, input: unknown): string {
         : ""
   return `${toolName}:${filePath || command}`
 }
+
+// Record a turn signature into the rolling per-session window and flag a
+// strict alternation (A → B → A → B) that the consecutive-identity detectors
+// miss. A signature is only recorded when the turn produced real content.
+function recordTurnSignature(
+  map: Map<SessionID, string[]>,
+  sessionID: SessionID,
+  signature: string,
+): boolean {
+  const window = map.get(sessionID) ?? []
+  const next = [...window, signature].slice(-ALTERNATION_WINDOW)
+  map.set(sessionID, next)
+  if (next.length < ALTERNATION_MIN_UNIQUE + 1) return false
+  // Strict alternation: exactly two distinct values, each appearing at least
+  // twice, interleaved with no repeats.
+  const unique = new Set(next)
+  if (unique.size !== ALTERNATION_MIN_UNIQUE) return false
+  const [a, b] = unique
+  if (next.filter((s) => s === a).length < 2 || next.filter((s) => s === b).length < 2) return false
+  for (let i = 1; i < next.length; i++) if (next[i] === next[i - 1]) return false
+  return true
+}
+
 export type Result = "compact" | "stop" | "continue"
 
 export interface ProcessResult {
@@ -81,7 +111,7 @@ export interface Handle {
   readonly process: (streamInput: LLM.StreamInput) => Effect.Effect<ProcessResult>
   readonly loopDetected: boolean
   readonly noEditStreak: number
-  readonly loopReason: "doom" | "text" | "no_edit" | "churn" | "oscillation" | "reasoning" | "none"
+  readonly loopReason: "doom" | "text" | "no_edit" | "churn" | "oscillation" | "reasoning" | "alternation" | "none"
 }
 
 type Input = {
@@ -109,10 +139,11 @@ interface ProcessorContext extends Input {
   needsCompaction: boolean
   currentText: SessionV1.TextPart | undefined
   reasoningMap: Record<string, SessionV1.ReasoningPart>
-  reasoningHistory: string[]
-  textHistory: string[]
   loopDetected: boolean
+  turnSignature: string
   hasEditInStep: boolean
+  stateChanged: boolean
+  alternationDetected: boolean
   noEditStreak: number
   churnStreak: number
   churnTarget: string
@@ -147,6 +178,9 @@ const layer = Layer.effect(
     // and reset only when the model takes real progress (a tool call).
     const textLoop = new Map<SessionID, { text: string; count: number }>()
     const reasoningLoop = new Map<SessionID, { text: string; count: number }>()
+    // Rolling window of turn signatures per session, used to detect strict
+    // alternation (A → B → A → B) that the consecutive-identity detectors miss.
+    const turnSignatures = new Map<SessionID, string[]>()
 
     const create = Effect.fn("SessionProcessor.create")(function* (input: Input) {
       // Pre-capture snapshot before the LLM stream starts. The AI SDK
@@ -163,9 +197,12 @@ const layer = Layer.effect(
         blocked: false,
         needsCompaction: false,
         currentText: undefined,
-        reasoningMap: {},
+reasoningMap: {},
         loopDetected: false,
+        turnSignature: "",
         hasEditInStep: false,
+        stateChanged: false,
+        alternationDetected: false,
         noEditStreak: 0,
         churnStreak: 0,
         churnTarget: "",
@@ -368,30 +405,31 @@ case "reasoning-end": {
                if (value.providerMetadata && value.id in ctx.reasoningMap) {
                  ctx.reasoningMap[value.id].metadata = value.providerMetadata
                }
-               const reasoning = ctx.reasoningMap[value.id]
-               if (reasoning?.text.trim()) {
-                 const key = ctx.sessionID
-                 const entry = reasoningLoop.get(key) ?? { text: reasoning.text, count: 0 }
-                 if (entry.text === reasoning.text) {
-                   entry.count++
-                 } else {
-                   entry.text = reasoning.text
-                   entry.count = 1
-                 }
-                 reasoningLoop.set(key, entry)
-                 if (entry.count >= REASONING_LOOP_THRESHOLD) {
-                   ctx.loopDetected = true
-                   yield* Effect.logError("reasoning_loop", {
-                     "session.id": ctx.sessionID,
-                     messageID: ctx.assistantMessage.id,
-                     text: reasoning.text.slice(0, 200),
-                     count: entry.count,
-                   })
-                 }
-               }
-               yield* finishReasoning(value.id)
-               return
-             }
+const reasoning = ctx.reasoningMap[value.id]
+                if (reasoning?.text.trim()) {
+                  ctx.turnSignature = `reasoning:${reasoning.text}`
+                  const key = ctx.sessionID
+                  const entry = reasoningLoop.get(key) ?? { text: reasoning.text, count: 0 }
+                  if (entry.text === reasoning.text) {
+                    entry.count++
+                  } else {
+                    entry.text = reasoning.text
+                    entry.count = 1
+                  }
+                  reasoningLoop.set(key, entry)
+                  if (entry.count >= REASONING_LOOP_THRESHOLD) {
+                    ctx.loopDetected = true
+                    yield* Effect.logError("reasoning_loop", {
+                      "session.id": ctx.sessionID,
+                      messageID: ctx.assistantMessage.id,
+                      text: reasoning.text.slice(0, 200),
+                      count: entry.count,
+                    })
+                  }
+                }
+                yield* finishReasoning(value.id)
+                return
+              }
 
           case "tool-input-start":
             if (ctx.assistantMessage.summary) {
@@ -521,7 +559,7 @@ case "reasoning-end": {
                     ),
                     Effect.exit,
                   )
-                : Effect.succeed(Exit.succeed<SessionV1.FilePart>(attachment)),
+                : Effect.succeed(Exit.succeed(attachment)),
             )
             const omitted = normalized.filter(Exit.isFailure).length
             const attachments = normalized.filter(Exit.isSuccess).map((item) => item.value)
@@ -534,6 +572,7 @@ case "reasoning-end": {
               attachments: attachments.length ? attachments : undefined,
             }
             yield* completeToolCall(value.id, output)
+            ctx.stateChanged = true
             return
           }
 
@@ -671,8 +710,9 @@ case "reasoning-end": {
             }
             if (value.providerMetadata) ctx.currentText.metadata = value.providerMetadata
 if (ctx.currentText.text.trim()) {
-               const key = ctx.sessionID
-               const entry = textLoop.get(key) ?? { text: ctx.currentText.text, count: 0 }
+                ctx.turnSignature = `text:${ctx.currentText.text}`
+                const key = ctx.sessionID
+                const entry = textLoop.get(key) ?? { text: ctx.currentText.text, count: 0 }
                if (entry.text === ctx.currentText.text) {
                  entry.count++
                } else {
@@ -800,6 +840,9 @@ if (ctx.currentText.text.trim()) {
             ctx.currentText = undefined
             ctx.reasoningMap = {}
             ctx.loopDetected = false
+            ctx.alternationDetected = false
+            ctx.turnSignature = ""
+            ctx.stateChanged = false
             yield* status.set(ctx.sessionID, { type: "busy" })
             const stream = llm.stream(streamInput)
 
@@ -851,6 +894,30 @@ if (ctx.currentText.text.trim()) {
           if (ctx.needsCompaction) return { result: "compact" as const, noEditStreak: ctx.noEditStreak }
           if (ctx.blocked || ctx.assistantMessage.error)
             return { result: "stop" as const, noEditStreak: ctx.noEditStreak }
+          // Record the turn signature and check for strict alternation
+          // (A → B → A → B) that the consecutive-identity detectors miss.
+          if (ctx.turnSignature) {
+            if (recordTurnSignature(turnSignatures, ctx.sessionID, ctx.turnSignature)) {
+              ctx.loopDetected = true
+              ctx.alternationDetected = true
+              yield* Effect.logError("alternation_loop", {
+                "session.id": ctx.sessionID,
+                messageID: ctx.assistantMessage.id,
+                signature: ctx.turnSignature,
+              })
+            }
+          }
+          // Real progress (a tool result that changed state, or a file patch)
+          // clears the cross-turn repetition streaks. Without this a model that
+          // breaks out of a text/reasoning loop for one turn then falls back
+          // into it keeps accumulating and never trips the threshold. The
+          // alternation window is intentionally NOT reset here: a model that
+          // alternates text A/B across turns, even with tool calls in between,
+          // should still be caught.
+          if (ctx.stateChanged) {
+            textLoop.delete(ctx.sessionID)
+            reasoningLoop.delete(ctx.sessionID)
+          }
           const noEditStreak = ctx.hasEditInStep ? 0 : ctx.noEditStreak + 1
           ctx.noEditStreak = noEditStreak
           if (noEditStreak >= NO_EDIT_STREAK_THRESHOLD) {
@@ -877,18 +944,21 @@ if (ctx.currentText.text.trim()) {
           return ctx.noEditStreak
         },
 get loopReason() {
-           if (ctx.loopDetected) {
-             if (ctx.churnStreak >= CHURN_STREAK_THRESHOLD) return "churn"
-             if (ctx.recentTools.length >= OSCILLATION_WINDOW) {
-               const unique = new Set(ctx.recentTools).size
-               if (unique / ctx.recentTools.length <= OSCILLATION_UNIQUE_RATIO) return "oscillation"
-             }
-             if (ctx.noEditStreak >= NO_EDIT_STREAK_THRESHOLD) return "no_edit"
-             if (reasoningLoop.get(ctx.sessionID)?.count && reasoningLoop.get(ctx.sessionID)!.count >= REASONING_LOOP_THRESHOLD) return "reasoning"
-             return "doom"
-           }
-           return "none"
-         },
+            if (!ctx.loopDetected) return "none"
+            // Most specific detectors first: a model that is repeating
+            // identical reasoning or text across turns is in a content loop,
+            // not a tool-call loop, so it deserves the matching message.
+            if (ctx.alternationDetected) return "alternation"
+            if (textLoop.get(ctx.sessionID)?.count && textLoop.get(ctx.sessionID)!.count >= TEXT_LOOP_THRESHOLD) return "text"
+            if (reasoningLoop.get(ctx.sessionID)?.count && reasoningLoop.get(ctx.sessionID)!.count >= REASONING_LOOP_THRESHOLD) return "reasoning"
+            if (ctx.churnStreak >= CHURN_STREAK_THRESHOLD) return "churn"
+            if (ctx.recentTools.length >= OSCILLATION_WINDOW) {
+              const unique = new Set(ctx.recentTools).size
+              if (unique / ctx.recentTools.length <= OSCILLATION_UNIQUE_RATIO) return "oscillation"
+            }
+            if (ctx.noEditStreak >= NO_EDIT_STREAK_THRESHOLD) return "no_edit"
+            return "doom"
+          },
         updateToolCall,
         completeToolCall,
         process,

@@ -20,6 +20,9 @@ const AgentSchema = Schema.StructWithRest(
     frequency_penalty: Schema.optional(Schema.Finite),
     presence_penalty: Schema.optional(Schema.Finite),
     prompt: Schema.optional(Schema.String),
+    context: Schema.Literals(["minimal", "full"]).pipe(Schema.optional).annotate({
+      description: "When 'minimal', skip loading AGENTS.md, skills, MCP, and environment context for this agent. Default: 'full'.",
+    }),
     tools: Schema.optional(Schema.Record(Schema.String, Schema.Boolean)).annotate({
       description: "@deprecated Use 'permission' field instead",
     }),
@@ -47,6 +50,7 @@ const KNOWN_KEYS = new Set([
   "model",
   "variant",
   "prompt",
+  "context",
   "description",
   "temperature",
   "top_p",

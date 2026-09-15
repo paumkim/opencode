@@ -69,22 +69,22 @@ export function fromOpenaiRequest(body: any): CommonRequest {
 
   const toImg = (p: any) => {
     if (!p || typeof p !== "object") return undefined
-    if ((p as any).type === "image_url" && (p as any).image_url)
-      return { type: "image_url", image_url: (p as any).image_url }
-    if ((p as any).type === "input_image" && (p as any).image_url)
-      return { type: "image_url", image_url: (p as any).image_url }
-    const s = (p as any).source
+    if ((p).type === "image_url" && (p).image_url)
+      return { type: "image_url", image_url: (p).image_url }
+    if ((p).type === "input_image" && (p).image_url)
+      return { type: "image_url", image_url: (p).image_url }
+    const s = (p).source
     if (!s || typeof s !== "object") return undefined
-    if ((s as any).type === "url" && typeof (s as any).url === "string")
-      return { type: "image_url", image_url: { url: (s as any).url } }
+    if ((s).type === "url" && typeof (s).url === "string")
+      return { type: "image_url", image_url: { url: (s).url } }
     if (
-      (s as any).type === "base64" &&
-      typeof (s as any).media_type === "string" &&
-      typeof (s as any).data === "string"
+      (s).type === "base64" &&
+      typeof (s).media_type === "string" &&
+      typeof (s).data === "string"
     )
       return {
         type: "image_url",
-        image_url: { url: `data:${(s as any).media_type};base64,${(s as any).data}` },
+        image_url: { url: `data:${(s).media_type};base64,${(s).data}` },
       }
     return undefined
   }
@@ -97,27 +97,27 @@ export function fromOpenaiRequest(body: any): CommonRequest {
     if (!m) continue
 
     // Responses API items without role:
-    if (!(m as any).role && (m as any).type) {
-      if ((m as any).type === "function_call") {
-        const name = (m as any).name
-        const a = (m as any).arguments
+    if (!(m).role && (m).type) {
+      if ((m).type === "function_call") {
+        const name = (m).name
+        const a = (m).arguments
         const args = typeof a === "string" ? a : JSON.stringify(a ?? {})
         msgs.push({
           role: "assistant",
-          tool_calls: [{ id: (m as any).id, type: "function", function: { name, arguments: args } }],
+          tool_calls: [{ id: (m).id, type: "function", function: { name, arguments: args } }],
         })
       }
-      if ((m as any).type === "function_call_output") {
-        const id = (m as any).call_id
-        const out = (m as any).output
+      if ((m).type === "function_call_output") {
+        const id = (m).call_id
+        const out = (m).output
         const content = typeof out === "string" ? out : JSON.stringify(out)
         msgs.push({ role: "tool", tool_call_id: id, content })
       }
       continue
     }
 
-    if ((m as any).role === "system" || (m as any).role === "developer") {
-      const c = (m as any).content
+    if ((m).role === "system" || (m).role === "developer") {
+      const c = (m).content
       if (typeof c === "string" && c.length > 0) msgs.push({ role: "system", content: c })
       if (Array.isArray(c)) {
         const t = c.find((p: any) => p && typeof p.text === "string")
@@ -126,22 +126,22 @@ export function fromOpenaiRequest(body: any): CommonRequest {
       continue
     }
 
-    if ((m as any).role === "user") {
-      const c = (m as any).content
+    if ((m).role === "user") {
+      const c = (m).content
       if (typeof c === "string") {
         msgs.push({ role: "user", content: c })
       } else if (Array.isArray(c)) {
         const parts: any[] = []
         for (const p of c) {
-          if (!p || !(p as any).type) continue
-          if (((p as any).type === "text" || (p as any).type === "input_text") && typeof (p as any).text === "string")
-            parts.push({ type: "text", text: (p as any).text })
+          if (!p || !(p).type) continue
+          if (((p).type === "text" || (p).type === "input_text") && typeof (p).text === "string")
+            parts.push({ type: "text", text: (p).text })
           const ip = toImg(p)
           if (ip) parts.push(ip)
-          if ((p as any).type === "tool_result") {
-            const id = (p as any).tool_call_id
+          if ((p).type === "tool_result") {
+            const id = (p).tool_call_id
             const content =
-              typeof (p as any).content === "string" ? (p as any).content : JSON.stringify((p as any).content)
+              typeof (p).content === "string" ? (p).content : JSON.stringify((p).content)
             msgs.push({ role: "tool", tool_call_id: id, content })
           }
         }
@@ -151,20 +151,20 @@ export function fromOpenaiRequest(body: any): CommonRequest {
       continue
     }
 
-    if ((m as any).role === "assistant") {
-      const c = (m as any).content
+    if ((m).role === "assistant") {
+      const c = (m).content
       const out: any = { role: "assistant" }
       if (typeof c === "string" && c.length > 0) out.content = c
-      if (Array.isArray((m as any).tool_calls)) out.tool_calls = (m as any).tool_calls
+      if (Array.isArray((m).tool_calls)) out.tool_calls = (m).tool_calls
       msgs.push(out)
       continue
     }
 
-    if ((m as any).role === "tool") {
+    if ((m).role === "tool") {
       msgs.push({
         role: "tool",
-        tool_call_id: (m as any).tool_call_id,
-        content: (m as any).content,
+        tool_call_id: (m).tool_call_id,
+        content: (m).content,
       })
       continue
     }
@@ -175,8 +175,8 @@ export function fromOpenaiRequest(body: any): CommonRequest {
     if (!tcIn) return undefined
     if (tcIn === "auto") return "auto"
     if (tcIn === "required") return "required"
-    if ((tcIn as any).type === "function" && (tcIn as any).function?.name)
-      return { type: "function" as const, function: { name: (tcIn as any).function.name } }
+    if ((tcIn).type === "function" && (tcIn).function?.name)
+      return { type: "function" as const, function: { name: (tcIn).function.name } }
     return undefined
   })()
 
@@ -209,22 +209,22 @@ export function toOpenaiRequest(body: CommonRequest) {
 
   const toPart = (p: any) => {
     if (!p || typeof p !== "object") return undefined
-    if ((p as any).type === "text" && typeof (p as any).text === "string")
-      return { type: "input_text", text: (p as any).text }
-    if ((p as any).type === "image_url" && (p as any).image_url)
-      return { type: "input_image", image_url: (p as any).image_url }
-    const s = (p as any).source
+    if ((p).type === "text" && typeof (p).text === "string")
+      return { type: "input_text", text: (p).text }
+    if ((p).type === "image_url" && (p).image_url)
+      return { type: "input_image", image_url: (p).image_url }
+    const s = (p).source
     if (!s || typeof s !== "object") return undefined
-    if ((s as any).type === "url" && typeof (s as any).url === "string")
-      return { type: "input_image", image_url: { url: (s as any).url } }
+    if ((s).type === "url" && typeof (s).url === "string")
+      return { type: "input_image", image_url: { url: (s).url } }
     if (
-      (s as any).type === "base64" &&
-      typeof (s as any).media_type === "string" &&
-      typeof (s as any).data === "string"
+      (s).type === "base64" &&
+      typeof (s).media_type === "string" &&
+      typeof (s).data === "string"
     )
       return {
         type: "input_image",
-        image_url: { url: `data:${(s as any).media_type};base64,${(s as any).data}` },
+        image_url: { url: `data:${(s).media_type};base64,${(s).data}` },
       }
     return undefined
   }
@@ -260,11 +260,11 @@ export function toOpenaiRequest(body: CommonRequest) {
       }
       if (Array.isArray((m as any).tool_calls)) {
         for (const tc of (m as any).tool_calls) {
-          if ((tc as any).type === "function" && (tc as any).function) {
-            const name = (tc as any).function.name
-            const a = (tc as any).function.arguments
+          if ((tc).type === "function" && (tc).function) {
+            const name = (tc).function.name
+            const a = (tc).function.arguments
             const args = typeof a === "string" ? a : JSON.stringify(a)
-            input.push({ type: "function_call", call_id: (tc as any).id, name, arguments: args })
+            input.push({ type: "function_call", call_id: (tc).id, name, arguments: args })
           }
         }
       }
@@ -333,20 +333,20 @@ export function toOpenaiRequest(body: CommonRequest) {
 
 export function fromOpenaiResponse(resp: any): CommonResponse {
   if (!resp || typeof resp !== "object") return resp
-  if (Array.isArray((resp as any).choices)) return resp
+  if (Array.isArray((resp).choices)) return resp
 
-  const r = (resp as any).response ?? resp
+  const r = (resp).response ?? resp
   if (!r || typeof r !== "object") return resp
 
-  const idIn = (r as any).id
+  const idIn = (r).id
   const id =
     typeof idIn === "string" ? idIn.replace(/^resp_/, "chatcmpl_") : `chatcmpl_${Math.random().toString(36).slice(2)}`
-  const model = (r as any).model ?? (resp as any).model
+  const model = (r).model ?? (resp).model
 
-  const out = Array.isArray((r as any).output) ? (r as any).output : []
+  const out = Array.isArray((r).output) ? (r).output : []
   const text = out
-    .filter((o: any) => o && o.type === "message" && Array.isArray((o as any).content))
-    .flatMap((o: any) => (o as any).content)
+    .filter((o: any) => o && o.type === "message" && Array.isArray((o).content))
+    .flatMap((o: any) => (o).content)
     .filter((p: any) => p && p.type === "output_text" && typeof p.text === "string")
     .map((p: any) => p.text)
     .join("")
@@ -354,12 +354,12 @@ export function fromOpenaiResponse(resp: any): CommonResponse {
   const tcs = out
     .filter((o: any) => o && o.type === "function_call")
     .map((o: any) => {
-      const name = (o as any).name
-      const a = (o as any).arguments
+      const name = (o).name
+      const a = (o).arguments
       const args = typeof a === "string" ? a : JSON.stringify(a ?? {})
       const tid =
-        typeof (o as any).id === "string" && (o as any).id.length > 0
-          ? (o as any).id
+        typeof (o).id === "string" && (o).id.length > 0
+          ? (o).id
           : `toolu_${Math.random().toString(36).slice(2)}`
       return { id: tid, type: "function" as const, function: { name, arguments: args } }
     })
@@ -372,13 +372,13 @@ export function fromOpenaiResponse(resp: any): CommonResponse {
     return null
   }
 
-  const u = (r as any).usage ?? (resp as any).usage
+  const u = (r).usage ?? (resp).usage
   const usage = (() => {
     if (!u) return undefined as any
-    const pt = typeof (u as any).input_tokens === "number" ? (u as any).input_tokens : undefined
-    const ct = typeof (u as any).output_tokens === "number" ? (u as any).output_tokens : undefined
+    const pt = typeof (u).input_tokens === "number" ? (u).input_tokens : undefined
+    const ct = typeof (u).output_tokens === "number" ? (u).output_tokens : undefined
     const total = pt != null && ct != null ? pt + ct : undefined
-    const cached = (u as any).input_tokens_details?.cached_tokens
+    const cached = (u).input_tokens_details?.cached_tokens
     const details = typeof cached === "number" ? { cached_tokens: cached } : undefined
     return {
       prompt_tokens: pt,
@@ -401,7 +401,7 @@ export function fromOpenaiResponse(resp: any): CommonResponse {
           ...(text && text.length > 0 ? { content: text } : {}),
           ...(tcs.length > 0 ? { tool_calls: tcs } : {}),
         },
-        finish_reason: finish((r as any).stop_reason ?? null),
+        finish_reason: finish((r).stop_reason ?? null),
       },
     ],
     ...(usage ? { usage } : {}),
@@ -432,13 +432,13 @@ export function toOpenaiResponse(resp: CommonResponse) {
 
   if (Array.isArray(msg.tool_calls)) {
     for (const tc of msg.tool_calls) {
-      if ((tc as any).type === "function" && (tc as any).function) {
+      if ((tc).type === "function" && (tc).function) {
         outputItems.push({
-          id: (tc as any).id,
+          id: (tc).id,
           type: "function_call",
-          name: (tc as any).function.name,
-          call_id: (tc as any).id,
-          arguments: (tc as any).function.arguments,
+          name: (tc).function.name,
+          call_id: (tc).id,
+          arguments: (tc).function.arguments,
         })
       }
     }
@@ -502,14 +502,14 @@ export function fromOpenaiChunk(chunk: string): CommonChunk | string {
   const e = ev.replace("event: ", "").trim()
 
   if (e === "response.output_text.delta") {
-    const d = (json as any).delta ?? (json as any).text ?? (json as any).output_text_delta
+    const d = (json).delta ?? (json).text ?? (json).output_text_delta
     if (typeof d === "string" && d.length > 0)
       out.choices.push({ index: 0, delta: { content: d }, finish_reason: null })
   }
 
-  if (e === "response.output_item.added" && (json as any).item?.type === "function_call") {
-    const name = (json as any).item?.name
-    const id = (json as any).item?.id
+  if (e === "response.output_item.added" && (json).item?.type === "function_call") {
+    const name = (json).item?.name
+    const id = (json).item?.id
     if (typeof name === "string" && name.length > 0) {
       out.choices.push({
         index: 0,
@@ -522,7 +522,7 @@ export function fromOpenaiChunk(chunk: string): CommonChunk | string {
   }
 
   if (e === "response.function_call_arguments.delta") {
-    const a = (json as any).delta ?? (json as any).arguments_delta
+    const a = (json).delta ?? (json).arguments_delta
     if (typeof a === "string" && a.length > 0) {
       out.choices.push({
         index: 0,
@@ -534,7 +534,7 @@ export function fromOpenaiChunk(chunk: string): CommonChunk | string {
 
   if (e === "response.completed") {
     const fr = (() => {
-      const sr = (respObj as any).stop_reason ?? (json as any).stop_reason
+      const sr = (respObj).stop_reason ?? (json).stop_reason
       if (sr === "stop") return "stop"
       if (sr === "tool_call" || sr === "tool_calls") return "tool_calls"
       if (sr === "length" || sr === "max_output_tokens") return "length"
@@ -543,7 +543,7 @@ export function fromOpenaiChunk(chunk: string): CommonChunk | string {
     })()
     out.choices.push({ index: 0, delta: {}, finish_reason: fr })
 
-    const u = (respObj as any).usage ?? (json as any).response?.usage
+    const u = (respObj).usage ?? (json).response?.usage
     if (u) {
       out.usage = {
         prompt_tokens: u.input_tokens,

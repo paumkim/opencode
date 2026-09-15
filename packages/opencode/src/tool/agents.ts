@@ -24,7 +24,7 @@ export const AgentsTool = Tool.define<typeof Parameters, Metadata, Agent.Service
     return {
       description: AGENTS_DESCRIPTION,
       parameters: Parameters,
-      execute: (params: Schema.Schema.Type<typeof Parameters>, ctx: Tool.Context<Metadata>) =>
+      execute: (params: Schema.Schema.Type<typeof Parameters>, _ctx: Tool.Context<Metadata>) =>
         Effect.gen(function* () {
           const all = yield* agents.list()
           const filtered = params.mode

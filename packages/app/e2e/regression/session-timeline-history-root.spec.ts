@@ -29,7 +29,7 @@ const assistants = Array.from({ length: initialPageSize + 1 }, (_, index) =>
 )
 const messages = [userMessage(), ...assistants]
 const lastAssistant = assistants.at(-1)!
-const lastPartID = assistants.at(-1)!.parts[0]!.id
+const lastPartID = assistants.at(-1)!.parts[0].id
 const userPartID = `prt_${userID}_text`
 const completed = {
   ...lastAssistant.info,
@@ -99,7 +99,7 @@ for (const scenario of scenarios) {
         const start = Math.max(0, end - limit)
         return {
           items: messages.slice(start, end),
-          cursor: start > 0 ? messages[start]!.info.id : undefined,
+          cursor: start > 0 ? messages[start].info.id : undefined,
         }
       },
     })

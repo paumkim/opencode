@@ -226,7 +226,7 @@ export async function CopilotAuthPlugin(input: PluginInput): Promise<Hooks> {
 
             if (deploymentType === "enterprise") {
               const enterpriseUrl = inputs.enterpriseUrl
-              domain = normalizeDomain(enterpriseUrl!)
+              domain = normalizeDomain(enterpriseUrl)
             }
 
             const urls = getUrls(domain)

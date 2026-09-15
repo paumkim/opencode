@@ -1321,19 +1321,20 @@ const layer = Layer.effect(
 
             yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
 
+            const minimalContext = agent.context === "minimal"
             const [skills, env, mcpInstructions, modelMsgs] = yield* Effect.all([
-              sys.skills(agent),
-              sys.environment(model),
-              sys.mcp(agent, session.permission),
+              minimalContext ? Effect.succeed(undefined) : sys.skills(agent),
+              minimalContext ? Effect.succeed(undefined) : sys.environment(model),
+              minimalContext ? Effect.succeed(undefined) : sys.mcp(agent, session.permission),
               MessageV2.toModelMessagesEffect(msgs, model),
             ])
-            const instructions = session.parentID ? [] : (yield* instruction.system().pipe(Effect.orDie))
+            const instructions = session.parentID || minimalContext ? [] : (yield* instruction.system().pipe(Effect.orDie))
             const system = [
-              ...env,
-              ...instructions,
-              ...(mcpInstructions ? [mcpInstructions] : []),
-              ...(skills ? [skills] : []),
-            ]
+              env,
+              instructions.length ? instructions : undefined,
+              mcpInstructions,
+              skills,
+            ].filter((part): part is string => typeof part === "string")
             const format = lastUser.format ?? { type: "text" as const }
             if (format.type === "json_schema") system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
             const result = yield* handle.process({

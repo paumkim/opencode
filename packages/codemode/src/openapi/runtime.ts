@@ -30,7 +30,7 @@ export const invoke = (plan: Plan, input: unknown): Effect.Effect<unknown, unkno
       )
     const text = yield* readResponseBody(response, plan)
     const mediaType = response.headers["content-type"]?.split(";")[0]?.trim().toLowerCase()
-    const json = mediaType === "application/json" || mediaType?.endsWith("+json") === true
+    const json = mediaType === "application/json" ||  mediaType?.endsWith("+json")
     const decoded = text === "" ? Option.some(null) : json ? decodeJson(text) : Option.none()
     const parsed = json ? Option.getOrElse(decoded, () => text) : text === "" ? null : text
     if (response.status < 200 || response.status >= 300) {

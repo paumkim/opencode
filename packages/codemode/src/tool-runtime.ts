@@ -457,14 +457,14 @@ const searchDescription = describeDefinition(`${reservedNamespace}.search`, make
 
 const catalogLine = (tool: ToolDescription) => {
   // Keep the tool description concise; the full schema documentation remains in the signature.
-  const line = tool.description.split("\n", 1)[0]!.trim()
+  const line = tool.description.split("\n", 1)[0].trim()
   const description = line.length > 120 ? line.slice(0, 119) + "..." : line
   return description === "" ? `  - ${tool.signature}` : `  - ${tool.signature} // ${description}`
 }
 
 const toSearchEntry = <R>(path: string, definition: Definition<R>, description: ToolDescription): SearchEntry => ({
   description,
-  namespace: path.split(".", 1)[0]!,
+  namespace: path.split(".", 1)[0],
   searchText: [
     path,
     definition.description,
@@ -532,7 +532,7 @@ export const prepare = <R>(tools: HostTools<R>, catalogBudget = defaultCatalogBu
   while (active.length > 0) {
     const stillActive: typeof active = []
     for (const selection of active) {
-      const tool = selection.queue[0]!
+      const tool = selection.queue[0]
       const cost = estimateTokens(catalogLine(tool))
       if (used + cost > catalogBudget) continue
       selection.queue.shift()
@@ -672,7 +672,7 @@ const namespaceKeys = <R>(tools: HostTools<R>, path: ReadonlyArray<string>): Rea
         "Object.keys(tools) lists the available namespaces; tools.$codemode.search({ query }) finds described tools.",
       ])
     }
-    value = value[segment] as HostTool<R> | Definition<R> | HostTools<R>
+    value = value[segment]
   }
   if (typeof value === "function" || isDefinition(value)) return []
   return Object.keys(value)
@@ -692,7 +692,7 @@ const resolve = <R>(tools: HostTools<R>, path: ReadonlyArray<string>): HostTool<
         "Use tools.$codemode.search({ query }) to find available described tools.",
       ])
     }
-    value = value[segment] as HostTool<R> | Definition<R> | HostTools<R>
+    value = value[segment]
   }
 
   if (typeof value !== "function" && !isDefinition(value)) {

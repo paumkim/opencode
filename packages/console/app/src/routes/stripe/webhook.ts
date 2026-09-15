@@ -114,7 +114,7 @@ export async function POST(input: APIEvent) {
         const coupon = body.data.object.metadata?.coupon
         const customerID = body.data.object.customer as string
         const invoiceID = body.data.object.latest_invoice as string
-        const subscriptionID = body.data.object.id as string
+        const subscriptionID = body.data.object.id
         const paymentMethodID = body.data.object.default_payment_method as string
 
         if (!workspaceID) throw new Error("Workspace ID not found")
@@ -233,7 +233,7 @@ export async function POST(input: APIEvent) {
           expand: ["discounts", "payments"],
         })
         const paymentID = invoice.payments?.data[0]?.payment.payment_intent as string
-        const couponID = (invoice.discounts[0] as Stripe.Discount)?.coupon?.id as string
+        const couponID = (invoice.discounts[0] as Stripe.Discount)?.coupon?.id
         if (!paymentID) {
           // payment id can be undefined when using coupon
           if (!couponID) throw new Error("Payment ID not found")

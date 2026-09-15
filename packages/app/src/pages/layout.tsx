@@ -1154,7 +1154,7 @@ export default function LegacyLayout(props: ParentProps) {
     rememberSessionRoute(directory, id, root)
     notification.session.markViewed(id)
     const expanded = untrack(() => store.workspaceExpanded[directory])
-    if (expanded === false) {
+    if (!expanded) {
       setStore("workspaceExpanded", directory, true)
     }
     requestAnimationFrame(() => scrollToSession(id, `${directory}:${id}`))

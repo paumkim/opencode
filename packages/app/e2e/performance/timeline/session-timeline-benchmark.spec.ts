@@ -82,7 +82,7 @@ benchmark.describe("performance: review pane", () => {
     await fixture.scrollToBottom()
     await fixture.waitForStableGeometry()
 
-    const open = await measureReviewPaneLoad(page, diffs[0]!.file)
+    const open = await measureReviewPaneLoad(page, diffs[0].file)
     const switches = []
     for (const diff of diffs.slice(1, 4)) switches.push(await measureReviewNextFile(page, diff.file))
 
@@ -127,7 +127,7 @@ async function runTimelineStreamBenchmark(page: Page, options: TimelineStreamOpt
   await fixture.scrollToBottom()
   await fixture.waitForStableGeometry()
 
-  const reviewPane = options.reviewPane && diffs ? await measureReviewPaneLoad(page, diffs[0]!.file) : undefined
+  const reviewPane = options.reviewPane && diffs ? await measureReviewPaneLoad(page, diffs[0].file) : undefined
   if (reviewPane) await fixture.waitForStableGeometry()
 
   const profile = await startTimelineProfile(page, { cpuThrottle, profileCPU })
@@ -297,7 +297,7 @@ function summarizeReviewPaneSamples(samples: ReviewPaneSample[]) {
   return {
     samples: samples.length,
     firstReadyObservedMs: firstReady?.observedAtMs ?? null,
-    stableReadyObservedMs: stableIndex === -1 ? null : samples[stableIndex + reviewReadyStreak - 1]!.observedAtMs,
+    stableReadyObservedMs: stableIndex === -1 ? null : samples[stableIndex + reviewReadyStreak - 1].observedAtMs,
     notReadySamples: samples.filter((sample) => !sample.ready).length,
     maxDiffViewers: Math.max(0, ...samples.map((sample) => sample.diffViewers)),
     maxDiffLines: Math.max(0, ...samples.map((sample) => sample.diffLines)),

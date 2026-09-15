@@ -139,9 +139,9 @@ test("removing the first context member replaces the group once without overlapp
     messages: [
       userMessage(),
       assistantMessage([
-        toolPart(ids[0]!, "read", "completed", inputs.read),
-        toolPart(ids[1]!, "glob", "completed", inputs.glob),
-        toolPart(ids[2]!, "grep", "completed", inputs.grep),
+        toolPart(ids[0], "read", "completed", inputs.read),
+        toolPart(ids[1], "glob", "completed", inputs.glob),
+        toolPart(ids[2], "grep", "completed", inputs.grep),
         textPart(followingID, "Following replaced group"),
       ]),
     ],

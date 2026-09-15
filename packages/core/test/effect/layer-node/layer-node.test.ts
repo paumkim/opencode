@@ -13,7 +13,7 @@ class App extends Context.Service<App, { readonly run: Effect.Effect<string[]> }
 const tags = LayerNode.tags({ app: [] })
 const make = tags.make("app")
 const build = <A, E>(root: LayerNode.Node<A, E, any>, replacements?: readonly LayerNode.Replacement[]) =>
-  LayerNode.compile(root, replacements) as Layer.Layer<A, E>
+  LayerNode.compile(root, replacements)
 const valueLayer = Layer.succeed(Value, Value.of({ value: "production" }))
 const greetingLayer = Layer.effect(
   Greeting,
@@ -68,7 +68,7 @@ describe("layer node", () => {
     const greeting = make({ service: Greeting, layer: greetingLayer, deps: [unbound] })
     const tree = LayerNode.group([greeting])
     expect(() => LayerNode.compile(tree)).toThrow("Unbound layer node: test/LayerNodeValue")
-    const layer = LayerNode.compile(tree, [[unbound, value]]) as Layer.Layer<Greeting>
+    const layer = LayerNode.compile(tree, [[unbound, value]])
     const program = Effect.map(Greeting, (item) => item.value).pipe(Effect.provide(layer))
     expect(await Effect.runPromise(program)).toBe("hello production")
   })

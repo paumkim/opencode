@@ -29,7 +29,7 @@ test("keeps the terminal session alive when switching session tabs in a workspac
   const terminal = page.locator('[data-component="terminal"]')
   await expect(terminal).toBeVisible()
   await expect.poll(() => connections.length).toBe(1)
-  const connection = new URL(connections[0]!)
+  const connection = new URL(connections[0])
   expect(connection.pathname).toBe(`/api/pty/${ptyID}/connect`)
   expect(connection.searchParams.get("location[directory]")).toBe(directory)
   expect(connection.searchParams.get("ticket")).toBeNull()
