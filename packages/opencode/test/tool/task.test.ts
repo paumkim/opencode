@@ -325,7 +325,7 @@ describe("tool.task", () => {
       const failure = Cause.squash(exit.cause)
       expect(failure).toBeInstanceOf(Error)
       if (!(failure instanceof Error)) throw new Error("expected Error defect")
-      expect(failure.message).toBe(`Subagent failed (task_id: ${child?.id}): Network connection lost`)
+      expect(failure.message).toBe(`Subagent failed (task_id: ${child?.id}): Network connection lost [tried 1/1]`)
     }),
   )
 
@@ -368,9 +368,146 @@ describe("tool.task", () => {
       expect(failure).toBeInstanceOf(Error)
       if (!(failure instanceof Error)) throw new Error("expected Error defect")
       expect(failure.message).toBe(
-        `Subagent failed (task_id: ${child?.id}): The user rejected permission to use this specific tool call.`,
+        `Subagent failed (task_id: ${child?.id}): The user rejected permission to use this specific tool call. [tried 1/1]`,
       )
     }),
+  )
+
+  it.instance(
+    "execute rotates to the next model on a retryable failure and resumes the same session",
+    () =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const { chat, assistant } = yield* seed()
+        const tool = yield* TaskTool
+        const def = yield* tool.init()
+        const attempts: { providerID: string; modelID: string; prompt: string }[] = []
+        const promptOps = stubOps({
+          onPrompt: (input) => {
+            attempts.push({
+              providerID: input.model?.providerID ?? "",
+              modelID: input.model?.modelID ?? "",
+              prompt: typeof input.parts[0] === "object" && "text" in (input.parts[0] as any)
+                ? (input.parts[0] as any).text
+                : "",
+            })
+          },
+          text: "recovered result",
+          error: new SessionV1.APIError({ message: "429 rate limit exceeded", isRetryable: true }).toObject(),
+        })
+        // First prompt fails with 429, second succeeds.
+        let first = true
+        promptOps.prompt = (input) =>
+          Effect.sync(() => {
+            attempts.push({
+              providerID: input.model?.providerID ?? "",
+              modelID: input.model?.modelID ?? "",
+              prompt: typeof input.parts[0] === "object" && "text" in (input.parts[0] as any)
+                ? (input.parts[0] as any).text
+                : "",
+            })
+            if (first) {
+              first = false
+              return reply(input, "", new SessionV1.APIError({ message: "429 rate limit exceeded", isRetryable: true }).toObject())
+            }
+            return reply(input, "recovered result")
+          })
+
+        const result = yield* def.execute(
+          {
+            description: "inspect bug",
+            prompt: "look into the cache key path",
+            subagent_type: "general",
+          },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: { promptOps },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+
+        expect(result.output).toContain("recovered result")
+        expect(attempts).toHaveLength(2)
+        // Chain: parent model first, then small_model fallback.
+        expect(attempts[0]?.providerID).toBe("test")
+        expect(attempts[0]?.modelID).toBe("test-model")
+        expect(attempts[1]?.providerID).toBe("test")
+        expect(attempts[1]?.modelID).toBe("second-model")
+        // Resume note injected on retry so prior work is preserved, not redone.
+        expect(attempts[1]?.prompt).toContain("Resume note (attempt 2)")
+        expect(attempts[1]?.prompt).toContain("test-model")
+        expect(attempts[1]?.prompt).toContain("429 rate limit exceeded")
+        expect(attempts[1]?.prompt).toContain("look into the cache key path")
+      }),
+    {
+      config: {
+        small_model: "test/second-model",
+      },
+    },
+  )
+
+  it.instance(
+    "execute fails fast on non-retryable errors without rotating",
+    () =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const { chat, assistant } = yield* seed()
+        const tool = yield* TaskTool
+        const def = yield* tool.init()
+        const attempts: { providerID: string; modelID: string }[] = []
+        const promptOps = stubOps({
+          text: "",
+          error: new SessionV1.APIError({ message: "403 forbidden", isRetryable: false }).toObject(),
+        })
+        promptOps.prompt = (input) =>
+          Effect.sync(() => {
+            attempts.push({
+              providerID: input.model?.providerID ?? "",
+              modelID: input.model?.modelID ?? "",
+            })
+            return reply(input, "", new SessionV1.APIError({ message: "403 forbidden", isRetryable: false }).toObject())
+          })
+
+        const exit = yield* def
+          .execute(
+            {
+              description: "inspect bug",
+              prompt: "look into the cache key path",
+              subagent_type: "general",
+            },
+            {
+              sessionID: chat.id,
+              messageID: assistant.id,
+              agent: "build",
+              abort: new AbortController().signal,
+              extra: { promptOps },
+              messages: [],
+              metadata: () => Effect.void,
+              ask: () => Effect.void,
+            },
+          )
+          .pipe(Effect.exit)
+
+        expect(Exit.isFailure(exit)).toBe(true)
+        if (Exit.isSuccess(exit)) throw new Error("expected task failure")
+        const failure = Cause.squash(exit.cause)
+        expect(failure).toBeInstanceOf(Error)
+        if (!(failure instanceof Error)) throw new Error("expected Error defect")
+        expect(failure.message).toContain("403 forbidden")
+        expect(failure.message).toMatch(/\[tried 1\/\d+\]/)
+        // Non-retryable: only one attempt, no rotation.
+        expect(attempts).toHaveLength(1)
+      }),
+    {
+      config: {
+        small_model: "test/second-model",
+      },
+    },
   )
 
   it.instance("execute asks by default and skips checks when bypassed", () =>

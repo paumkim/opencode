@@ -374,6 +374,26 @@ You can configure the providers and models you want to use in your OpenCode conf
 
 The `small_model` option configures a separate model for lightweight tasks like title generation. By default, OpenCode tries to use a cheaper model if one is available from your provider, otherwise it falls back to your main model.
 
+#### Subagent model failover
+
+Your primary agent always keeps its own model. Subagents rotate a fallback chain on retryable failure so work is never lost — the same `task_id` session is reused, so completed edits stay in context.
+
+Chain order:
+
+```
+agent.model → parent.model → small_model → OPENCODE_SUBAGENT_FALLBACKS (env)
+```
+
+Cooled-down models (10 minutes) are skipped unless the whole chain is cooled.
+
+```bash
+OPENCODE_SUBAGENT_FALLBACKS="kilo/nex-agi/nex-n2.5-mini:free,anthropic/claude-haiku-4-5"
+```
+
+Retryable failures (rotate to the next model): `429`, rate/quota, usage limit, overloaded, `5xx`, timeout, network/connection, `doom_loop`/`no_edit_loop` break.
+
+Non-retryable failures (fail fast with `task_id` so you can resume manually): depth limit, unknown agent, permission denial, auth/forbidden.
+
 Provider options can include `timeout`, `headerTimeout`, `chunkTimeout`, and `setCacheKey`:
 
 ```json title="opencode.json"

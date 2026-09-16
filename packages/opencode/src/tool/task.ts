@@ -16,6 +16,12 @@ import { ModelV2 } from "@opencode-ai/core/model"
 import { EffectBridge } from "@/effect/bridge"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { Database } from "@opencode-ai/core/database/database"
+import {
+  buildResumePrompt,
+  isRetryableSubagentError,
+  markSubagentModelFailed,
+  resolveSubagentChain,
+} from "@/session/subagent-failover"
 
 export interface TaskPromptOps {
   cancel(sessionID: SessionID): Effect.Effect<void>
@@ -118,27 +124,32 @@ export const TaskTool = Tool.define(
       if (depth >= (cfg.subagent_depth ?? 1)) {
         return yield* Effect.fail(
           new Error(
-            `Subagent depth limit reached (${cfg.subagent_depth ?? 1}). Increase "subagent_depth" to allow nested subagents.`,
+            `Subagent depth limit reached (${cfg.subagent_depth ?? 1}). Do work directly, never nest task inside task: use read/write/edit/bash/glob/grep yourself. Increase "subagent_depth" only when 3+ independent subtasks require parallel subagents.`,
           ),
         )
       }
 
+      const normalizedSubagentType = params.subagent_type.replace(/^@/, "").toLowerCase()
+
       if (!ctx.extra?.bypassAgentCheck) {
         yield* ctx.ask({
           permission: id,
-          patterns: [params.subagent_type],
+          patterns: [normalizedSubagentType],
           always: ["*"],
           metadata: {
             description: params.description,
-            subagent_type: params.subagent_type,
+            subagent_type: normalizedSubagentType,
           },
         })
       }
 
       yield* agent.invalidate()
-      const next = yield* agent.get(params.subagent_type)
+      const next = yield* agent.get(normalizedSubagentType)
       if (!next) {
-        return yield* Effect.fail(new Error(`Unknown agent type: ${params.subagent_type} is not a valid agent type`))
+        const available = (yield* agent.list()).map((a) => a.name).join(", ")
+        return yield* Effect.fail(
+          new Error(`Unknown agent type: ${params.subagent_type} is not a valid agent type. Available: ${available}`),
+        )
       }
 
       const session = params.task_id
@@ -190,10 +201,27 @@ export const TaskTool = Tool.define(
         modelID: msg.info.modelID,
         providerID: msg.info.providerID,
       }
+      const parseSmallModel = (raw: unknown): { providerID: string; modelID: string } | undefined => {
+        if (typeof raw !== "string") return undefined
+        const slash = raw.indexOf("/")
+        if (slash <= 0 || slash >= raw.length - 1) return undefined
+        return { providerID: raw.slice(0, slash), modelID: raw.slice(slash + 1) }
+      }
+      const smallRaw = (cfg as { small_model?: unknown }).small_model
+      const smallModel = parseSmallModel(smallRaw) as typeof model | undefined
+      // Orchestrator keeps its own (best) model; this chain only orders subagent attempts.
+      // Same session is reused across attempts so completed work is preserved, never restarted.
+      const chain = resolveSubagentChain({
+        subagentType: normalizedSubagentType,
+        parent: model,
+        agentModel: next.model as typeof model | undefined,
+        smallModel,
+      })
       const metadata = {
         parentSessionId: ctx.sessionID,
         sessionId: nextSession.id,
         model,
+        subagentChain: chain,
         ...(runInBackground ? { background: true } : {}),
       }
 
@@ -207,29 +235,70 @@ export const TaskTool = Tool.define(
 
       const runTask = Effect.fn("TaskTool.runTask")(function* () {
         const parts = yield* ops.resolvePromptParts(params.prompt)
-        const result = yield* ops.prompt({
-          messageID: MessageID.ascending(),
-          sessionID: nextSession.id,
-          model: {
-            modelID: model.modelID,
-            providerID: model.providerID,
-          },
-          variant: next.model ? undefined : variant,
-          agent: next.name,
-          parts,
-        })
-        if (result.info.role === "assistant" && result.info.error) {
-          const message =
-            "message" in result.info.error.data && typeof result.info.error.data.message === "string"
-              ? result.info.error.data.message
-              : result.info.error.name
-          return yield* Effect.fail(new Error(`Subagent failed (task_id: ${nextSession.id}): ${message}`))
+        let lastError = "unknown error"
+        for (let attempt = 0; attempt < chain.length; attempt++) {
+          const attemptModel = chain[attempt]!
+          const attemptPrompt =
+            attempt === 0
+              ? parts
+              : yield* ops.resolvePromptParts(
+                  buildResumePrompt({
+                    prompt: params.prompt,
+                    attempt,
+                    failedModel: chain[attempt - 1]!,
+                    error: lastError,
+                  }),
+                )
+          const result = yield* ops
+            .prompt({
+              messageID: MessageID.ascending(),
+              sessionID: nextSession.id,
+              model: {
+                modelID: attemptModel.modelID,
+                providerID: attemptModel.providerID,
+              },
+              variant: next.model ? undefined : variant,
+              agent: next.name,
+              parts: attemptPrompt,
+            })
+            .pipe(Effect.option)
+          if (result._tag === "None") {
+            lastError = "prompt interrupted"
+            if (attempt + 1 < chain.length) {
+              if (isRetryableSubagentError(lastError)) markSubagentModelFailed(attemptModel)
+              continue
+            }
+            return yield* Effect.fail(
+              new Error(`Subagent failed (task_id: ${nextSession.id}): interrupted, tried ${chain.length} model(s)`),
+            )
+          }
+          const value = result.value
+          const errorMessage =
+            value.info.role === "assistant" && value.info.error
+              ? "message" in value.info.error.data && typeof value.info.error.data.message === "string"
+                ? value.info.error.data.message
+                : value.info.error.name
+              : undefined
+          const failedPart = value.parts.findLast((item) => item.type === "tool" && item.state.status === "error")
+          const failedMessage =
+            failedPart?.type === "tool" && failedPart.state.status === "error" ? failedPart.state.error : undefined
+          const failure = errorMessage ?? failedMessage
+          if (!failure) {
+            return value.parts.findLast((item) => item.type === "text")?.text ?? ""
+          }
+          lastError = failure
+          // Retryable (quota/network/loop) → try next model in chain, same session so work is kept.
+          // Non-retryable → fail fast with task_id so orchestrator can resume manually.
+          if (attempt + 1 >= chain.length || !isRetryableSubagentError(failure)) {
+            return yield* Effect.fail(
+              new Error(
+                `Subagent failed (task_id: ${nextSession.id}): ${failure} [tried ${attempt + 1}/${chain.length}]`,
+              ),
+            )
+          }
+          markSubagentModelFailed(attemptModel)
         }
-        const failed = result.parts.findLast((item) => item.type === "tool" && item.state.status === "error")
-        if (failed?.type === "tool" && failed.state.status === "error") {
-          return yield* Effect.fail(new Error(`Subagent failed (task_id: ${nextSession.id}): ${failed.state.error}`))
-        }
-        return result.parts.findLast((item) => item.type === "text")?.text ?? ""
+        return yield* Effect.fail(new Error(`Subagent failed (task_id: ${nextSession.id}): ${lastError}`))
       })
 
       const inject = Effect.fn("TaskTool.injectBackgroundResult")(function* (

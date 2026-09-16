@@ -1,5 +1,7 @@
-import { createMemo, createSignal } from "solid-js"
+import { createEffect, createMemo, createSignal, Show } from "solid-js"
 import { useLocal } from "../context/local"
+import { useTheme } from "../context/theme"
+import { useTerminalDimensions } from "@opentui/solid"
 import { map, pipe, flatMap, entries, filter, sortBy, take } from "remeda"
 import { DialogSelect } from "../ui/dialog-select"
 import { useDialog } from "../ui/dialog"
@@ -8,17 +10,74 @@ import { DialogVariant } from "./dialog-variant"
 import * as fuzzysort from "fuzzysort"
 import { useConnected } from "./use-connected"
 import { useSync } from "../context/sync"
+import { TextAttributes } from "@opentui/core"
+import {
+  MODEL_SEARCH_KEYS,
+  formatContext,
+  formatModelFooter,
+  formatPrice,
+  groupRank,
+  isFreeModel,
+  matchesModelFilter,
+  modelTags,
+  parseModelQuery,
+  smartCategory,
+} from "../util/model-categories"
 
 export function DialogModel(props: { providerID?: string }) {
   const local = useLocal()
   const sync = useSync()
   const dialog = useDialog()
+  const { theme } = useTheme()
+  const dimensions = useTerminalDimensions()
   const [query, setQuery] = createSignal("")
 
   const connected = useConnected()
   const providers = createDialogProviderOptions()
 
   const showExtra = createMemo(() => connected() && !props.providerID)
+  const wide = createMemo(() => dimensions().width >= 108)
+  const dialogHeight = createMemo(() => Math.min(24, Math.floor(dimensions().height / 2) - 8))
+  const [preview, setPreview] = createSignal<{
+    title: string
+    description?: string
+    providerID?: string
+    releaseDate?: string | number
+    reasoning?: boolean
+    toolcall?: boolean
+    context?: number
+    isFree?: boolean
+    cost?: { input?: number; output?: number }
+  }>()
+
+  const lookup = (providerID: string, modelID: string) => {
+    const provider = sync.data.provider.find((x) => x.id === providerID)
+    const model = provider?.models[modelID]
+    if (!provider || !model) return
+    return {
+      title: model.name ?? modelID,
+      description: provider.name,
+      providerID: provider.id,
+      releaseDate: model.release_date,
+      reasoning: model.capabilities.reasoning,
+      toolcall: model.capabilities.toolcall,
+      context: model.limit.context,
+      isFree: isFreeModel(model),
+      cost: model.cost,
+    }
+  }
+
+  createEffect(() => {
+    dialog.setSize(wide() ? "xlarge" : "large")
+  })
+
+  createEffect(() => {
+    const current = local.model.current()
+    if (!current) return
+    const next = lookup(current.providerID, current.modelID)
+    if (!next) return
+    setPreview(next)
+  })
 
   const options = createMemo(() => {
     const needle = query().trim()
@@ -33,15 +92,27 @@ export function DialogModel(props: { providerID?: string }) {
         if (!provider) return []
         const model = provider.models[item.modelID]
         if (!model) return []
+        const free = isFreeModel(model)
         return [
           {
             key: item,
             value: { providerID: provider.id, modelID: model.id },
             title: model.name ?? item.modelID,
             description: provider.name,
+            providerName: provider.name,
             category,
+            providerID: provider.id,
+            modelID: model.id,
+            family: model.family,
+            tags: modelTags(model, provider),
+            isFree: free,
+            reasoning: model.capabilities.reasoning,
+            toolcall: model.capabilities.toolcall,
+            context: model.limit.context,
+            cost: model.cost,
+            releaseDate: model.release_date,
             disabled: provider.id === "opencode" && model.id.includes("-nano"),
-            footer: model.cost?.input === 0 && provider.id === "opencode" ? "Free" : undefined,
+            footer: formatModelFooter(model),
             onSelect: () => {
               onSelect(provider.id, model.id)
             },
@@ -70,20 +141,31 @@ export function DialogModel(props: { providerID?: string }) {
           entries(),
           filter(([_, info]) => info.status !== "deprecated"),
           filter(([_, info]) => (props.providerID ? info.providerID === props.providerID : true)),
-          map(([model, info]) => ({
-            value: { providerID: provider.id, modelID: model },
-            title: info.name ?? model,
-            releaseDate: info.release_date,
-            description: favorites.some((item) => item.providerID === provider.id && item.modelID === model)
-              ? "(Favorite)"
-              : undefined,
-            category: connected() ? provider.name : undefined,
-            disabled: provider.id === "opencode" && model.includes("-nano"),
-            footer: info.cost?.input === 0 && provider.id === "opencode" ? "Free" : undefined,
-            onSelect() {
-              onSelect(provider.id, model)
-            },
-          })),
+          map(([model, info]) => {
+            const free = isFreeModel(info)
+            return {
+              value: { providerID: provider.id, modelID: model },
+              title: info.name ?? model,
+              releaseDate: info.release_date,
+              description: provider.name,
+              providerName: provider.name,
+              category: props.providerID ? undefined : connected() ? smartCategory(info, provider) : undefined,
+              providerID: provider.id,
+              modelID: model,
+              family: info.family,
+              tags: modelTags(info, provider),
+              isFree: free,
+              reasoning: info.capabilities.reasoning,
+              toolcall: info.capabilities.toolcall,
+              context: info.limit.context,
+              cost: info.cost,
+              disabled: provider.id === "opencode" && model.includes("-nano"),
+              footer: formatModelFooter(info),
+              onSelect() {
+                onSelect(provider.id, model)
+              },
+            }
+          }),
           filter((option) => {
             if (!showSections) return true
             if (
@@ -100,10 +182,14 @@ export function DialogModel(props: { providerID?: string }) {
               return false
             return true
           }),
-          (options) => sortModelOptions(options, props.providerID !== undefined),
+          (options) =>
+            props.providerID !== undefined ? sortModelOptions(options, true) : options,
         ),
       ),
     )
+
+    const allProviderOptions =
+      props.providerID !== undefined || !connected() ? providerOptions : sortModelOptions(providerOptions, false)
 
     const popularProviders = !connected()
       ? pipe(
@@ -117,16 +203,28 @@ export function DialogModel(props: { providerID?: string }) {
       : []
 
     if (needle) {
-      return [
-        ...sortModelOptions(
-          fuzzysort.go(needle, providerOptions, { keys: ["title", "category"] }).map((x) => x.obj),
-          false,
-        ),
-        ...fuzzysort.go(needle, popularProviders, { keys: ["title"] }).map((x) => x.obj),
-      ]
+      const filter = parseModelQuery(needle)
+      const prefiltered = allProviderOptions.filter((option) => matchesModelFilter(option, filter))
+      if (!filter.search) {
+        return [
+          ...sortModelOptions(prefiltered, false),
+          ...fuzzysort.go(needle, popularProviders, { keys: ["title"] }).map((x) => x.obj),
+        ]
+      }
+      const scored = fuzzysort.go(filter.search, prefiltered, { keys: [...MODEL_SEARCH_KEYS] })
+      const ranked = [...scored]
+        .sort((a, b) => {
+          if (b.score !== a.score) return b.score - a.score
+          const aFree = a.obj.isFree || (a.obj.footer ?? "").startsWith("Free") ? 0 : 1
+          const bFree = b.obj.isFree || (b.obj.footer ?? "").startsWith("Free") ? 0 : 1
+          if (aFree !== bFree) return aFree - bFree
+          return (b.obj.context ?? 0) - (a.obj.context ?? 0)
+        })
+        .map((x) => x.obj)
+      return [...ranked, ...fuzzysort.go(filter.search, popularProviders, { keys: ["title"] }).map((x) => x.obj)]
     }
 
-    return [...favoriteOptions, ...recentOptions, ...providerOptions, ...popularProviders]
+    return [...favoriteOptions, ...recentOptions, ...allProviderOptions, ...popularProviders]
   })
 
   const provider = createMemo(() =>
@@ -155,43 +253,113 @@ export function DialogModel(props: { providerID?: string }) {
   }
 
   return (
-    <DialogSelect<ReturnType<typeof options>[number]["value"]>
-      options={options()}
-      actions={[
-        {
-          command: "model.dialog.provider",
-          title: connected() ? "Connect provider" : "View all providers",
-          onTrigger() {
-            dialog.replace(() => <DialogProvider />)
-          },
-        },
-        {
-          command: "model.dialog.favorite",
-          title: "Favorite",
-          hidden: !connected(),
-          onTrigger: (option) => {
-            local.model.toggleFavorite(option.value as { providerID: string; modelID: string })
-          },
-        },
-      ]}
-      onFilter={setQuery}
-      flat={true}
-      skipFilter={true}
-      title={title()}
-      current={local.model.current()}
-    />
+    <box flexDirection="row">
+      <box flexGrow={1} flexShrink={1}>
+        <DialogSelect<ReturnType<typeof options>[number]["value"]>
+          options={options()}
+          actions={[
+            {
+              command: "model.dialog.provider",
+              title: connected() ? "Connect provider" : "View all providers",
+              onTrigger() {
+                dialog.replace(() => <DialogProvider />)
+              },
+            },
+            {
+              command: "model.dialog.favorite",
+              title: "Favorite",
+              hidden: !connected(),
+              onTrigger: (option) => {
+                local.model.toggleFavorite(option.value as { providerID: string; modelID: string })
+              },
+            },
+          ]}
+          onFilter={setQuery}
+          onMove={(option) => {
+            if (typeof option.value === "string") {
+              setPreview(undefined)
+              return
+            }
+            const next = lookup(option.value.providerID, option.value.modelID)
+            if (!next) return
+            setPreview(next)
+          }}
+          skipFilter={true}
+          title={title()}
+          current={local.model.current()}
+        />
+      </box>
+      <Show when={wide() && preview()}>
+        {(item) => {
+          const p = item()!
+          const cost = p.cost
+          const ctx = p.context
+          const free = p.isFree
+          return (
+            <box
+              width={Math.max(32, Math.floor(dimensions().width * 0.30))}
+              flexShrink={0}
+              border={["left"]}
+              borderColor={theme.borderSubtle}
+              paddingLeft={2}
+              paddingRight={2}
+              maxHeight={dialogHeight()}
+            >
+              <scrollbox scrollbarOptions={{ visible: true }}>
+                <box paddingLeft={2} paddingRight={2} gap={1} flexDirection="column">
+                  <text fg={theme.text} attributes={TextAttributes.BOLD}>{p.title}</text>
+                  <text fg={theme.textMuted}>{p.description ?? p.providerID}</text>
+                  <box height={1} />
+                  <text fg={theme.textMuted}>Released</text>
+                  <text fg={theme.text}>{formatDate(p.releaseDate)}</text>
+                  <box height={1} />
+                  <text fg={theme.textMuted}>Reasoning</text>
+                  <text fg={theme.text}>{p.reasoning ? "Yes" : "No"}</text>
+                  <text fg={theme.textMuted}>Tools</text>
+                  <text fg={theme.text}>{p.toolcall ? "Yes" : "No"}</text>
+                  <text fg={theme.textMuted}>Context</text>
+                  <text fg={theme.text}>{ctx ? formatContext(ctx) : "—"}</text>
+                  <text fg={theme.textMuted}>Price</text>
+                  <text fg={theme.text}>{free ? "Free" : cost?.input ? `$${formatPrice(cost.input)}/M` : "—"}</text>
+                </box>
+              </scrollbox>
+            </box>
+          )
+        }}
+      </Show>
+    </box>
   )
 }
 
-export function sortModelOptions<T extends { footer?: string; releaseDate: string | number; title: string }>(
+export function sortModelOptions<
+  T extends {
+    footer?: string
+    releaseDate: string | number
+    title: string
+    category?: string
+    context?: number
+    isFree?: boolean
+  },
+>(
   options: T[],
   newestFirst: boolean,
 ) {
   if (newestFirst) return sortBy(options, [(option) => option.releaseDate, "desc"], (option) => option.title)
   return sortBy(
     options,
-    (option) => option.footer !== "Free",
+    (option) => groupRank(option.category),
+    (option) => (option.isFree ?? (option.footer ?? "").startsWith("Free") ? 0 : 1),
+    [(option) => option.context ?? 0, "desc"],
     [(option) => option.releaseDate, "desc"],
     (option) => option.title,
   )
+}
+
+function formatDate(input: string | number | undefined): string {
+  if (!input) return "—"
+  const num = typeof input === "string" ? Number(input) : input
+  if (!Number.isFinite(num)) return String(input)
+  const date = new Date(num * 1000)
+  if (Number.isNaN(date.getTime())) return String(input)
+  return date.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" })
 }

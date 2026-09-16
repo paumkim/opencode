@@ -20,7 +20,7 @@ export function Dialog(
 
   let dismiss = false
   const width = () => {
-    if (props.size === "xlarge") return 116
+    if (props.size === "xlarge") return 132
     if (props.size === "large") return 88
     return 60
   }
@@ -42,7 +42,7 @@ export function Dialog(
       alignItems="center"
       position="absolute"
       zIndex={3000}
-      paddingTop={dimensions().height / 4}
+      paddingTop={Math.max(2, Math.floor(dimensions().height / 24))}
       left={0}
       top={0}
       backgroundColor={RGBA.fromInts(0, 0, 0, 150)}
@@ -57,8 +57,10 @@ export function Dialog(
         }}
         width={width()}
         maxWidth={dimensions().width - 2}
+        maxHeight={dimensions().height - 2}
         backgroundColor={theme.backgroundPanel}
         paddingTop={1}
+        paddingBottom={1}
       >
         {props.children}
       </box>
