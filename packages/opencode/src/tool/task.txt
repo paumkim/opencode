@@ -1,8 +1,10 @@
-Launch a new agent to handle complex, multistep tasks autonomously.
+Launch a new agent to handle complex, multistep tasks autonomously. Do work directly, never nest task inside task.
 
 When using the Task tool, you must specify a subagent_type parameter to select which agent type to use.
 
 When NOT to use the Task tool:
+- Prefer direct tools (read/write/edit/bash/glob/grep) over task delegation. Only delegate when there are 3+ independent subtasks.
+- Never nest task inside task: a subagent must do work directly and must NOT spawn further subagents.
 - If you want to read a specific file path, use the Read or Glob tool instead of the Task tool, to find the match more quickly
 - If you are searching for a specific class definition like "class Foo", use the Grep tool instead, to find the match more quickly
 - If you are searching for code within a specific file or set of 2-3 files, use the Read tool instead of the Task tool, to find the match more quickly
@@ -17,3 +19,5 @@ Usage notes:
 5. The agent's outputs should generally be trusted
 6. Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.), since it is not aware of the user's intent. Tell it how to verify its work if possible (e.g., relevant test commands).
 7. If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.
+Valid values: "general", "explore" (bare names, no @ prefix).
+Note: build is primary, not for task delegation.

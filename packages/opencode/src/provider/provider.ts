@@ -1262,6 +1262,15 @@ function cloudflareGatewayNpm(providerID: string, modelID: string) {
   return undefined
 }
 
+// Resolve the toolcall capability explicitly: an explicit `tool_call: false`
+// (e.g. pinned for small models like Nex-N2.5-Mini that emit pseudo-toolcall
+// text instead of native function calls) must survive catalog merges. Only
+// fall back to `true` when neither the config entry nor the catalog default
+// says anything.
+function resolveToolcall(configured: boolean | undefined, existing: boolean | undefined): boolean {
+  return configured ?? existing ?? true
+}
+
 function fromModelsDevModel(provider: ModelsDev.Provider, model: ModelsDev.Model): Model {
   const base: Model = {
     id: ModelV2.ID.make(model.id),
@@ -1290,7 +1299,7 @@ function fromModelsDevModel(provider: ModelsDev.Provider, model: ModelsDev.Model
       temperature: model.temperature ?? false,
       reasoning: model.reasoning ?? false,
       attachment: model.attachment ?? false,
-      toolcall: model.tool_call ?? true,
+      toolcall: resolveToolcall(model.tool_call, undefined),
       input: {
         text: model.modalities?.input?.includes("text") ?? false,
         audio: model.modalities?.input?.includes("audio") ?? false,
@@ -1521,7 +1530,7 @@ const layer = Layer.effect(
                 temperature: model.temperature ?? existingModel?.capabilities.temperature ?? false,
                 reasoning: model.reasoning ?? existingModel?.capabilities.reasoning ?? false,
                 attachment: model.attachment ?? existingModel?.capabilities.attachment ?? false,
-                toolcall: model.tool_call ?? existingModel?.capabilities.toolcall ?? true,
+                toolcall: resolveToolcall(model.tool_call, existingModel?.capabilities.toolcall),
                 input: {
                   text: model.modalities?.input?.includes("text") ?? existingModel?.capabilities.input.text ?? true,
                   audio: model.modalities?.input?.includes("audio") ?? existingModel?.capabilities.input.audio ?? false,

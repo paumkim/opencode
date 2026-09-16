@@ -205,7 +205,15 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
   }
 })
 
-function resolveTools(input: Pick<PrepareInput, "tools" | "agent" | "permission" | "user">) {
+function resolveTools(input: Pick<PrepareInput, "tools" | "agent" | "permission" | "user" | "model">) {
+  // Capability hardening: models without native function-calling (e.g. small
+  // models with toolcall:false such as Nex-N2.5-Mini when pinned that way)
+  // must not receive tools — they emit pseudo-toolcall text instead, which is
+  // only recovered via the opt-out processor fallback (may be stripped/executed
+  // unreliably). Return no tools so the caller falls back to plain text.
+  if (input.model.capabilities.toolcall === false) {
+    return {}
+  }
   const disabled = Permission.disabled(
     Object.keys(input.tools),
     Permission.merge(input.agent.permission, input.permission ?? []),

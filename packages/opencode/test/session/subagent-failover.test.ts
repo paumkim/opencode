@@ -14,21 +14,36 @@ describe("subagent-failover", () => {
     clearSubagentFailover()
     delete process.env.OPENCODE_SUBAGENT_FALLBACKS
   })
-  test("builds chain: agent → parent → small → env", () => {
+  test("builds chain: agent → parent → small → recent → env", () => {
     process.env.OPENCODE_SUBAGENT_FALLBACKS = "kilo/nex-agi/nex-n2.5-mini:free,anthropic/claude-haiku-4-5"
     const chain = resolveSubagentChain({
       subagentType: "general",
       parent: p("anthropic", "claude-sonnet-4-6"),
       agentModel: p("openai", "gpt-5"),
       smallModel: p("anthropic", "claude-haiku-4-5"),
+      recentModel: p("google", "gemini-3-pro"),
     })
     expect(chain.map((m) => `${m.providerID}/${m.modelID}`)).toEqual([
       "openai/gpt-5",
       "anthropic/claude-sonnet-4-6",
       "anthropic/claude-haiku-4-5",
+      "google/gemini-3-pro",
       "kilo/nex-agi/nex-n2.5-mini:free",
     ])
     delete process.env.OPENCODE_SUBAGENT_FALLBACKS
+  })
+
+  test("recent model is skipped when already in chain", () => {
+    const chain = resolveSubagentChain({
+      subagentType: "general",
+      parent: p("anthropic", "claude-sonnet-4-6"),
+      agentModel: p("openai", "gpt-5"),
+      recentModel: p("anthropic", "claude-sonnet-4-6"),
+    })
+    expect(chain.map((m) => `${m.providerID}/${m.modelID}`)).toEqual([
+      "openai/gpt-5",
+      "anthropic/claude-sonnet-4-6",
+    ])
   })
 
   test("skips cooled-down models unless all are cooled", () => {

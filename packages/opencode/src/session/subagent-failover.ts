@@ -88,15 +88,21 @@ function smallModelFallback(small: SubagentModel | undefined): SubagentModel[] {
   return small ? [small] : []
 }
 
+function recentModelFallback(recent: SubagentModel[]): SubagentModel[] {
+  return recent
+}
+
 // Build the try-order for a subagent run.
 // - Orchestrator (primary) model stays untouched; this only orders subagent attempts.
-// - Agent-explicit model goes first, then parent model, then small_model, then env fallbacks.
+// - Agent-explicit model goes first, then parent model, then small_model, then the
+//   last recently-used models (model.json), then env fallbacks.
 // - Cooled-down models are skipped unless everything is cooled (then we try anyway).
 export function resolveSubagentChain(input: {
   subagentType: string
   parent: SubagentModel
   agentModel?: SubagentModel
   smallModel?: SubagentModel
+  recentModel?: SubagentModel
 }): SubagentModel[] {
   void input.subagentType
   const seen = new Set<string>()
@@ -111,6 +117,7 @@ export function resolveSubagentChain(input: {
   push(input.agentModel)
   push(input.parent)
   for (const m of smallModelFallback(input.smallModel)) push(m)
+  for (const m of recentModelFallback(input.recentModel ? [input.recentModel] : [])) push(m)
   for (const m of envFallbacks()) push(m)
   const fresh = chain.filter((m) => !isSubagentModelCooledDown(m))
   return fresh.length > 0 ? fresh : chain

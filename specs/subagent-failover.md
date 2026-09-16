@@ -6,8 +6,14 @@ on retryable failure, resuming the *same* session so completed work is never los
 ## Chain order
 
 ```
-agent.model → parent.model → small_model → OPENCODE_SUBAGENT_FALLBACKS (env)
+agent.model → parent.model → small_model → last-recent-model (model.json) → OPENCODE_SUBAGENT_FALLBACKS (env)
 ```
+
+The default subagent model is the last recently-used model from the parent session's
+model picker (`model.json`), so subagents inherit whatever the invoking agent is
+currently running — the same behavior Kilo Code uses. An explicit `agent.model`
+or `small_model` override always wins; `OPENCODE_SUBAGENT_FALLBACKS` is the
+last resort.
 
 Cooled-down models (10 min) are skipped unless the whole chain is cooled.
 

@@ -16,6 +16,8 @@ import { ModelV2 } from "@opencode-ai/core/model"
 import { EffectBridge } from "@/effect/bridge"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { Database } from "@opencode-ai/core/database/database"
+import { SessionTable } from "@opencode-ai/core/session/sql"
+import { eq } from "drizzle-orm"
 import {
   buildResumePrompt,
   isRetryableSubagentError,
@@ -197,10 +199,6 @@ export const TaskTool = Tool.define(
       if (msg.info.role !== "assistant") return yield* Effect.fail(new Error("Not an assistant message"))
       const variant = msg.info.variant
 
-      const model = next.model ?? {
-        modelID: msg.info.modelID,
-        providerID: msg.info.providerID,
-      }
       const parseSmallModel = (raw: unknown): { providerID: string; modelID: string } | undefined => {
         if (typeof raw !== "string") return undefined
         const slash = raw.indexOf("/")
@@ -208,14 +206,39 @@ export const TaskTool = Tool.define(
         return { providerID: raw.slice(0, slash), modelID: raw.slice(slash + 1) }
       }
       const smallRaw = (cfg as { small_model?: unknown }).small_model
-      const smallModel = parseSmallModel(smallRaw) as typeof model | undefined
+      const smallModel = parseSmallModel(smallRaw) as { providerID: ProviderV2.ID; modelID: ModelV2.ID } | undefined
+      // Default subagent model = whatever the invoking parent session is currently
+      // running (its last-selected model, stored on the session row). Falls back
+      // to the parent assistant message's model if the row is unset.
+      const recentModel = yield* database.db
+        .select({ model: SessionTable.model })
+        .from(SessionTable)
+        .where(eq(SessionTable.id, ctx.sessionID))
+        .get()
+        .pipe(
+          Effect.map((row): { providerID: ProviderV2.ID; modelID: ModelV2.ID } | undefined => {
+            const m = row?.model
+            if (!m || typeof m.id !== "string" || typeof m.providerID !== "string") return undefined
+            return {
+              providerID: ProviderV2.ID.make(m.providerID),
+              modelID: ModelV2.ID.make(m.id),
+            }
+          }),
+          Effect.catch(() => Effect.succeed(undefined)),
+        )
+      // Agent-explicit model → parent session model → parent message model.
       // Orchestrator keeps its own (best) model; this chain only orders subagent attempts.
+      const model = next.model ?? recentModel ?? {
+        modelID: msg.info.modelID,
+        providerID: msg.info.providerID,
+      }
       // Same session is reused across attempts so completed work is preserved, never restarted.
       const chain = resolveSubagentChain({
         subagentType: normalizedSubagentType,
         parent: model,
         agentModel: next.model as typeof model | undefined,
         smallModel,
+        recentModel,
       })
       const metadata = {
         parentSessionId: ctx.sessionID,

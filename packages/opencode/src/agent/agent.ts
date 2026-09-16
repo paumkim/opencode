@@ -180,7 +180,7 @@ const layer = Layer.effect(
           },
           general: {
             name: "general",
-            description: `General-purpose agent for researching complex questions and executing multi-step tasks. Use this agent to execute multiple units of work in parallel. When reading multiple files to answer a question, always issue parallel Read calls in a single turn rather than reading files one at a time — parallel reads are much faster and are a hard requirement, not a suggestion. After a Glob or Grep pass, immediately read the top matches in parallel (up to 8–10 at once). Reserve sequential reads only for genuinely dependent cases.`,
+            description: `General-purpose agent for researching complex questions and executing multi-step tasks. Use this agent to execute multiple units of work in parallel. Do work directly, avoid delegating to subagents. When reading multiple files to answer a question, always issue parallel Read calls in a single turn rather than reading files one at a time — parallel reads are much faster and are a hard requirement, not a suggestion. After a Glob or Grep pass, immediately read the top matches in parallel (up to 8–10 at once). Reserve sequential reads only for genuinely dependent cases.`,
             permission: Permission.merge(
               defaults,
               Permission.fromConfig({
@@ -310,7 +310,7 @@ const layer = Layer.effect(
         }
 
         const get = Effect.fnUntraced(function* (agent: string) {
-          return agents[agent]
+          return agents[agent.replace(/^@/, "").toLowerCase()]
         })
 
         const list = Effect.fnUntraced(function* () {

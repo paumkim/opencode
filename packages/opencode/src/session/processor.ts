@@ -24,6 +24,8 @@ import type { Provider } from "@/provider/provider"
 import { Question } from "@/question"
 import { errorMessage } from "@/util/error"
 import { isRecord } from "@/util/record"
+import { ulid } from "ulid"
+import { PseudoToolCall } from "./pseudo-tool-call"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { Database } from "@opencode-ai/core/database/database"
 import { Usage, type LLMEvent } from "@opencode-ai/llm"
@@ -758,6 +760,34 @@ const reasoning = ctx.reasoningMap[value.id]
             {
               const end = Date.now()
               ctx.currentText.time = { start: ctx.currentText.time?.start ?? end, end }
+            }
+            // Opt-out fallback: some models emit pseudo XML <tool_call>
+            // instead of real tool calls. Recover them as running tool
+            // parts so downstream execution still happens. Safe to run
+            // always: distinctive patterns never appear in normal prose.
+            // Set OPENCODE_PSEUDO_TOOL_CALL=0 to disable.
+            if (globalThis.process.env.OPENCODE_PSEUDO_TOOL_CALL !== "0") {
+              // Allowlist: only execute parsed calls for known registry tools.
+              // Unknown names stay as visible text (strip preserves them) so
+              // smuggled <tool_call name="..."> markup cannot trigger arbitrary
+              // tool execution via parser injection.
+              const pseudo = PseudoToolCall.parsePseudoToolCalls(ctx.currentText.text).filter((call) =>
+                PseudoToolCall.isKnownToolCall(call.name),
+              )
+              for (const call of pseudo) {
+                const id = ulid()
+                yield* ensureToolCall({ id, name: call.name })
+                const input = isRecord(call.input) ? call.input : { value: call.input }
+                yield* updateToolCall(id, (match) => ({
+                  ...match,
+                  tool: call.name,
+                  state:
+                    match.state.status === "running"
+                      ? { ...match.state, input }
+                      : { status: "running", input, time: { start: Date.now() } },
+                }))
+              }
+              if (pseudo.length) ctx.currentText.text = PseudoToolCall.stripPseudoToolCalls(ctx.currentText.text)
             }
             if (value.providerMetadata) ctx.currentText.metadata = value.providerMetadata
 if (ctx.currentText.text.trim()) {
