@@ -27,6 +27,7 @@ TRAINING_DATA = [
     ("Process running for 2 hours, steady output, memory stable, no errors.", "RUNNING"),
     ("Process is thrashing, high swap usage, but still producing 1 token every 30 seconds.", "RUNNING"),
     ("Process started 30 seconds ago, initializing, no output yet.", "RUNNING"),
+    ("Process started 5 minutes ago, last output was 2 minutes ago, currently generating.", "RUNNING"),
     # STALLED (15 examples)
     ("Process has stopped producing output, no activity.", "STALLED"),
     ("Process is hung, not responding to any requests.", "STALLED"),
@@ -49,7 +50,6 @@ TRAINING_DATA = [
     ("Partial output, unclear if more will come.", "UNKNOWN"),
     ("Process behavior is anomalous, status uncertain.", "UNKNOWN"),
     ("New process, not enough history to judge.", "UNKNOWN"),
-    ("Process started 5 minutes ago, last output was 2 minutes ago, currently generating.", "UNKNOWN"),
     ("Mixed signals: some threads active but no recent output.", "UNKNOWN"),
     ("Process transitioning between states, cannot classify.", "UNKNOWN"),
     ("Incomplete monitoring data, cannot make determination.", "UNKNOWN"),
