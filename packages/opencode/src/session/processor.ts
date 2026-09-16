@@ -27,8 +27,10 @@ import { isRecord } from "@/util/record"
 import { ulid } from "ulid"
 import { PseudoToolCall } from "./pseudo-tool-call"
 import { EventV2Bridge } from "@/event-v2-bridge"
+import { NotFoundError } from "@/storage/storage"
 import { Database } from "@opencode-ai/core/database/database"
 import { Usage, type LLMEvent } from "@opencode-ai/llm"
+import { check } from "./watcher/watcher"
 
 const DOOM_LOOP_THRESHOLD = 3
 const TEXT_LOOP_THRESHOLD = 3
@@ -94,6 +96,15 @@ export type Result = "compact" | "stop" | "continue"
 export interface ProcessResult {
   result: Result
   noEditStreak: number
+  runaway?: boolean
+}
+
+export interface WatchEntry {
+  sessionID: string
+  title: string
+  status: "RUNNING" | "STALLED" | "UNKNOWN"
+  summary: string
+  secondsSinceUpdate: number
 }
 
 export interface Handle {
@@ -115,6 +126,8 @@ export interface Handle {
   readonly loopDetected: boolean
   readonly noEditStreak: number
   readonly loopReason: "doom" | "text" | "no_edit" | "churn" | "oscillation" | "reasoning" | "alternation" | "none"
+  /** Self-watch: the session checks its own health + all child/subagent sessions. */
+  readonly watch: () => Effect.Effect<WatchEntry[]>
 }
 
 type Input = {
@@ -143,6 +156,7 @@ interface ProcessorContext extends Input {
   currentText: SessionV1.TextPart | undefined
   reasoningMap: Record<string, SessionV1.ReasoningPart>
   loopDetected: boolean
+  runawayDetected: boolean
   turnSignature: string
   hasEditInStep: boolean
   stateChanged: boolean
@@ -202,6 +216,7 @@ const layer = Layer.effect(
         currentText: undefined,
 reasoningMap: {},
         loopDetected: false,
+        runawayDetected: false,
         turnSignature: "",
         hasEditInStep: false,
         stateChanged: false,
@@ -303,7 +318,7 @@ reasoningMap: {},
         return true
       })
 
-      const saveToolLearning = Effect.fn("SessionProcessor.saveToolLearning")(function* (input: {
+const saveToolLearning = Effect.fn("SessionProcessor.saveToolLearning")(function* (input: {
         tool: string
         sessionID: string
         success: boolean
@@ -336,6 +351,150 @@ reasoningMap: {},
           // Never let learning failures affect tool execution
         }
       })
+
+      // ── Runaway Thought Detection ───────────────────────────────
+      // Detects when the model generates the same reasoning or text
+      // over and over. When detected, interrupts the stream so the
+      // session runner can retry with a fresh context.
+
+      const runawayThreshold = 3
+      const runawayWindow = 5 // last N reasoning/text deltas to compare
+
+      const recentReasoning: string[] = []
+      const recentText: string[] = []
+
+      function isRunawayReasoning(text: string): boolean {
+        recentReasoning.push(text)
+        if (recentReasoning.length > runawayWindow) recentReasoning.shift()
+        if (recentReasoning.length < runawayThreshold) return false
+        const window = recentReasoning.slice(-runawayThreshold)
+        return window.every((t) => t === window[0])
+      }
+
+      function isRunawayText(text: string): boolean {
+        recentText.push(text)
+        if (recentText.length > runawayWindow) recentText.shift()
+        if (recentText.length < runawayThreshold) return false
+        const window = recentText.slice(-runawayThreshold)
+        return window.every((t) => t === window[0])
+      }
+
+      function resetRunaway(): void {
+        recentReasoning.length = 0
+        recentText.length = 0
+      }
+
+      // ── Self-Watch ──────────────────────────────────────────────
+      // The session watches itself AND its child/subagent sessions.
+      // No separate model needed — the parent model IS the watcher.
+      // It reads its own state + children's state and produces verdicts.
+
+      const selfWatch = Effect.fn("SessionProcessor.selfWatch")(function* () {
+        const now = Date.now()
+
+        const buildSummary = (info: Session.Info): Effect.Effect<string> => {
+          return Effect.gen(function* () {
+            const parts: string[] = []
+            if (info.title && info.title !== "New session") {
+              parts.push(`Session: ${info.title}`)
+            }
+
+            const secondsAgo = Math.floor((now - info.time.updated) / 1000)
+            const minutesAgo = Math.floor(secondsAgo / 60)
+
+            if (secondsAgo < 5) {
+              parts.push("actively generating")
+            } else if (secondsAgo < 30) {
+              parts.push(`last activity ${secondsAgo} seconds ago`)
+            } else if (minutesAgo < 2) {
+              parts.push(`last activity ${secondsAgo} seconds ago`)
+            } else if (minutesAgo < 15) {
+              parts.push(`last activity ${minutesAgo} minutes ago`)
+            } else {
+              parts.push(`last activity ${minutesAgo} minutes ago, possibly stalled`)
+            }
+
+            if (info.tokens) {
+              if (info.tokens.output > 0) parts.push(`${info.tokens.output} tokens generated`)
+              if (info.tokens.input > 0) parts.push(`${info.tokens.input} input tokens`)
+            }
+
+            if (info.summary) {
+              const s = info.summary
+              const changes: string[] = []
+              if (s.additions > 0) changes.push(`+${s.additions} lines`)
+              if (s.deletions > 0) changes.push(`-${s.deletions} lines`)
+              if (s.files > 0) changes.push(`${s.files} files`)
+              if (changes.length > 0) parts.push(`code changes: ${changes.join(", ")}`)
+            }
+
+            const msgs = yield* session.messages({ sessionID: info.id, limit: 1 }).pipe(
+              Effect.catchIf(NotFoundError.isInstance, () => Effect.succeed([] as const)),
+            )
+            if (msgs.length > 0) {
+              const lastMsg = msgs[msgs.length - 1]
+              if (lastMsg) {
+                const textParts = (lastMsg.parts ?? []).filter(
+                  (p): p is SessionV1.TextPart => p.type === "text",
+                )
+                const text = textParts.map((p) => p.text).join(" ").trim().slice(0, 200)
+                if (text) parts.push(`latest ${lastMsg.info.role}: ${text}`)
+              }
+            }
+
+            return parts.join(". ")
+          })
+        }
+
+        const checkOne = (info: Session.Info): Effect.Effect<WatchEntry> => {
+          return Effect.gen(function* () {
+            const summary = yield* buildSummary(info)
+            const secondsAgo = Math.floor((now - info.time.updated) / 1000)
+
+            const hasContent =
+              (info.tokens && (info.tokens.output > 0 || info.tokens.input > 0)) ||
+              (info.summary && (info.summary.additions > 0 || info.summary.deletions > 0 || info.summary.files > 0))
+
+            if (!hasContent) {
+              return {
+                sessionID: info.id,
+                title: info.title,
+                status: "STALLED" as const,
+                summary,
+                secondsSinceUpdate: secondsAgo,
+              }
+            }
+
+            return {
+              sessionID: info.id,
+              title: info.title,
+              status: check(summary),
+              summary,
+              secondsSinceUpdate: secondsAgo,
+            }
+          })
+        }
+
+        // Check self — catch any error so watch never throws
+        const selfInfo = yield* session.get(input.sessionID).pipe(
+          Effect.catchIf(NotFoundError.isInstance, () => Effect.succeed(null as Session.Info | null)),
+        )
+        if (!selfInfo) return [] as unknown as WatchEntry[]
+
+        const self = yield* checkOne(selfInfo)
+
+        // Check children (subagent sessions)
+        const children = yield* session.children(input.sessionID).pipe(
+          Effect.catchIf(NotFoundError.isInstance, () => Effect.succeed([] as const)),
+        )
+        const childResults = yield* Effect.all(
+          children.map((c) => checkOne(c)),
+          { concurrency: "unbounded" },
+        )
+
+        const all: WatchEntry[] = [self, ...childResults]
+        return all
+      }) as () => Effect.Effect<WatchEntry[]>
 
       const finishReasoning = Effect.fn("SessionProcessor.finishReasoning")(function* (reasoningID: string) {
         if (!(reasoningID in ctx.reasoningMap)) return
@@ -436,6 +595,18 @@ reasoningMap: {},
               field: "text",
               delta: value.text,
             })
+            // Runaway detection: same reasoning repeated → interrupt and retry
+            if (isRunawayReasoning(ctx.reasoningMap[value.id].text)) {
+              ctx.loopDetected = true
+              ctx.runawayDetected = true
+              yield* Effect.logError("runaway_reasoning", {
+                "session.id": ctx.sessionID,
+                messageID: ctx.assistantMessage.id,
+                text: ctx.reasoningMap[value.id].text.slice(0, 200),
+              })
+              yield* halt(new DOMException("Runaway reasoning detected — retrying", "AbortError"))
+              return
+            }
             return
 
 case "reasoning-end": {
@@ -742,6 +913,18 @@ const reasoning = ctx.reasoningMap[value.id]
               field: "text",
               delta: value.text,
             })
+            // Runaway detection: same text repeated → interrupt and retry
+            if (isRunawayText(ctx.currentText.text)) {
+              ctx.loopDetected = true
+              ctx.runawayDetected = true
+              yield* Effect.logError("runaway_text", {
+                "session.id": ctx.sessionID,
+                messageID: ctx.assistantMessage.id,
+                text: ctx.currentText.text.slice(0, 200),
+              })
+              yield* halt(new DOMException("Runaway text detected — retrying", "AbortError"))
+              return
+            }
             return
 
           case "text-end":
@@ -922,6 +1105,7 @@ if (ctx.currentText.text.trim()) {
             ctx.reasoningMap = {}
             ctx.loopDetected = false
             ctx.alternationDetected = false
+            ctx.runawayDetected = false
             ctx.turnSignature = ""
             ctx.stateChanged = false
             yield* status.set(ctx.sessionID, { type: "busy" })
@@ -972,9 +1156,9 @@ if (ctx.currentText.text.trim()) {
             Effect.ensuring(cleanup()),
           )
 
-          if (ctx.needsCompaction) return { result: "compact" as const, noEditStreak: ctx.noEditStreak }
+          if (ctx.needsCompaction) return { result: "compact" as const, noEditStreak: ctx.noEditStreak, runaway: ctx.runawayDetected }
           if (ctx.blocked || ctx.assistantMessage.error)
-            return { result: "stop" as const, noEditStreak: ctx.noEditStreak }
+            return { result: "stop" as const, noEditStreak: ctx.noEditStreak, runaway: ctx.runawayDetected }
           // Record the turn signature and check for strict alternation
           // (A → B → A → B) that the consecutive-identity detectors miss.
           if (ctx.turnSignature) {
@@ -998,6 +1182,7 @@ if (ctx.currentText.text.trim()) {
           if (ctx.stateChanged) {
             textLoop.delete(ctx.sessionID)
             reasoningLoop.delete(ctx.sessionID)
+            resetRunaway()
           }
           const noEditStreak = ctx.hasEditInStep ? 0 : ctx.noEditStreak + 1
           ctx.noEditStreak = noEditStreak
@@ -1010,7 +1195,7 @@ if (ctx.currentText.text.trim()) {
             })
           }
           ctx.hasEditInStep = false
-          return { result: "continue" as const, noEditStreak }
+          return { result: "continue" as const, noEditStreak, runaway: ctx.runawayDetected }
         })
       })
 
@@ -1043,6 +1228,7 @@ get loopReason() {
         updateToolCall,
         completeToolCall,
         process,
+        watch: selfWatch,
       } satisfies Handle
     })
 

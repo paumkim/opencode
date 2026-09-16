@@ -215,6 +215,7 @@ function fake(
     completeToolCall: Effect.fn("TestSessionProcessor.completeToolCall")(() => Effect.void),
     process: Effect.fn("TestSessionProcessor.process")(() =>
       Effect.succeed({ result, noEditStreak: 0 })),
+    watch: Effect.fn("TestSessionProcessor.watch")(() => Effect.succeed([])),
   } satisfies SessionProcessorModule.SessionProcessor.Handle
 }
 
