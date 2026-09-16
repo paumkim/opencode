@@ -6,6 +6,8 @@ import { Tooltip } from "@opencode-ai/ui/tooltip"
 import { TooltipV2 } from "@opencode-ai/ui/v2/tooltip-v2"
 import { useLanguage } from "@/context/language"
 import { usePlatform } from "@/context/platform"
+import { Accessor } from "solid-js"
+import { DebugOverlay } from "@/components/debug-overlay"
 
 type Mem = Performance & {
   memory?: {
@@ -166,7 +168,7 @@ function ToggleCell(props: {
   )
 }
 
-export function DebugBar(props: { inline?: boolean } = {}) {
+export function DebugBar(props: { inline?: boolean; overlay?: Accessor<boolean>; onToggle?: () => void } = {}) {
   const language = useLanguage()
   const platform = usePlatform()
   const location = useLocation()
@@ -581,7 +583,16 @@ export function DebugBar(props: { inline?: boolean } = {}) {
             onClick={() => void toggleFocus()}
           />
         )}
+        <ToggleCell
+          active={props.overlay ? props.overlay() : false}
+          inline={props.inline}
+          label={language.t("debugOverlay.label")}
+          tip={language.t("debugOverlay.tip")}
+          value={language.t((props.overlay ? props.overlay() : false) ? "debugOverlay.enabled" : "debugOverlay.disabled")}
+          onClick={() => props.onToggle?.()}
+        />
       </div>
+      <DebugOverlay active={() => props.overlay ? props.overlay() : false} onToggle={props.onToggle} />
     </aside>
   )
 }

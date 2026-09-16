@@ -1,4 +1,4 @@
-import { createEffect, createMemo, createSignal, Show } from "solid-js"
+import { createEffect, createMemo, createSignal, Show, type JSX } from "solid-js"
 import { useLocal } from "../context/local"
 import { useTheme } from "../context/theme"
 import { useTerminalDimensions } from "@opentui/solid"
@@ -37,7 +37,6 @@ export function DialogModel(props: { providerID?: string }) {
 
   const showExtra = createMemo(() => connected() && !props.providerID)
   const wide = createMemo(() => dimensions().width >= 108)
-  const dialogHeight = createMemo(() => Math.min(24, Math.floor(dimensions().height / 2) - 8))
   const [preview, setPreview] = createSignal<{
     title: string
     description?: string
@@ -47,7 +46,7 @@ export function DialogModel(props: { providerID?: string }) {
     toolcall?: boolean
     context?: number
     isFree?: boolean
-    cost?: { input?: number; output?: number }
+    cost?: { input?: number; output?: number; cache?: { read?: number; write?: number } }
   }>()
 
   const lookup = (providerID: string, modelID: string) => {
@@ -252,6 +251,20 @@ export function DialogModel(props: { providerID?: string }) {
     dialog.clear()
   }
 
+  /** Label/value row in the detail panel — label left-aligned, value right-aligned. */
+  function Field(props: { label: string; children: JSX.Element }) {
+    return (
+      <box flexDirection="row" justifyContent="space-between">
+        <text fg={theme.textMuted} flexShrink={0}>
+          {props.label}
+        </text>
+        <box flexShrink={0} paddingLeft={2}>
+          {props.children}
+        </box>
+      </box>
+    )
+  }
+
   return (
     <box flexDirection="row">
       <box flexGrow={1} flexShrink={1}>
@@ -280,9 +293,18 @@ export function DialogModel(props: { providerID?: string }) {
               setPreview(undefined)
               return
             }
-            const next = lookup(option.value.providerID, option.value.modelID)
-            if (!next) return
-            setPreview(next)
+            const o = option as any
+            setPreview({
+              title: o.title,
+              description: o.description,
+              providerID: o.providerID,
+              releaseDate: o.releaseDate,
+              reasoning: o.reasoning,
+              toolcall: o.toolcall,
+              context: o.context,
+              isFree: o.isFree,
+              cost: o.cost,
+            })
           }}
           skipFilter={true}
           title={title()}
@@ -295,32 +317,81 @@ export function DialogModel(props: { providerID?: string }) {
           const cost = p.cost
           const ctx = p.context
           const free = p.isFree
+          const input = cost?.input
+          const output = cost?.output
+          const cacheRead = cost?.cache?.read
+          const cacheWrite = cost?.cache?.write
           return (
             <box
               width={Math.max(32, Math.floor(dimensions().width * 0.30))}
               flexShrink={0}
               border={["left"]}
               borderColor={theme.borderSubtle}
-              paddingLeft={2}
-              paddingRight={2}
-              maxHeight={dialogHeight()}
+              backgroundColor={theme.backgroundPanel}
+              paddingTop={1}
+              gap={1}
             >
-              <scrollbox scrollbarOptions={{ visible: true }}>
-                <box paddingLeft={2} paddingRight={2} gap={1} flexDirection="column">
-                  <text fg={theme.text} attributes={TextAttributes.BOLD}>{p.title}</text>
-                  <text fg={theme.textMuted}>{p.description ?? p.providerID}</text>
+              <scrollbox maxHeight={Math.floor(dimensions().height / 2) - 3} scrollbarOptions={{ visible: false }}>
+                <box paddingLeft={2} paddingRight={2} gap={0} flexDirection="column">
+                  <box gap={1} flexDirection="column" paddingBottom={1}>
+                    <text fg={theme.text} attributes={TextAttributes.BOLD} wrapMode="word">
+                      {p.title}
+                    </text>
+                    <text fg={theme.textMuted}>{p.description ?? p.providerID}</text>
+                  </box>
+
+                  <box gap={0} flexDirection="column">
+                    <Field label="Released">
+                      <text fg={theme.text}>{formatDate(p.releaseDate)}</text>
+                    </Field>
+                    <Field label="Reasoning">
+                      <text fg={p.reasoning ? theme.text : theme.textMuted}>
+                        {p.reasoning ? "Yes" : "No"}
+                      </text>
+                    </Field>
+                    <Field label="Tools">
+                      <text fg={p.toolcall ? theme.text : theme.textMuted}>
+                        {p.toolcall ? "Yes" : "No"}
+                      </text>
+                    </Field>
+                    <Field label="Context">
+                      <text fg={theme.text}>{ctx ? formatContext(ctx) : "—"}</text>
+                    </Field>
+                  </box>
+
                   <box height={1} />
-                  <text fg={theme.textMuted}>Released</text>
-                  <text fg={theme.text}>{formatDate(p.releaseDate)}</text>
-                  <box height={1} />
-                  <text fg={theme.textMuted}>Reasoning</text>
-                  <text fg={theme.text}>{p.reasoning ? "Yes" : "No"}</text>
-                  <text fg={theme.textMuted}>Tools</text>
-                  <text fg={theme.text}>{p.toolcall ? "Yes" : "No"}</text>
-                  <text fg={theme.textMuted}>Context</text>
-                  <text fg={theme.text}>{ctx ? formatContext(ctx) : "—"}</text>
-                  <text fg={theme.textMuted}>Price</text>
-                  <text fg={theme.text}>{free ? "Free" : cost?.input ? `$${formatPrice(cost.input)}/M` : "—"}</text>
+
+                  <box gap={0} flexDirection="column">
+                    <text fg={theme.textMuted} attributes={TextAttributes.BOLD} paddingBottom={1}>
+                      Pricing
+                    </text>
+                    {free ? (
+                      <text fg={theme.text}>Free</text>
+                    ) : (
+                      <box gap={0} flexDirection="column">
+                        {typeof input === "number" && input > 0 && (
+                          <Field label="Input">
+                            <text fg={theme.text}>${formatPrice(input)}/M</text>
+                          </Field>
+                        )}
+                        {typeof output === "number" && output > 0 && (
+                          <Field label="Output">
+                            <text fg={theme.text}>${formatPrice(output)}/M</text>
+                          </Field>
+                        )}
+                        {typeof cacheRead === "number" && cacheRead > 0 && (
+                          <Field label="Cache read">
+                            <text fg={theme.textMuted}>${formatPrice(cacheRead)}/M</text>
+                          </Field>
+                        )}
+                        {typeof cacheWrite === "number" && cacheWrite > 0 && (
+                          <Field label="Cache write">
+                            <text fg={theme.textMuted}>${formatPrice(cacheWrite)}/M</text>
+                          </Field>
+                        )}
+                      </box>
+                    )}
+                  </box>
                 </box>
               </scrollbox>
             </box>

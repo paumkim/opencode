@@ -28,6 +28,100 @@ type ModelEntry = PanelEntry & {
   modelID: string
   providerName: string
   current: boolean
+  reasoning?: boolean
+  tools?: boolean
+  contextLimit?: number
+  costInput?: number
+  costOutput?: number
+}
+
+function formatCostPerMillion(value: number | undefined): string {
+  if (value === undefined) return "-"
+  if (value === 0) return "Free"
+  const perMillion = value / 1_000_000
+  return `$${perMillion.toFixed(2)}/M`
+}
+
+function formatContext(n: number | undefined): string {
+  if (!n) return "-"
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
+  if (n >= 1_000) return `${Math.round(n / 1_000)}K`
+  return `${n}`
+}
+
+function ModelDetailPanel(props: { item: ModelEntry | undefined; theme: Accessor<RunFooterTheme> }) {
+  const item = () => props.item
+  if (!item()) {
+    return (
+      <box
+        width="30%"
+        height="100%"
+        flexShrink={0}
+        backgroundColor={props.theme().shade}
+        paddingLeft={1}
+        paddingRight={1}
+        flexDirection="column"
+        gap={1}
+      >
+        <text fg={props.theme().muted} wrapMode="none">
+          Hover a model
+        </text>
+      </box>
+    )
+  }
+  return (
+    <box
+      width="30%"
+      height="100%"
+      flexShrink={0}
+      backgroundColor={props.theme().shade}
+      paddingLeft={1}
+      paddingRight={1}
+      flexDirection="column"
+      gap={1}
+    >
+      <box flexDirection="column" gap={0}>
+        <text fg={props.theme().muted} wrapMode="none" attributes={TextAttributes.BOLD}>
+          Provider
+        </text>
+        <text fg={props.theme().text} wrapMode="none">
+          {item()!.providerName}
+        </text>
+      </box>
+      <box flexDirection="column" gap={0}>
+        <text fg={props.theme().muted} wrapMode="none" attributes={TextAttributes.BOLD}>
+          Reasoning
+        </text>
+        <text fg={props.theme().text} wrapMode="none">
+          {item()!.reasoning ? "Yes" : "No"}
+        </text>
+      </box>
+      <box flexDirection="column" gap={0}>
+        <text fg={props.theme().muted} wrapMode="none" attributes={TextAttributes.BOLD}>
+          Tools
+        </text>
+        <text fg={props.theme().text} wrapMode="none">
+          {item()!.tools ? "Yes" : "No"}
+        </text>
+      </box>
+      <box flexDirection="column" gap={0}>
+        <text fg={props.theme().muted} wrapMode="none" attributes={TextAttributes.BOLD}>
+          Context
+        </text>
+        <text fg={props.theme().text} wrapMode="none">
+          {formatContext(item()!.contextLimit)}
+        </text>
+      </box>
+      <box flexDirection="column" gap={0}>
+        <text fg={props.theme().muted} wrapMode="none" attributes={TextAttributes.BOLD}>
+          Pricing
+        </text>
+        <text fg={props.theme().text} wrapMode="none">
+          {formatCostPerMillion(item()!.costInput)} in · {formatCostPerMillion(item()!.costOutput)} out
+        </text>
+      </box>
+    </box>
+  )
 }
 
 type VariantEntry = PanelEntry & {
@@ -956,6 +1050,7 @@ export function RunModelSelectBody(props: {
 }) {
   let field: InputRenderable | undefined
   const [query, setQuery] = createSignal("")
+  const [hovered, setHovered] = createSignal(-1)
   const entries = createMemo<ModelEntry[]>(() =>
     (props.providers() ?? [])
       .flatMap((provider) =>
@@ -964,9 +1059,10 @@ export function RunModelSelectBody(props: {
           .map(([modelID, model]) => {
             const title = model.name ?? modelID
             const current = props.current()?.providerID === provider.id && props.current()?.modelID === modelID
+            const cost = model.cost
             const footer = current
               ? "current"
-              : model.cost?.input === 0 && provider.id === "opencode"
+              : cost?.input === 0 && provider.id === "opencode"
                 ? "Free"
                 : title !== modelID
                   ? modelID
@@ -978,6 +1074,11 @@ export function RunModelSelectBody(props: {
               category: provider.name,
               display: title,
               footer,
+              reasoning: model.capabilities?.reasoning,
+              tools: model.capabilities?.toolcall,
+              contextLimit: model.limit?.context,
+              costInput: cost?.input,
+              costOutput: cost?.output,
               keywords: `${provider.id} ${provider.name} ${modelID} ${title} ${footer ?? ""}`,
               current,
             }
@@ -998,6 +1099,11 @@ export function RunModelSelectBody(props: {
       }),
   )
   const items = createMemo<ModelEntry[]>(() => match(query(), entries()))
+  const detailItem = createMemo(() => {
+    const idx = hovered()
+    if (idx < 0) return undefined
+    return items()[idx]
+  })
   const menu = createFooterMenuState({ count: () => items().length, limit: PANEL_LIST_ROWS })
   const pick = (item: ModelEntry) => {
     props.onSelect({ providerID: item.providerID, modelID: item.modelID })
@@ -1035,6 +1141,10 @@ export function RunModelSelectBody(props: {
     handleKey({ event, menu, field: () => field, setQuery, select, close: props.onClose })
   })
 
+  createEffect(() => {
+    setHovered(menu.selected())
+  })
+
   return (
     <PanelShell
       title="Select model"
@@ -1050,21 +1160,25 @@ export function RunModelSelectBody(props: {
       dark
       chrome="minimal"
     >
-      <RunFooterMenu
-        theme={props.theme}
-        items={items}
-        selected={menu.selected}
-        offset={menu.offset}
-        rows={() => PANEL_LIST_ROWS}
-        limit={PANEL_LIST_ROWS}
-        empty={props.providers() ? "No results found" : "Models loading"}
-        border={false}
-        paddingLeft={PANEL_PAD}
-        paddingRight={PANEL_PAD}
-        grouped={!query().trim()}
-        background
-        headerColor={props.theme().muted}
-      />
+      <box width="100%" flexDirection="row" flexShrink={0} backgroundColor={props.theme().shade}>
+        <RunFooterMenu
+          theme={props.theme}
+          items={items}
+          selected={menu.selected}
+          offset={menu.offset}
+          rows={() => PANEL_LIST_ROWS}
+          limit={PANEL_LIST_ROWS}
+          empty={props.providers() ? "No results found" : "Models loading"}
+          border={false}
+          paddingLeft={PANEL_PAD}
+          paddingRight={PANEL_PAD}
+          grouped={!query().trim()}
+          background
+          headerColor={props.theme().muted}
+          onHover={setHovered}
+        />
+        <ModelDetailPanel item={detailItem()} theme={props.theme} />
+      </box>
     </PanelShell>
   )
 }

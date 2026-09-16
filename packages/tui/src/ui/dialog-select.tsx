@@ -311,10 +311,17 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
   function moveTo(next: number, center = false, preserve = true) {
     setFocusedAction(undefined)
     setStore("selected", next)
-    const option = selected()
+    // Access flat() directly instead of selected() — selected() is a
+    // createMemo whose update is deferred within the current batch, so
+    // it would return the stale option here. flat() doesn't depend on
+    // store.selected, so it's always current.
+    const option = flat()[next]
     if (option) {
       selection = option
       resetSelection = !preserve
+      // Drive onMove synchronously so the detail/preview panel updates
+      // immediately on click, not on a later effect tick.
+      props.onMove?.(option)
     }
     scrollToSelection(center)
   }
@@ -494,6 +501,13 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
   })
 
   let scroll: ScrollBoxRenderable | undefined
+  // Two-click confirm: first click selects + previews, second click on the
+  // same row confirms. Keyboard submit bypasses this (immediate confirm).
+  let clickedValue: T | undefined
+  let clickTimer: ReturnType<typeof setTimeout> | undefined
+  onCleanup(() => {
+    clearTimeout(clickTimer)
+  })
   const ref: DialogSelectRef<T> = {
     get filter() {
       return store.filter
@@ -658,8 +672,24 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
                             }}
                             onMouseUp={() => {
                               if (props.locked) return
-                              option.onSelect?.(dialog)
-                              props.onSelect?.(option)
+                              const index = flat().findIndex((x) => isDeepEqual(x.value, option.value))
+                              if (index === -1) return
+                              setStore("input", "mouse")
+                              setFocusedAction(undefined)
+                              moveTo(index)
+                              // Two-click confirm: first click selects + previews,
+                              // second click on the same row confirms.
+                              if (isDeepEqual(clickedValue, option.value)) {
+                                clickedValue = undefined
+                                clearTimeout(clickTimer)
+                                option.onSelect?.(dialog)
+                                props.onSelect?.(option)
+                                return
+                              }
+                              clickedValue = option.value
+                              clickTimer = setTimeout(() => {
+                                clickedValue = undefined
+                              }, 600)
                             }}
                             onMouseOver={() => {
                               if (props.locked) return

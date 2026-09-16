@@ -45,24 +45,25 @@ export function Dialog(
       zIndex={3000}
       left={0}
       top={0}
-      backgroundColor={RGBA.fromInts(0, 0, 0, 150)}
     >
       <box
-        onMouseUp={(e: { stopPropagation(): void }) => {
-          // A selection release must bubble up to the copy-on-select handler in
-          // DialogProvider; the backdrop's dismiss flag keeps it from closing the dialog.
-          if (renderer.getSelection()?.getSelectedText()) return
-          dismiss = false
-          e.stopPropagation()
-        }}
+        backgroundColor={RGBA.fromInts(0, 0, 0, 150)}
+      >
+        <box
+          onMouseUp={(e: { stopPropagation(): void }) => {
+            // A selection release must bubble up to the copy-on-select handler in
+            // DialogProvider; the backdrop's dismiss flag keeps it from closing the dialog.
+            if (renderer.getSelection()?.getSelectedText()) return
+            dismiss = false
+            e.stopPropagation()
+          }}
         width={width()}
         maxWidth={dimensions().width - 2}
-        maxHeight={dimensions().height - 2}
         backgroundColor={theme.backgroundPanel}
         paddingTop={1}
-        paddingBottom={1}
       >
         {props.children}
+      </box>
       </box>
     </box>
   )

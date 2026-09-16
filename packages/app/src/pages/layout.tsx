@@ -157,6 +157,7 @@ export default function LegacyLayout(props: ParentProps) {
     peek: undefined as string | undefined,
     peeked: false,
     debugTools: true,
+    debugOverlay: false,
   })
 
   const updateVersion = () => {
@@ -984,6 +985,14 @@ export default function LegacyLayout(props: ParentProps) {
           if (!project) return
           return createWorkspace(project)
         },
+      },
+      {
+        id: "debug.overlay",
+        title: language.t("command.debug.overlay"),
+        description: language.t("command.debug.overlay.description"),
+        category: language.t("command.category.debug"),
+        keybind: "mod+shift+i",
+        onSelect: () => setState("debugOverlay", (value) => !value),
       },
       {
         id: "workspace.toggle",
@@ -2403,7 +2412,12 @@ export default function LegacyLayout(props: ParentProps) {
             </div>
           </div>
         </div>
-        {import.meta.env.DEV && import.meta.env.VITE_DISABLE_DEBUG_BAR !== "1" && state.debugTools && <DebugBar />}
+        {import.meta.env.DEV && import.meta.env.VITE_DISABLE_DEBUG_BAR !== "1" && state.debugTools && (
+        <DebugBar
+          overlay={() => state.debugOverlay}
+          onToggle={() => setState("debugOverlay", (value) => !value)}
+        />
+      )}
       </div>
       <TabsInfoPopup />
       <ToastRegion v2={false} />

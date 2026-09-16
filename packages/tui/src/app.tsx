@@ -110,8 +110,9 @@ const appBindingCommands = [
   "model.cycle_recent_reverse",
   "model.cycle_favorite",
   "model.cycle_favorite_reverse",
-  "agent.list",
-  "mcp.list",
+"agent.list",
+    "mode.list",
+    "mcp.list",
   "agent.cycle",
   "agent.cycle.reverse",
   "variant.cycle",
@@ -681,6 +682,15 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
         slashName: "agents",
         run: () => {
           dialog.replace(() => <DialogAgent />)
+        },
+      },
+      {
+        name: "mode.list",
+        title: "Switch mode",
+        category: "Agent",
+        slashName: "mode",
+        run: () => {
+          dialog.replace(() => <DialogAgent title="Select mode" />)
         },
       },
       {

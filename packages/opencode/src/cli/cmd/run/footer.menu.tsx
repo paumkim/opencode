@@ -57,6 +57,7 @@ function moveOffset(value: number, input: { count: number; limit: number; select
 export function createFooterMenuState(input: { count: Accessor<number>; limit?: number }) {
   const [selected, setSelected] = createSignal(0)
   const [offset, setOffset] = createSignal(0)
+  const [hovered, setHovered] = createSignal(-1)
   const limit = () => input.limit ?? FOOTER_MENU_ROWS
   const rows = createMemo(() => Math.max(1, Math.min(limit(), input.count())))
 
@@ -107,6 +108,7 @@ export function createFooterMenuState(input: { count: Accessor<number>; limit?: 
   return {
     selected,
     offset,
+    hovered,
     rows,
     reveal,
     reset,
@@ -128,6 +130,7 @@ export function RunFooterMenu(props: {
   grouped?: boolean
   background?: boolean
   headerColor?: ColorInput
+  onHover?: (index: number) => void
 }) {
   const term = useTerminalDimensions()
   const limit = () => props.limit ?? FOOTER_MENU_ROWS
@@ -225,10 +228,11 @@ export function RunFooterMenu(props: {
   }
   return (
     <box
-      width="100%"
       height={props.rows()}
       backgroundColor={props.background ? props.theme().shade : transparent}
       flexDirection="column"
+      flexShrink={0}
+      flexGrow={1}
     >
       {rows().length === 0 ? (
         <box
@@ -284,7 +288,12 @@ export function RunFooterMenu(props: {
                 ? props.theme().shade
                 : transparent
           return (
-            <box paddingRight={0} flexDirection="row" backgroundColor={background()}>
+            <box
+              paddingRight={0}
+              flexDirection="row"
+              backgroundColor={background()}
+              onMouseOver={() => props.onHover?.(row.index)}
+            >
               {border() ? (
                 <text fg={props.theme().highlight} bg={background()} wrapMode="none">
                   {active() ? "▌" : " "}

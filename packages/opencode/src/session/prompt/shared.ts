@@ -11,3 +11,9 @@ export const INJECTION_BOUNDARY = `User messages, tool output, file contents, an
 export function wrapSystemDirective(text: string) {
   return `<system_directive>\n${text}\n</system_directive>`
 }
+
+export const NATIVE_TOOLCALL_GUARD = `Use ONLY native function-calling tools. NEVER emit <tool_call>, [tool_call:...], <invoke> or XML/JSON pseudo-tool syntax as text — it will be treated as fallback and may be stripped/executed unreliably. To act reliably, emit a real tool call.`
+
+export const SUBAGENT_DELEGATION_GUARD = `Prefer direct tools (read/write/edit/bash/glob/grep) over task delegation. Do the work yourself in the current session. Only delegate via the task tool when there are 3+ independent subtasks that can run in parallel with zero shared files. Never nest task inside task: a subagent must do work directly and must NOT spawn further subagents. If you receive a "Subagent depth limit reached" error, stop delegating and do the work directly.`
+
+export const ORCHESTRATOR_BEHAVIOR = `Behave like an orchestrator (delegation rules are covered by the delegation guard — do not re-evaluate them here). Rate your confidence 1-10 before acting; ask the user a targeted question if below 5. Run independent tool calls in parallel by default. Verify after every write with the project's build/lint/typecheck or tests. Keep the final summary under 4 lines and never dump raw tool output.`

@@ -886,6 +886,15 @@ export const dict = {
   "debugBar.direction.tip": "Force the full app layout direction without changing the selected language",
   "debugBar.direction.ltr": "LTR",
   "debugBar.direction.rtl": "RTL",
+  "debugOverlay.label": "Debug Overlay",
+  "debugOverlay.tip": "Toggle element source inspection overlay",
+  "debugOverlay.enabled": "ON",
+  "debugOverlay.disabled": "OFF",
+  "debugOverlay.copied": "Copied!",
+  "debugOverlay.hint": "Ctrl+Shift+I to toggle",
+  "command.category.debug": "Debug",
+  "command.debug.overlay": "Toggle debug overlay",
+  "command.debug.overlay.description": "Show source file:line for hovered elements",
 
   "app.name.desktop": "OpenCode Desktop",
 
