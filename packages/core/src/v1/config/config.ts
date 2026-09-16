@@ -210,6 +210,9 @@ export const Info = Schema.Struct({
       stream_delay: Schema.optional(NonNegativeInt).annotate({
         description: "Delay in milliseconds between each streamed token (text-delta) event. Slows down model output to reduce CLI rendering pressure.",
       }),
+      stall_threshold: Schema.optional(PositiveInt).annotate({
+        description: "Seconds of inactivity before a session is flagged as stalled. If no thought/turn is processed within this window, the watcher marks the session as STALLED. Defaults to 30.",
+      }),
     }),
   ),
 }).annotate({ identifier: "Config" })

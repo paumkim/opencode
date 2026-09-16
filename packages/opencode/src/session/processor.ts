@@ -105,6 +105,7 @@ export interface WatchEntry {
   status: "RUNNING" | "STALLED" | "UNKNOWN"
   summary: string
   secondsSinceUpdate: number
+  secondsSinceTurn: number
 }
 
 export interface Handle {
@@ -165,6 +166,8 @@ interface ProcessorContext extends Input {
   churnStreak: number
   churnTarget: string
   recentTools: string[]
+  turnStarted: number
+  lastDelta: number
 }
 
 type StreamEvent = LLMEvent
@@ -225,6 +228,8 @@ reasoningMap: {},
         churnStreak: 0,
         churnTarget: "",
         recentTools: [],
+        turnStarted: Date.now(),
+        lastDelta: Date.now(),
       }
       let aborted = false
 
@@ -391,8 +396,9 @@ const saveToolLearning = Effect.fn("SessionProcessor.saveToolLearning")(function
 
       const selfWatch = Effect.fn("SessionProcessor.selfWatch")(function* () {
         const now = Date.now()
+        const stallThreshold = (yield* config.get()).experimental?.stall_threshold ?? 30
 
-        const buildSummary = (info: Session.Info): Effect.Effect<string> => {
+        const buildSummary = (info: Session.Info, secondsSinceTurn: number): Effect.Effect<string> => {
           return Effect.gen(function* () {
             const parts: string[] = []
             if (info.title && info.title !== "New session") {
@@ -404,7 +410,7 @@ const saveToolLearning = Effect.fn("SessionProcessor.saveToolLearning")(function
 
             if (secondsAgo < 5) {
               parts.push("actively generating")
-            } else if (secondsAgo < 30) {
+            } else if (secondsAgo < stallThreshold) {
               parts.push(`last activity ${secondsAgo} seconds ago`)
             } else if (minutesAgo < 2) {
               parts.push(`last activity ${secondsAgo} seconds ago`)
@@ -412,6 +418,10 @@ const saveToolLearning = Effect.fn("SessionProcessor.saveToolLearning")(function
               parts.push(`last activity ${minutesAgo} minutes ago`)
             } else {
               parts.push(`last activity ${minutesAgo} minutes ago, possibly stalled`)
+            }
+
+            if (secondsSinceTurn > stallThreshold) {
+              parts.push(`no activity for ${secondsSinceTurn} seconds — stalled`)
             }
 
             if (info.tokens) {
@@ -446,22 +456,23 @@ const saveToolLearning = Effect.fn("SessionProcessor.saveToolLearning")(function
           })
         }
 
-        const checkOne = (info: Session.Info): Effect.Effect<WatchEntry> => {
+        const checkOne = (info: Session.Info, secondsSinceTurn: number): Effect.Effect<WatchEntry> => {
           return Effect.gen(function* () {
-            const summary = yield* buildSummary(info)
+            const summary = yield* buildSummary(info, secondsSinceTurn)
             const secondsAgo = Math.floor((now - info.time.updated) / 1000)
 
             const hasContent =
               (info.tokens && (info.tokens.output > 0 || info.tokens.input > 0)) ||
               (info.summary && (info.summary.additions > 0 || info.summary.deletions > 0 || info.summary.files > 0))
 
-            if (!hasContent) {
+            if (!hasContent || secondsSinceTurn > stallThreshold) {
               return {
                 sessionID: info.id,
                 title: info.title,
                 status: "STALLED" as const,
                 summary,
                 secondsSinceUpdate: secondsAgo,
+                secondsSinceTurn,
               }
             }
 
@@ -471,6 +482,7 @@ const saveToolLearning = Effect.fn("SessionProcessor.saveToolLearning")(function
               status: check(summary),
               summary,
               secondsSinceUpdate: secondsAgo,
+              secondsSinceTurn,
             }
           })
         }
@@ -481,14 +493,18 @@ const saveToolLearning = Effect.fn("SessionProcessor.saveToolLearning")(function
         )
         if (!selfInfo) return [] as unknown as WatchEntry[]
 
-        const self = yield* checkOne(selfInfo)
+        const selfSecondsSinceTurn = Math.floor((now - ctx.lastDelta) / 1000)
+        const self = yield* checkOne(selfInfo, selfSecondsSinceTurn)
 
         // Check children (subagent sessions)
         const children = yield* session.children(input.sessionID).pipe(
           Effect.catchIf(NotFoundError.isInstance, () => Effect.succeed([] as const)),
         )
         const childResults = yield* Effect.all(
-          children.map((c) => checkOne(c)),
+          children.map((c) => {
+            const childSecondsSinceTurn = Math.floor((now - ctx.lastDelta) / 1000)
+            return checkOne(c, childSecondsSinceTurn)
+          }),
           { concurrency: "unbounded" },
         )
 
@@ -568,6 +584,20 @@ const saveToolLearning = Effect.fn("SessionProcessor.saveToolLearning")(function
       }
 
       const handleEvent = Effect.fnUntraced(function* (value: StreamEvent) {
+        // Track last delta for stall detection — any event that represents
+        // model progress resets the stall timer.
+        if (
+          value.type === "reasoning-delta" ||
+          value.type === "text-delta" ||
+          value.type === "tool-input-delta" ||
+          value.type === "tool-call" ||
+          value.type === "step-start" ||
+          value.type === "reasoning-start" ||
+          value.type === "text-start" ||
+          value.type === "tool-input-start"
+        ) {
+          ctx.lastDelta = Date.now()
+        }
         switch (value.type) {
           case "reasoning-start":
             if (value.id in ctx.reasoningMap) return
@@ -1108,6 +1138,8 @@ if (ctx.currentText.text.trim()) {
             ctx.runawayDetected = false
             ctx.turnSignature = ""
             ctx.stateChanged = false
+            ctx.turnStarted = Date.now()
+            ctx.lastDelta = Date.now()
             yield* status.set(ctx.sessionID, { type: "busy" })
             const stream = llm.stream(streamInput)
 

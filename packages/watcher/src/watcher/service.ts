@@ -119,13 +119,25 @@ const layer = Layer.effect(
       const summary = yield* buildSummary(info)
       const now = Date.now()
 
-      // Hard rule: no content at all = stalled
+      // Derive lastDelta from latest message timestamp for per-turn stall detection
+      const messages = yield* session.messages({ sessionID: info.id, limit: 1 })
+      let lastDelta = info.time.updated
+      if (messages.length > 0) {
+        const lastMsg = messages[messages.length - 1]
+        if (lastMsg && lastMsg.time?.created) {
+          lastDelta = lastMsg.time.created
+        }
+      }
+      const secondsSinceTurn = Math.floor((now - lastDelta) / 1000)
+
+      // Hard rule: no content at all = stalled, or per-turn stall
       const hasContent =
         (info.tokens && (info.tokens.output > 0 || info.tokens.input > 0)) ||
         (info.summary && (info.summary.additions > 0 || info.summary.deletions > 0 || info.summary.files > 0))
 
+      const stallThreshold = 30 // default; configurable via config service if available
       let status: WatchResult["status"]
-      if (!hasContent) {
+      if (!hasContent || secondsSinceTurn > stallThreshold) {
         status = "STALLED"
       } else {
         status = check(summary)

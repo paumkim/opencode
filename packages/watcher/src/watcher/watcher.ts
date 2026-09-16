@@ -108,6 +108,7 @@ export interface SessionInfo {
   sessionID: string
   title: string
   lastUpdate: number // epoch ms
+  lastDelta: number // epoch ms — last model progress event
   tokens?: { input: number; output: number; reasoning: number; cache: { read: number; write: number } }
   summary?: { additions: number; deletions: number; files: number; diffs?: string[] }
   latestMessage?: { role: string; text: string }
@@ -118,10 +119,11 @@ export interface SessionInfo {
  * Build a human-readable summary string from session metadata.
  * If there is no meaningful summary, returns a stalled indicator.
  */
-export function summarizeSession(s: SessionInfo): string {
+export function summarizeSession(s: SessionInfo, stallThreshold = 30): string {
   const now = Date.now()
   const secondsSinceUpdate = Math.floor((now - s.lastUpdate) / 1000)
   const minutesSinceUpdate = Math.floor(secondsSinceUpdate / 60)
+  const secondsSinceTurn = Math.floor((now - s.lastDelta) / 1000)
 
   const parts: string[] = []
 
@@ -133,7 +135,7 @@ export function summarizeSession(s: SessionInfo): string {
   // Time since last activity
   if (secondsSinceUpdate < 5) {
     parts.push("actively generating")
-  } else if (secondsSinceUpdate < 30) {
+  } else if (secondsSinceUpdate < stallThreshold) {
     parts.push(`last activity ${secondsSinceUpdate} seconds ago`)
   } else if (minutesSinceUpdate < 2) {
     parts.push(`last activity ${secondsSinceUpdate} seconds ago`)
@@ -141,6 +143,11 @@ export function summarizeSession(s: SessionInfo): string {
     parts.push(`last activity ${minutesSinceUpdate} minutes ago`)
   } else {
     parts.push(`last activity ${minutesSinceUpdate} minutes ago, possibly stalled`)
+  }
+
+  // Per-turn stall detection
+  if (secondsSinceTurn > stallThreshold) {
+    parts.push(`no activity for ${secondsSinceTurn} seconds — stalled`)
   }
 
   // Token activity
@@ -196,9 +203,10 @@ export function check(summary: string): Status {
  * If the session has no summary (no tokens, no code changes, no messages),
  * it is reported as STALLED without consulting the classifier.
  */
-export function checkSession(session: SessionInfo): WatchResult {
-  const summary = summarizeSession(session)
+export function checkSession(session: SessionInfo, stallThreshold = 30): WatchResult {
+  const summary = summarizeSession(session, stallThreshold)
   const now = Date.now()
+  const secondsSinceTurn = Math.floor((now - session.lastDelta) / 1000)
 
   // Hard rule: no content at all = stalled. Don't even consult the classifier.
   const hasContent =
@@ -206,7 +214,7 @@ export function checkSession(session: SessionInfo): WatchResult {
     (session.summary && (session.summary.additions > 0 || session.summary.deletions > 0 || session.summary.files > 0)) ||
     (session.latestMessage && session.latestMessage.text && session.latestMessage.text.length > 0)
 
-  if (!hasContent) {
+  if (!hasContent || secondsSinceTurn > stallThreshold) {
     return {
       sessionID: session.sessionID,
       status: "STALLED",
@@ -228,12 +236,13 @@ export function checkSession(session: SessionInfo): WatchResult {
  * Check all active sessions. Only sessions with non-idle status are checked.
  * Sessions with no summary are reported as STALLED.
  */
-export function checkActiveSessions(sessions: SessionInfo[]): WatchResult[] {
+export function checkActiveSessions(sessions: SessionInfo[], stallThreshold = 30): WatchResult[] {
   return sessions
     .filter((s) => s.status !== "idle")
     .map((s) => {
-      const summary = summarizeSession(s)
+      const summary = summarizeSession(s, stallThreshold)
       const now = Date.now()
+      const secondsSinceTurn = Math.floor((now - s.lastDelta) / 1000)
 
       // Hard rule: no content at all = stalled. Don't even consult the classifier.
       const hasContent =
@@ -241,7 +250,7 @@ export function checkActiveSessions(sessions: SessionInfo[]): WatchResult[] {
         (s.summary && (s.summary.additions > 0 || s.summary.deletions > 0 || s.summary.files > 0)) ||
         (s.latestMessage && s.latestMessage.text && s.latestMessage.text.length > 0)
 
-      if (!hasContent) {
+      if (!hasContent || secondsSinceTurn > stallThreshold) {
         return {
           sessionID: s.sessionID,
           title: s.title,
