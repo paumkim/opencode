@@ -104,10 +104,9 @@ describe("toLLMMessages", () => {
       model,
     )
 
-    expect(messages.map((message) => message.role)).toEqual(["system", "system", "user", "user", "user", "user"])
-    expect(messages[0]).toEqual(Message.system("Model switched to provider/model"))
-    expect(messages[1]).toEqual(Message.system("Updated context\n\nOther context"))
-    expect(messages[2]).toEqual(
+    expect(messages.map((message) => message.role)).toEqual(["system", "user", "user", "user", "user"])
+    expect(messages[0]).toEqual(Message.system("Updated context\n\nOther context"))
+    expect(messages[1]).toEqual(
       Message.make({
         id: id("user"),
         role: "user",
@@ -118,7 +117,7 @@ describe("toLLMMessages", () => {
         metadata: { agents: [{ name: "build" }] },
       }),
     )
-    expect(messages.slice(3).map((message) => message.content)).toEqual([
+    expect(messages.slice(2).map((message) => message.content)).toEqual([
       [{ type: "text", text: "Synthetic context" }],
       [{ type: "text", text: "Shell command: pwd\n\n/project" }],
       [

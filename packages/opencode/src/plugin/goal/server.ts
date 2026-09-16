@@ -355,13 +355,13 @@ class TaskTracker {
     if (typeof input.callID === "string") this.pendingTaskCalls.set(input.callID, input.sessionID)
   }
 
-  noteTaskOutput(input: { tool?: unknown; sessionID?: unknown; callID?: unknown }, output: { output?: unknown }) {
+  noteTaskOutput(input: { tool?: unknown; sessionID?: unknown; callID?: unknown }, output: { output?: unknown } | undefined) {
     if (typeof input.tool !== "string" || input.tool.toLowerCase() !== "task") return
     const parentSessionID =
       typeof input.callID === "string" ? this.pendingTaskCalls.get(input.callID) ?? input.sessionID : input.sessionID
     if (typeof input.callID === "string") this.pendingTaskCalls.delete(input.callID)
     if (typeof parentSessionID !== "string") return
-    const status = parseTaskStatus(output.output)
+    const status = output?.output === undefined ? undefined : parseTaskStatus(output.output)
     if (!status) return
     if (status.state === "running") {
       this.markRunning(parentSessionID, status.taskID)

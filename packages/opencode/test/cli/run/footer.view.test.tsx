@@ -285,7 +285,17 @@ function footerStatusline(root: BoxRenderable | RootRenderable) {
 function panelMenu(root: BoxRenderable | RootRenderable) {
   const panel = child(child(root, 0), 0)
   const content = child(panel, 0)
-  return child(content.getChildren().at(-1) as BoxRenderable, 0)
+  const menuBox = child(content.getChildren().at(-1) as BoxRenderable, 0)
+  // RunModelSelectBody wraps RunFooterMenu in a row box with ModelDetailPanel.
+  // The wrapper has 2 children with different structures (menu vs detail panel).
+  // A plain RunFooterMenu with 2 items also has 2 children, but both are menu rows.
+  if (
+    menuBox.getChildren().length === 2 &&
+    menuBox.getChildren()[0].getChildren().length !== menuBox.getChildren()[1].getChildren().length
+  ) {
+    return menuBox.getChildren()[0] as BoxRenderable
+  }
+  return menuBox
 }
 
 test("direct footer composer area does not adopt footer surface", async () => {

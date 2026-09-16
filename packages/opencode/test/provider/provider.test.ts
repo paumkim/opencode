@@ -2066,6 +2066,9 @@ it.instance(
 
 it.effect("opencode loader keeps paid models when config apiKey is present", () =>
   Effect.gen(function* () {
+    yield* Effect.sync(() => {
+      delete process.env.OPENCODE_API_KEY
+    })
     const noneDir = yield* tmpdirScoped()
     const keyedDir = yield* tmpdirScoped({
       config: { provider: { opencode: { options: { apiKey: "test-key" } } } },
@@ -2087,6 +2090,9 @@ it.effect("opencode loader keeps paid models when config apiKey is present", () 
 
 it.effect("opencode loader keeps paid models when auth exists", () =>
   Effect.gen(function* () {
+    yield* Effect.sync(() => {
+      delete process.env.OPENCODE_API_KEY
+    })
     const noneDir = yield* tmpdirScoped()
     const keyedDir = yield* tmpdirScoped()
 
