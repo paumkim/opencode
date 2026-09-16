@@ -291,13 +291,23 @@ async function runInteractiveRuntime(input: RunRuntimeInput, deps: RunRuntimeDep
       state.model = model
       state.activeVariant = undefined
       state.variants = variantsFor(state.providers, model)
-      const switching = resolveSavedVariant(model).then((saved) => {
+      const switching = resolveSavedVariant(model).then(async (saved) => {
         const current = state.model
         if (!current || current.providerID !== model.providerID || current.modelID !== model.modelID) {
           return
         }
 
         state.activeVariant = resolveVariant(ctx.variant, undefined, saved, state.variants)
+        // Persist to the session row so subagents inherit the selected model
+        // (see TaskTool.recentModel). Local state alone is not enough.
+        // switchModel is on the v2 session surface (Session3), not the
+        // legacy Session2 that sdk.session exposes.
+        await ctx.sdk.v2.session
+          .switchModel({
+            sessionID: state.sessionID,
+            model: { id: model.modelID, providerID: model.providerID, variant: state.activeVariant },
+          })
+          .catch(() => {})
       })
       state.switching = switching
       await switching
