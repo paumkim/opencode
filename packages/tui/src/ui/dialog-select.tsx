@@ -214,6 +214,18 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
 
   const selected = createMemo(() => flat()[store.selected])
 
+  // Drive onMove from the selected option itself, not just from moveTo().
+  // Several paths mutate store.selected without going through moveTo (the
+  // options-sync effect, filter changes, preserveSelection), and the
+  // mouseover guard skips hover updates while the input mode is still
+  // "keyboard" (e.g. trackpad scroll). Watching the memo covers every path
+  // so the detail panel always reflects the highlighted row.
+  createEffect(() => {
+    const option = selected()
+    if (!option) return
+    props.onMove?.(option)
+  })
+
   createEffect(
     on(
       () => props.options,
@@ -304,7 +316,6 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
       selection = option
       resetSelection = !preserve
     }
-    if (option) props.onMove?.(option)
     scrollToSelection(center)
   }
 
@@ -652,9 +663,9 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
                             }}
                             onMouseOver={() => {
                               if (props.locked) return
-                              if (store.input !== "mouse") return
                               const index = flat().findIndex((x) => isDeepEqual(x.value, option.value))
                               if (index === -1) return
+                              setStore("input", "mouse")
                               moveTo(index)
                             }}
                             onMouseDown={() => {
