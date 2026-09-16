@@ -40,9 +40,9 @@ export function Dialog(
       width={dimensions().width}
       height={dimensions().height}
       alignItems="center"
+      justifyContent="center"
       position="absolute"
       zIndex={3000}
-      paddingTop={Math.max(2, Math.floor(dimensions().height / 24))}
       left={0}
       top={0}
       backgroundColor={RGBA.fromInts(0, 0, 0, 150)}
