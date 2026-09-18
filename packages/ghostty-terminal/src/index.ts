@@ -141,6 +141,21 @@ export class GhosttyTerminal implements PtyLike {
    * Backward compat: readScreen() with no opts returns the same trimmed
    * text/html as before. preserveTrailingSpace pads plain lines to cols. */
   readScreen(format: "plain" | "html" = "plain", opts: ScreenOpts = {}): string {
+    return this._readScreen(format, opts)
+  }
+
+  /** Async: waits a fixed delay then reads the screen.
+   * Use after write() to give the shell time to process input and produce output.
+   * A stability-based poll is unreliable because the echoed command line itself
+   * can appear "stable" before the command's actual output arrives. */
+  async readScreenWait(format: "plain" | "html" = "plain", opts: { wait?: number; preserveTrailingSpace?: boolean } = {}): Promise<string> {
+    this.requireHandle()
+    const delay = opts.wait ?? 1000
+    await Bun.sleep(delay)
+    return this._readScreen(format, { preserveTrailingSpace: opts.preserveTrailingSpace })
+  }
+
+  private _readScreen(format: "plain" | "html", opts: ScreenOpts): string {
     const handle = this.requireHandle()
     let out: string
     if (format === "plain") out = formatTerminalText(handle, this.dimensions.cols, this.dimensions.rows)

@@ -27,6 +27,9 @@ export const Parameters = Schema.Struct({
   }),
   format: Schema.optional(Schema.Literals(["plain", "html"])),
   signal: Schema.optional(Schema.Literals(["SIGTERM", "SIGKILL", "SIGINT"])),
+  wait: Schema.optional(Schema.Int).annotate({
+    description: "Screen only: milliseconds to wait before reading after a write. Default: 0 (no wait). Set to 500-2000 to give the shell time to process input.",
+  }),
 })
 
 export const GhosttyTerminalTool = Tool.define(
@@ -58,7 +61,7 @@ export const GhosttyTerminalTool = Tool.define(
         "create starts the configured shell in workdir (default project directory), cols=80, rows=24.",
         "write sends literal keys/text, without appending Enter. Use JSON control characters, not spelled-out key names.",
         "screen calls GhosttyTerminal.readScreen: the current visible viewport, NOT raw output or a transcript.",
-        "Always call screen after write/resize for visual verification. Output is asynchronous: repeat screen if the program is not ready.",
+        "Use wait=N (ms) on screen after write to give the shell time to process input before reading.",
         "plain captures visible text; html preserves styles/colors as HTML, not a PNG screenshot.",
         "resize requires cols and rows; kill signals the owned shell (SIGTERM default), retaining the final screen until dispose.",
         "SIGINT writes Ctrl+C; other signals target the shell PID, not all descendants. Interactive shells may ignore SIGTERM; use dispose for forced cleanup.",
@@ -178,7 +181,9 @@ export const GhosttyTerminalTool = Tool.define(
         return {
           title: `terminal ${args.action}${name ? " " + name : ""}`,
           metadata: {},
-          output: args.action === "screen" ? registry.screen(name, args.format) || "(empty screen)"
+          output: args.action === "screen" ? args.wait
+            ? yield* Effect.promise((signal: AbortSignal) => registry.screenWait(name, args.format, { wait: args.wait }))
+            : registry.screen(name, args.format) || "(empty screen)"
             : args.action === "list" ? JSON.stringify(registry.list())
             : args.action === "dispose" ? "Disposed terminals."
             : JSON.stringify(registry.info(name)) + "\nUse screen (readScreen) to visually verify the result.",

@@ -82,6 +82,15 @@ export class TerminalSessions {
     return this.require(name).terminal.readScreen(format, opts)
   }
 
+  /** Async: waits `wait` ms then reads the screen. Use after write to avoid empty screens. */
+  async screenWait(name: string, format: ScreenFormat = "plain", opts: { wait?: number; preserveTrailingSpace?: boolean } = {}): Promise<string> {
+    return this.require(name).terminal.readScreenWait(format, opts)
+  }
+
+  screenOpts(name: string, opts: ScreenOpts = {}): ScreenState {
+    return this.require(name).terminal.readScreenState(opts)
+  }
+
   /** Structured viewport snapshot with cursor/alt-screen state. */
   screenState(name: string, opts: ScreenOpts = {}): ScreenState {
     return this.require(name).terminal.readScreenState(opts)
