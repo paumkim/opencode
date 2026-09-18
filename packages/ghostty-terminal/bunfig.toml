@@ -1,0 +1,4 @@
+# Keep `bun test` in this package scoped to its own tests; ignored artifacts/
+# contains captured sandbox trees with third-party test files.
+[test]
+root = "./test"

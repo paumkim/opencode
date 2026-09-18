@@ -1,0 +1,3 @@
+[submodule "packages/ghostty-terminal/zig/ghostty"]
+	path = packages/ghostty-terminal/zig/ghostty
+	url = https://github.com/ghostty-org/ghostty

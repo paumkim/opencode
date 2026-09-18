@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json.schemastore.org/package.json",
+  "name": "@opencode-ai/ghostty-terminal",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "postinstall": "bun run scripts/postinstall.ts",
+    "build:lib": "bun run src/build/lib.ts",
+    "setup:native": "python3 -I -m venv .toolchains/abi-venv && .toolchains/abi-venv/bin/python -I -m pip --isolated install --disable-pip-version-check --only-binary=:all: --no-deps -r scripts/abi-requirements.txt && .toolchains/abi-venv/bin/python -I -m pip --isolated check",
+    "test:native": "GHOSTTY_NATIVE_TEST=1 bun test test/build.test.ts --timeout 120000",
+    "clean": "rm -rf native/ zig/ghostty/.zig-cache/ zig/ghostty/zig-out/",
+    "test": "bun test --timeout 30000",
+    "smoke:live-tui": "bun run scripts/live-tui.ts",
+    "typecheck": "tsgo --noEmit"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./ffi": "./src/ffi/bindings.ts",
+    "./sessions": "./src/sessions.ts",
+    "./build": "./src/build/lib.ts"
+  },
+  "files": [
+    "src",
+    "scripts",
+    "native",
+    "zig"
+  ],
+  "dependencies": {
+    "bun-pty": "0.4.8"
+  },
+  "devDependencies": {
+    "@types/bun": "catalog:",
+    "@types/node": "catalog:",
+    "@typescript/native-preview": "catalog:"
+  }
+}

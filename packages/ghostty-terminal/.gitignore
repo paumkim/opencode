@@ -1,0 +1,20 @@
+# Build artifacts
+/native/
+/zig/*
+!/zig/ghostty/
+/.toolchains/
+*.so
+*.dylib
+*.dll
+
+# Zig cache
+zig-cache/
+zig-out/
+
+# Test artifacts
+/artifacts/
+*.heapsnapshot
+
+# OS artifacts
+.DS_Store
+Thumbs.db

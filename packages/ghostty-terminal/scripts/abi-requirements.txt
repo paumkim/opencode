@@ -1,0 +1,8 @@
+# Native types-schema-verify.py uses jsonschema; wasmtime is WASM-only.
+# Pin the complete dependency closure. Installed only by bun run setup:native.
+jsonschema==4.26.0
+attrs==26.1.0
+jsonschema-specifications==2025.9.1
+referencing==0.37.0
+rpds-py==2026.6.3
+typing-extensions==4.16.0 ; python_version < "3.13"
