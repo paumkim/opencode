@@ -110,8 +110,8 @@ export interface EvalMetrics {
 export interface GeneratorConfig {
   /** Path to GGUF model */
   modelPath: string;
-  /** Backend: "llama.cpp" | "llama-server" */
-  backend?: "llama.cpp" | "llama-server";
+  /** Backend: "llama.cpp" | "llama-server" | "cli" | "api" */
+  backend?: "llama.cpp" | "llama-server" | "cli" | "api";
   /** Context size */
   ctxSize?: number;
   /** GPU layers to offload */

@@ -291,7 +291,7 @@ function escapeString(s: string): string {
 
 /**
  * Build GBNF for a parallel prompt (multiple questions)
- * Uses the proven jsonSchemaToGbnf path: build combined Zod schema → zodToJsonSchema → jsonSchemaToGbnf
+ * Uses the proven zodToGbnf path to stay in sync with schema validation.
  */
 export function buildParallelGbnf(questions: Question[]): string {
   // Build a combined Zod object schema from all questions
@@ -301,9 +301,8 @@ export function buildParallelGbnf(questions: Question[]): string {
   }
   const combinedSchema = z.object(shape);
 
-  // Use the proven path: Zod → JSON Schema → GBNF
-  const jsonSchema = zodToJsonSchema(combinedSchema);
-  return jsonSchemaToGbnf(jsonSchema, "root");
+  // Use the single source of truth: Zod schema → GBNF
+  return zodToGbnf(combinedSchema);
 }
 
 /**

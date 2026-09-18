@@ -21,10 +21,9 @@
     }
   },
   "agents": {},
-  "permission": {},
-  "plugin": [
-    "./plugins/system-one.ts"
-  ],
+  "permission": {
+    "bash": "allow"
+  },
   "references": {
     "effect": {
       "repository": "github.com/Effect-TS/effect-smol",

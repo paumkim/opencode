@@ -171,7 +171,19 @@ export class LlamaCppGenerator {
    * Get GBNF grammar for schema (cached)
    */
   private getGrammar(schema: z.ZodSchema): string {
-    const key = schema.description ?? JSON.stringify(schema._def);
+    // Use description when available; otherwise build a stable key from the schema shape.
+    // JSON.stringify(schema._def) is unreliable for ZodObject because _def omits the shape.
+    const key =
+      (schema as any).description ??
+      (() => {
+        const def = (schema as any)._def;
+        if (def?.typeName === "ZodObject") {
+          const shape = (schema as any).shape;
+          return JSON.stringify({ typeName: def.typeName, keys: Object.keys(shape) });
+        }
+        return JSON.stringify(def);
+      })();
+
     if (!this.grammarCache.has(key)) {
       this.grammarCache.set(key, zodToGbnf(schema));
     }

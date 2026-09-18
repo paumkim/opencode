@@ -14,6 +14,8 @@ export * from "./core/types.js";
 
 // Core generation
 export { LlamaCppGenerator, createGenerator } from "./core/generator.js";
+export { ApiGenerator, createZenGenerator, createZenGeneratorFromAuth, resolveEnv, zodToJsonSchema } from "./core/api-generator.js";
+export { CliGenerator, createCliGenerator } from "./core/cli-generator.js";
 export { zodToGbnf, buildParallelGbnf, writeGbnfFile, cleanupGbnfFile, GBNF } from "./core/gbnf.js";
 export { createParallelPrompt, buildParallelPromptText, buildParallelSchema, parseParallelOutput, ISSUE_TRIAGE_PROMPT, CODE_REVIEW_PROMPT, RELEASE_READINESS_PROMPT } from "./core/parallel.js";
 export { TemperatureScaler, PlattScaler, IsotonicCalibrator, createCalibrator, expectedCalibrationError, saveCalibrator, loadCalibrator } from "./core/calibrator.js";
@@ -25,7 +27,7 @@ export { WorkflowRunner, computeMetrics, computeAgreement, loadContexts, saveRes
 export { RECOMMENDED_MODELS, getGpuVram, recommendModels, downloadModel, listLocalModels, getModelInfo, autoSelectModel, modelCli } from "./models/loader.js";
 
 // Integration
-export { SystemOneSubagent, createSystemOneAgent, OPENCODE_AGENT_MANIFEST } from "./integration/subagent.js";
+export { SystemOneSubagent, createSystemOneAgent, createSystemOneAgentFromModel, createSystemOneZenAgent, createSystemOneCliAgent, OPENCODE_AGENT_MANIFEST } from "./integration/subagent.js";
 
 // Version
 export const VERSION = "0.1.0";

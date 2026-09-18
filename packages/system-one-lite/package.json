@@ -14,7 +14,8 @@
     "@types/commander": "2.12.5",
     "commander": "15.0.0",
     "yaml": "^2.3.0",
-    "zod": "^3.22.0"
+    "zod": "^3.22.0",
+    "dotenv": "^16.4.0"
   },
   "devDependencies": {
     "typescript": "^5.3.0",

@@ -5,6 +5,8 @@
 
 import { z } from "zod";
 import { LlamaCppGenerator, createGenerator } from "../core/generator.js";
+import { ApiGenerator, createZenGenerator, createZenGeneratorFromAuth, resolveEnv } from "../core/api-generator.js";
+import { CliGenerator, createCliGenerator } from "../core/cli-generator.js";
 import {
   createParallelPrompt,
   buildParallelPromptText,
@@ -38,19 +40,23 @@ import type { GeneratorConfig, Workflow, WorkflowResult } from "../core/types.js
   /**
   * System One Subagent Configuration
   */
- export interface SystemOneConfig {
-   modelPath?: string;
-   backend?: "llama.cpp" | "llama-server";
-   ctxSize?: number;
-   ngl?: number;
-   temperature?: number;
-   maxTokens?: number;
-   binaryPath?: string;
-   serverUrl?: string;
-   defaultWorkflow?: string;
-   models?: ModelCapabilities[];
-   autoSelectModel?: boolean;
- }
+export interface SystemOneConfig {
+  modelPath?: string;
+  backend?: "llama.cpp" | "llama-server" | "api" | "cli";
+  ctxSize?: number;
+  ngl?: number;
+  temperature?: number;
+  maxTokens?: number;
+  binaryPath?: string;
+  serverUrl?: string;
+  defaultWorkflow?: string;
+  models?: ModelCapabilities[];
+  autoSelectModel?: boolean;
+  apiKey?: string;
+  apiModel?: string;
+  apiBaseURL?: string;
+  cliModel?: string;
+}
 
 /**
   * Auto-select the best model for a given workflow
@@ -160,41 +166,68 @@ import type { GeneratorConfig, Workflow, WorkflowResult } from "../core/types.js
  /**
   * System One Subagent - Main entry point for opencode integration
   */
- export class SystemOneSubagent {
-  private generator: LlamaCppGenerator;
+  type Generator = LlamaCppGenerator | ApiGenerator | CliGenerator;
+
+export class SystemOneSubagent {
+  private generator: Generator;
   private runner: WorkflowRunner;
   private workflows: Map<string, Workflow> = new Map();
   private parallelPrompts: Map<string, ReturnType<typeof createParallelPrompt>> = new Map();
 
   constructor(config: SystemOneConfig) {
-    const selector = new ModelSelector(config.models);
-    let selectedModelPath = config.modelPath;
+    const backend = config.backend ?? "llama.cpp";
 
-    // Auto-select model if enabled and no explicit model path provided
-    if (config.autoSelectModel && !config.modelPath && config.defaultWorkflow) {
-      const workflow = this.getWorkflowDefinition(config.defaultWorkflow);
-      if (workflow) {
-        const selected = selector.select(workflow);
-        selectedModelPath = selected.path;
-        console.log(`[system-one] Auto-selected model ${selected.name} for ${config.defaultWorkflow} (complexity: ${this.estimateComplexity(workflow)})`);
+    if (backend === "cli") {
+      // CLI backend — uses `opencode run` with the same auth as the CLI
+      this.generator = new CliGenerator({
+        model: config.cliModel ?? "opencode/muse-spark-1.3-contributor-free",
+        timeoutMs: 60000,
+      });
+    } else if (backend === "api") {
+      // API backend — use frontier model for structured decisions
+      const apiKey = resolveEnv(config.apiKey);
+      if (!apiKey) {
+        throw new Error(
+          "API key not found. Set OPENCODE_ZEN_API_KEY in .env.local or pass config.apiKey directly."
+        );
       }
+      this.generator = new ApiGenerator({
+        apiKey,
+        baseURL: resolveEnv(config.apiBaseURL) ?? "https://opencode.ai/zen/v1",
+        model: resolveEnv(config.apiModel) ?? "gpt-5.4-mini",
+        temperature: config.temperature ?? 0.0,
+        maxTokens: config.maxTokens ?? 512,
+      });
+    } else {
+      // Local backend — use llama.cpp
+      const selector = new ModelSelector(config.models);
+      let selectedModelPath = config.modelPath;
+
+      if (config.autoSelectModel && !config.modelPath && config.defaultWorkflow) {
+        const workflow = this.getWorkflowDefinition(config.defaultWorkflow);
+        if (workflow) {
+          const selected = selector.select(workflow);
+          selectedModelPath = selected.path;
+          console.log(`[system-one] Auto-selected model ${selected.name} for ${config.defaultWorkflow} (complexity: ${this.estimateComplexity(workflow)})`);
+        }
+      }
+
+      if (!selectedModelPath) {
+        throw new Error("modelPath is required when autoSelectModel is false or no defaultWorkflow is set");
+      }
+
+      this.generator = createGenerator(selectedModelPath, {
+        backend: config.backend,
+        ctxSize: config.ctxSize,
+        ngl: config.ngl,
+        temperature: config.temperature,
+        maxTokens: config.maxTokens,
+        binaryPath: config.binaryPath,
+        serverUrl: config.serverUrl,
+      });
     }
 
-    if (!selectedModelPath) {
-      throw new Error("modelPath is required when autoSelectModel is false or no defaultWorkflow is set");
-    }
-
-    this.generator = createGenerator(selectedModelPath, {
-      backend: config.backend,
-      ctxSize: config.ctxSize,
-      ngl: config.ngl,
-      temperature: config.temperature,
-      maxTokens: config.maxTokens,
-      binaryPath: config.binaryPath,
-      serverUrl: config.serverUrl,
-    });
-
-    this.runner = new WorkflowRunner(this.generator);
+    this.runner = new WorkflowRunner(this.generator as any);
 
     // Register built-in workflows
     this.registerWorkflow("issue_triage", ISSUE_TRIAGE_WORKFLOW);
@@ -256,8 +289,40 @@ import type { GeneratorConfig, Workflow, WorkflowResult } from "../core/types.js
 
   /**
    * Run a workflow by name
+   * Prefers the parallel prompt path when available to avoid double parallelism
+   * (workflow-step parallelism × batch parallelism) which can exhaust GPU memory.
    */
   async decide(workflowName: string, context: Record<string, unknown>): Promise<WorkflowResult> {
+    // If a parallel prompt exists for this workflow, use the single-call path
+    const parallelPrompt = this.parallelPrompts.get(workflowName);
+    if (parallelPrompt) {
+      const start = performance.now();
+      try {
+        const fullPrompt = buildParallelPromptText(parallelPrompt);
+        const promptContext = typeof context.context === "string" ? context.context : "";
+        const finalPrompt = promptContext ? `Context:\n${promptContext}\n\n${fullPrompt}` : fullPrompt;
+        const schema = buildParallelSchema(parallelPrompt);
+        const result = await this.generator.generate(finalPrompt, schema);
+        const stepResults = parseParallelOutput(parallelPrompt, JSON.stringify(result.value));
+        return {
+          workflowName,
+          stepResults,
+          totalLatencyMs: performance.now() - start,
+          totalTokens: result.tokensUsed ?? 0,
+          success: true,
+        };
+      } catch (err) {
+        return {
+          workflowName,
+          stepResults: {},
+          totalLatencyMs: performance.now() - start,
+          totalTokens: 0,
+          success: false,
+          error: err instanceof Error ? err.message : String(err),
+        };
+      }
+    }
+
     const workflow = this.workflows.get(workflowName);
     if (!workflow) {
       throw new Error(`Unknown workflow: ${workflowName}. Available: ${Array.from(this.workflows.keys()).join(", ")}`);
@@ -287,9 +352,7 @@ import type { GeneratorConfig, Workflow, WorkflowResult } from "../core/types.js
    */
   async classifyIssue(title: string, body: string): Promise<WorkflowResult> {
     return this.decide("issue_triage", {
-      context: "You are triaging a GitHub issue for a TypeScript project.",
-      issue_title: title,
-      issue_body: body,
+      context: `You are triaging a GitHub issue for a TypeScript project.\n\nIssue: ${title}\n${body}`,
     });
   }
 
@@ -297,14 +360,18 @@ import type { GeneratorConfig, Workflow, WorkflowResult } from "../core/types.js
    * Convenience: Review a code diff
    */
   async reviewCode(diff: string): Promise<WorkflowResult> {
-    return this.decide("code_review", { diff });
+    return this.decide("code_review", {
+      context: `You are reviewing a code change for correctness and security.\n\nCode diff:\n${diff}`,
+    });
   }
 
   /**
    * Convenience: Check release readiness
    */
   async checkRelease(version: string, changelog: string, testResults: string): Promise<WorkflowResult> {
-    return this.decide("release_readiness", { version, changelog, test_results: testResults });
+    return this.decide("release_readiness", {
+      context: `You are evaluating if a release candidate is ready to ship.\n\nRelease candidate: ${version}\nChanges:\n${changelog}\nTest results:\n${testResults}`,
+    });
   }
 
   /**
@@ -323,25 +390,71 @@ import type { GeneratorConfig, Workflow, WorkflowResult } from "../core/types.js
 }
 
 /**
-  * Factory for creating SystemOneSubagent from config
-  */
- export function createSystemOneAgent(config: SystemOneConfig): SystemOneSubagent {
-   return new SystemOneSubagent(config);
- }
+ * Factory for creating SystemOneSubagent from config
+ */
+export function createSystemOneAgent(config: SystemOneConfig): SystemOneSubagent {
+  return new SystemOneSubagent(config);
+}
 
- /**
-  * Convenience: Create agent with auto model selection for a specific workflow
-  */
- export function createSystemOneAgentForWorkflow(
-   workflowName: string,
-   config: Omit<SystemOneConfig, "defaultWorkflow" | "autoSelectModel">
- ): SystemOneSubagent {
-   return new SystemOneSubagent({
-     ...config,
-     defaultWorkflow: workflowName,
-     autoSelectModel: true,
-   });
- }
+/**
+ * Auto-detect backend from model string and create agent.
+ * - Models starting with "kilo/" route to CLI backend via `opencode run`
+ * - Everything else routes to local llama.cpp with the given GGUF path
+ */
+export function createSystemOneAgentFromModel(
+  model: string,
+  overrides: Omit<SystemOneConfig, "backend" | "modelPath" | "cliModel"> = {}
+): SystemOneSubagent {
+  if (model.startsWith("kilo/")) {
+    return new SystemOneSubagent({
+      ...overrides,
+      backend: "cli",
+      cliModel: model,
+    });
+  }
+
+  return new SystemOneSubagent({
+    ...overrides,
+    backend: "llama.cpp",
+    modelPath: model,
+  });
+}
+
+/**
+ * Create a SystemOneSubagent backed by OpenCode Zen
+ * Uses frontier model for structured decisions — no local GPU needed
+ */
+export async function createSystemOneZenAgent(
+  model: string = "gpt-5.4-mini",
+  config: Omit<SystemOneConfig, "backend" | "apiModel" | "apiBaseURL"> = {}
+): Promise<SystemOneSubagent> {
+  const apiKey = config.apiKey;
+  if (!apiKey) {
+    throw new Error("OpenCode Zen API key required. Pass config.apiKey or use createSystemOneAgent with backend='api'.");
+  }
+  return new SystemOneSubagent({
+    ...config,
+    backend: "api",
+    apiModel: model,
+    apiBaseURL: "https://opencode.ai/zen/v1",
+  });
+}
+
+/**
+ * Create a SystemOneSubagent backed by the opencode CLI
+ * Uses the same auth as `opencode run` — no API key management needed.
+ * Best for free models like muse-spark-1.3-contributor-free.
+ */
+export function createSystemOneCliAgent(
+  model: string = "opencode/muse-spark-1.3-contributor-free",
+  config: Omit<SystemOneConfig, "backend" | "cliModel"> = {}
+): SystemOneSubagent {
+  return new SystemOneSubagent({
+    ...config,
+    backend: "cli",
+    cliModel: model,
+  });
+}
 
 /**
  * opencode agent manifest
@@ -352,7 +465,7 @@ export const OPENCODE_AGENT_MANIFEST = {
   type: "subagent" as const,
   configSchema: z.object({
     modelPath: z.string().describe("Path to GGUF model (optional if autoSelectModel is true)").optional(),
-    backend: z.enum(["llama.cpp", "llama-server"]).default("llama.cpp"),
+    backend: z.enum(["llama.cpp", "llama-server", "api", "cli"]).default("llama.cpp"),
     ctxSize: z.number().default(4096),
     ngl: z.number().default(999),
     temperature: z.number().default(0.0),
@@ -361,6 +474,9 @@ export const OPENCODE_AGENT_MANIFEST = {
     serverUrl: z.string().optional(),
     defaultWorkflow: z.string().default("issue_triage"),
     autoSelectModel: z.boolean().default(false).describe("Auto-pick model based on workflow complexity"),
+    apiKey: z.string().optional().describe("API key (required when backend is 'api')"),
+    apiModel: z.string().optional().describe("Model name for API backend (e.g. gpt-5.4-mini)"),
+    apiBaseURL: z.string().optional().describe("API base URL (defaults to OpenCode Zen)"),
   }),
   tools: [
     "decide",

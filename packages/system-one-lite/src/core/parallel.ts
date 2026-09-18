@@ -5,7 +5,7 @@
 
 import { z } from "zod";
 import type { Question, ParallelPrompt } from "./types.js";
-import { buildParallelGbnf } from "./gbnf.js";
+import { buildParallelGbnf, zodToGbnf } from "./gbnf.js";
 
 /**
  * Create a parallel prompt from question definitions
@@ -115,8 +115,8 @@ export const CODE_REVIEW_PROMPT = createParallelPrompt(
       schema: z.object({
         has_vuln: z.boolean(),
         severity: z.enum(["none", "low", "medium", "high", "critical"]),
-        details: z.string(),
-      }),
+        finding_type: z.enum(["none", "injection", "auth_bypass", "data_exposure", "crypto_weak", "path_traversal", "xss", "other"]),
+      }).describe("security_check"),
     },
     {
       key: "correctness",
@@ -124,16 +124,16 @@ export const CODE_REVIEW_PROMPT = createParallelPrompt(
       schema: z.object({
         has_bug: z.boolean(),
         severity: z.enum(["none", "low", "medium", "high"]),
-        details: z.string(),
-      }),
+        finding_type: z.enum(["none", "null_deref", "type_mismatch", "logic_error", "race_condition", "resource_leak", "off_by_one", "other"]),
+      }).describe("correctness_check"),
     },
     {
       key: "decision",
       question: "Final review decision?",
       schema: z.object({
         decision: z.enum(["approve", "request_changes", "block"]),
-        reason: z.string(),
-      }),
+        reason_category: z.enum(["clean", "minor_issues", "security_concern", "correctness_bug", "breaking_change", "needs_tests", "needs_docs", "other"]),
+      }).describe("final_decision"),
     },
   ]
 );
@@ -167,9 +167,12 @@ export const RELEASE_READINESS_PROMPT = createParallelPrompt(
 
 /**
  * Generate GBNF grammar for a parallel prompt
+ * Derives grammar from the compiled Zod schema, not from the questions array,
+ * ensuring the grammar and validation contract stay in sync.
  */
 export function getParallelGbnf(prompt: ParallelPrompt): string {
-  return buildParallelGbnf(prompt.questions);
+  const schema = buildParallelSchema(prompt);
+  return zodToGbnf(schema);
 }
 
 /**

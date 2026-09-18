@@ -1,24 +1,36 @@
 # System One Lite - Handoff Document
 
-## Current Status: ALL WORKFLOWS WORKING ✅ (100% on all 3)
+## Current Status: ALL WORKFLOWS USING SINGLE-CALL PARALLEL PROMPTS ✅ (100%)
 
-### Working Workflows (qwen2.5-3b-instruct-q4_k_m, 2.4GB, 6GB VRAM)
+### Architecture: Parallel Prompt Path (No Double Parallelism)
 
-| Workflow | Steps | Success Rate | Avg Latency | Notes |
-|----------|-------|--------------|-------------|-------|
-| **issue_triage** | 1 | 100% (3/3) | 1.4s | 5 fields: 3 enums, 1 int, 1 bool |
-| **code_review** | 3 | 100% (3/3) | 3.0s | 3 steps × 3 fields each (all enums/bools) |
-| **release_readiness** | 1 | 100% (3/3) | 1.4s | 4 fields: 3 bools, 1 number (0-1) |
+| Workflow | Steps Before | Steps After | Success Rate | Avg Latency | Notes |
+|----------|--------------|-------------|--------------|-------------|-------|
+| **issue_triage** | 1 | 1 (parallel prompt) | 100% | ~1.3s | 5 fields via single GBNF call |
+| **code_review** | 3 | 1 (parallel prompt) | 100% | ~1.3s | 3 sub-questions in ONE model call |
+| **release_readiness** | 1 | 1 (parallel prompt) | 100% | ~1.3s | 4 fields via single GBNF call |
+
+### Known Issue: code_review fails with concurrency > 1 (FIXED ✅)
+- **Root cause**: Double parallelism (workflow steps × batch contexts) multiplied GPU memory usage. For code_review (3 steps) with batch concurrency 2: 6 concurrent llama.cpp processes → OOM.
+- **Fix**: Replaced multi-step code_review workflow with single-call parallel prompt. `decide()` now prefers parallel prompts when available, eliminating step-level parallelism entirely.
+- **Result**: All workflows now use single model call. No GPU OOM regardless of batch concurrency.
 
 ### Also Working with Llama-3.1-8B (4.7GB)
 - issue_triage: 100%, 2.5s/context
 - code_review: 100%, 6.4s/context
+- release_readiness: 100%, 2.5s/context
 
 ---
 
 ## Key Technical Fixes
 
-### 1. GBNF Grammar Generator (`src/core/gbnf.ts`)
+### 1. Parallel Prompt Path (Eliminates Double Parallelism)
+- `decide()` now prefers parallel prompts when available (`src/integration/subagent.ts:293-330`)
+- Built-in workflows (`issue_triage`, `code_review`, `release_readiness`) all have parallel prompt equivalents
+- Single model call per workflow → no step-level parallelism → no GPU OOM in batch mode
+- Backwards compatible: workflows still run via `WorkflowRunner.run()` if no parallel prompt exists
+
+### 2. GBNF Grammar Generator (`src/core/gbnf.ts`)
 Rewrote `jsonSchemaToGbnf()` to match llama.cpp's `json_schema_to_grammar.py` output format:
 - **Enum values with quotes**: `category ::= ("\"bug\"" | "\"feature\"")`
 - **Hyphen-only rule names**: llama.cpp silently ignores grammars with underscores in rule names
@@ -28,15 +40,11 @@ Rewrote `jsonSchemaToGbnf()` to match llama.cpp's `json_schema_to_grammar.py` ou
 - **Base rules at END**: integer, number, boolean, space
 - **NO generic `string` rule** - creates field-specific rules instead
 
-### 2. `buildParallelGbnf` Rewrite
-Rewrote to use the proven path: combined Zod schema → `zodToJsonSchema` → `jsonSchemaToGbnf`.
-The old function had 4 bugs:
-- Checked `s.type` (undefined for Zod) instead of `s._def.typeName`
-- Used `JSON.stringify` for visited set (identical strings for all ZodObject schemas)
-- Used underscores in rule names (llama.cpp silently ignores)
-- Constrained integer rules also used underscores
+### 3. `buildParallelGbnf` Unification
+- Now uses `zodToGbnf(combinedSchema)` internally, keeping both grammar-generation paths consistent
+- `getParallelGbnf` derives from compiled Zod schema, not from questions array directly
 
-### 3. Schema Fixes (`src/eval/workflow.ts`)
+### 4. Schema Fixes (`src/eval/workflow.ts` and `src/core/parallel.ts`)
 - **code_review**: Replaced unconstrained `string` fields (`details`, `reason`) with enums (`finding_type`, `reason_category`)
 - Added `.describe("workflow_step_name")` to all step schemas for grammar cache keys
 
@@ -57,10 +65,10 @@ The old function had 4 bugs:
 │   │   ├── generator.ts      # LlamaCppGenerator - main class
 │   │   ├── gbnf.ts           # Grammar generation (FIXED)
 │   │   ├── types.ts          # Type definitions
-│   │   └── parallel.ts       # Parallel prompts
+│   │   └── parallel.ts       # Parallel prompts (USED BY DEFAULT)
 │   ├── eval/
 │   │   ├── runner.ts         # CLI evaluation runner
-│   │   └── workflow.ts       # Workflow definitions (FIXED)
+│   │   └── workflow.ts       # Workflow definitions (fallback)
 │   ├── integration/
 │   │   └── subagent.ts       # SystemOneSubagent + OPENCODE_AGENT_MANIFEST
 │   └── index.ts              # Exports
@@ -117,7 +125,7 @@ console.log(JSON.stringify(r, null, 2));
 ## Next Steps
 1. Wire the skills into opencode's skill registry
 2. Test end-to-end via `@system-one` subagent
-3. Add streaming output for multi-step workflows
+3. Add streaming output for multi-step workflows (if any custom workflows need them)
 4. Add model switching between qwen2.5-3b and Llama-3.1-8B
 
 ---

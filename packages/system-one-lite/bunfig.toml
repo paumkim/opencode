@@ -7,11 +7,6 @@ sourcemap = "external"
 minify = false
 compile = false
 
-[build.compile]
-# For single binary distribution
-# target = "bun-linux-x64"
-# outfile = "./system-one-lite"
-
 [run]
 # Default model path for testing
 env = { MODEL_PATH = "./models/qwen2.5-3b-instruct-q4_k_m.gguf" }
