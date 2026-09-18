@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json.schemastore.org/package.json",
+  "name": "@opencode-ai/watcher",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "bun run test.ts"
+  },
+  "exports": {
+    "./*": "./src/watcher/*.ts"
+  },
+  "dependencies": {
+    "@opencode-ai/core": "workspace:*",
+    "effect": "catalog:"
+  }
+}
