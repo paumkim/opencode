@@ -14,6 +14,7 @@ import {
   PROMPT_KIMI,
   PROMPT_META,
   PROMPT_TRINITY,
+  buildSystemPrompt,
 } from "./prompt/system-prompts"
 import type { Provider } from "@/provider/provider"
 import type { Agent } from "@/agent/agent"
@@ -23,32 +24,31 @@ import { AbsolutePath } from "@opencode-ai/core/schema"
 import { Location } from "@opencode-ai/core/location"
 import { LocationServiceMap, locationServiceMapLayer } from "@opencode-ai/core/location-services"
 import { Reference } from "@opencode-ai/core/reference"
-import { MCP } from "@/mcp"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 
 export function provider(model: Provider.Model) {
   if (model.api.id.includes("muse")) {
     const name = model.api.id.includes("muse-glimmer") ? "Muse Glimmer" : "Muse Spark"
-    return [PROMPT_META.replaceAll("{{MODEL_NAME}}", name)]
+    return [buildSystemPrompt(PROMPT_META.replaceAll("{{MODEL_NAME}}", name))]
   }
   if (model.api.id.includes("gpt-4") || model.api.id.includes("o1") || model.api.id.includes("o3"))
-    return [PROMPT_BEAST]
+    return [buildSystemPrompt(PROMPT_BEAST)]
   if (model.api.id.includes("gpt")) {
-    if (model.api.id.includes("gpt-6")) return [PROMPT_ASTRA]
+    if (model.api.id.includes("gpt-6")) return [buildSystemPrompt(PROMPT_ASTRA)]
     if (model.api.id.includes("codex")) {
-      return [PROMPT_CODEX]
+      return [buildSystemPrompt(PROMPT_CODEX)]
     }
-    return [PROMPT_GPT]
+    return [buildSystemPrompt(PROMPT_GPT)]
   }
-  if (model.api.id.includes("gemini-")) return [PROMPT_GEMINI]
-  if (model.api.id.includes("claude")) return [PROMPT_ANTHROPIC]
-  if (model.api.id.toLowerCase().includes("trinity")) return [PROMPT_TRINITY]
+  if (model.api.id.includes("gemini-")) return [buildSystemPrompt(PROMPT_GEMINI)]
+  if (model.api.id.includes("claude")) return [buildSystemPrompt(PROMPT_ANTHROPIC)]
+  if (model.api.id.toLowerCase().includes("trinity")) return [buildSystemPrompt(PROMPT_TRINITY)]
   if (
     model.api.id.toLowerCase().includes("kimi") ||
     ["kimi-for-coding", "moonshotai", "moonshotai-cn"].includes(model.providerID)
   )
-    return [PROMPT_KIMI]
-  return [PROMPT_DEFAULT]
+    return [buildSystemPrompt(PROMPT_KIMI)]
+  return [buildSystemPrompt(PROMPT_DEFAULT)]
 }
 
 export interface Interface {
@@ -60,13 +60,12 @@ export interface Interface {
 export class Service extends Context.Service<Service, Interface>()("@opencode/SystemPrompt") {}
 
 const layer = Layer.effect(
-  Service,
-  Effect.gen(function* () {
-    const skill = yield* Skill.Service
-    const mcp = yield* MCP.Service
-    const locations = yield* LocationServiceMap.Service
+    Service,
+    Effect.gen(function* () {
+      const skill = yield* Skill.Service
+      const locations = yield* LocationServiceMap.Service
 
-    return Service.of({
+      return Service.of({
       environment: Effect.fn("SystemPrompt.environment")(function* (model: Provider.Model) {
         const ctx = yield* InstanceState.context
         const references = yield* Effect.gen(function* () {
@@ -113,28 +112,12 @@ const layer = Layer.effect(
         return [
           "Skills provide specialized instructions and workflows for specific tasks.",
           "Use the skill tool to load a skill when a task matches its description.",
-          // the agents seem to ingest the information about skills a bit better if we present a more verbose
-          // version of them here and a less verbose version in tool description, rather than vice versa.
-          Skill.fmt(list, { verbose: true }),
+          Skill.fmt(list, { verbose: false }),
         ].join("\n")
       }),
 
-      mcp: Effect.fn("SystemPrompt.mcp")(function* (agent: Agent.Info, permission?: PermissionV1.Ruleset) {
-        const ruleset = Permission.merge(agent.permission, permission ?? [])
-        const instructions = (yield* mcp.instructions()).filter(
-          (item) => item.tools.length === 0 || Permission.disabled(item.tools, ruleset).size < item.tools.length,
-        )
-        if (instructions.length === 0) return
-
-        return [
-          "<mcp_instructions>",
-          ...instructions.flatMap((item) => [
-            `  <server name="${item.name}">`,
-            ...item.instructions.split("\n").map((line) => `    ${line}`),
-            "  </server>",
-          ]),
-          "</mcp_instructions>",
-        ].join("\n")
+      mcp: Effect.fn("SystemPrompt.mcp")(function* (_agent: Agent.Info, _permission?: PermissionV1.Ruleset) {
+        return undefined
       }),
     })
   }),
@@ -149,7 +132,7 @@ const locationServiceMapNode = LayerNode.make({
 export const node = LayerNode.make({
   service: Service,
   layer: layer,
-  deps: [Skill.node, MCP.node, locationServiceMapNode],
+  deps: [Skill.node, locationServiceMapNode],
 })
 
 export * as SystemPrompt from "./system"

@@ -51,12 +51,14 @@ import { createFadeIn } from "../../util/signal"
 import { DialogSkill } from "../dialog-skill"
 import { DialogWorkspaceUnavailable } from "../dialog-workspace-unavailable"
 import { useArgs } from "../../context/args"
+import { useOptionalSharedWorkspace } from "../../context/shared-workspace"
 import { OPENCODE_BASE_MODE, useBindings, useCommandShortcut, useLeaderActive, useOpencodeKeymap } from "../../keymap"
 import { useTuiConfig } from "../../config"
 import { usePromptWorkspace } from "./workspace"
 import { usePromptMove } from "./move"
 import { readLocalAttachment } from "./local-attachment"
 import { useLocation } from "../../context/location"
+import { GoalBar } from "./goal-bar"
 
 registerOpencodeSpinner()
 
@@ -136,6 +138,13 @@ function formatEditorContext(selection: EditorSelection) {
   })
 
   return `<system-reminder>${ranges.join("\n")} This may or may not be relevant to the current task.</system-reminder>\n`
+}
+
+function sanitizeRetryMessage(raw: string) {
+  return raw
+    .replace(/^\[[^\]]+\]\s*/, "")
+    .replace(/\s+/g, " ")
+    .trim()
 }
 
 let stashed: { prompt: PromptInfo; cursor: number } | undefined
@@ -946,6 +955,7 @@ export function Prompt(props: PromptProps) {
 
   async function submitInner() {
     workspace.clearNotice()
+    const sharedWs = useOptionalSharedWorkspace()
 
     // IME: double-defer may fire before onContentChange flushes the last
     // composed character (e.g. Korean hangul) to the store, so read
@@ -1058,15 +1068,24 @@ export function Prompt(props: PromptProps) {
 
     if (store.mode === "shell") {
       move.startSubmit()
-      void sdk.client.session.shell({
-        sessionID,
-        agent: agent.name,
-        model: {
-          providerID: selectedModel.providerID,
-          modelID: selectedModel.modelID,
-        },
-        command: inputText,
-      })
+      if (sharedWs) {
+        sharedWs.sendPrompt(sessionID, {
+          type: "shell",
+          command: inputText,
+          agent: agent.name,
+          model: `${selectedModel.providerID}/${selectedModel.modelID}`,
+        })
+      } else {
+        void sdk.client.session.shell({
+          sessionID,
+          agent: agent.name,
+          model: {
+            providerID: selectedModel.providerID,
+            modelID: selectedModel.modelID,
+          },
+          command: inputText,
+        })
+      }
       setStore("mode", "normal")
     } else if (
       inputText.startsWith("/") &&
@@ -1080,43 +1099,67 @@ export function Prompt(props: PromptProps) {
       const restOfInput = firstLineEnd === -1 ? "" : inputText.slice(firstLineEnd + 1)
       const args = firstLineArgs.join(" ") + (restOfInput ? "\n" + restOfInput : "")
 
-      void sdk.client.session.command({
-        sessionID,
-        command: command.slice(1),
-        arguments: args,
-        agent: agent.name,
-        model: `${selectedModel.providerID}/${selectedModel.modelID}`,
-        variant,
-        parts: nonTextParts.filter((x) => x.type === "file"),
-      })
+      if (sharedWs) {
+        sharedWs.sendCommand(sessionID, command.slice(1), args)
+      } else {
+        void sdk.client.session.command({
+          sessionID,
+          command: command.slice(1),
+          arguments: args,
+          agent: agent.name,
+          model: `${selectedModel.providerID}/${selectedModel.modelID}`,
+          variant,
+          parts: nonTextParts.filter((x) => x.type === "file"),
+        })
+      }
     } else {
       move.startSubmit()
-      sdk.client.session
-        .prompt(
-          {
-            sessionID,
-            ...selectedModel,
-            agent: agent.name,
-            model: selectedModel,
-            variant,
-            parts: [
-              ...editorParts,
-              {
-                type: "text",
-                text: inputText,
-              },
-              ...nonTextParts,
-            ],
-          },
-          { throwOnError: true },
-        )
-        .catch((error) => {
-          toast.show({
-            title: "Failed to send prompt",
-            message: errorMessage(error),
-            variant: "error",
-          })
+      if (sharedWs) {
+        // Collect text from all parts
+        const textParts = [
+          ...editorParts,
+          { type: "text" as const, text: inputText },
+          ...nonTextParts,
+        ]
+        const message = textParts
+          .filter((p) => p.type === "text")
+          .map((p) => p.text)
+          .join("\n")
+        sharedWs.sendPrompt(sessionID, {
+          message,
+          agent: agent.name,
+          modelID: selectedModel.modelID,
+          providerID: selectedModel.providerID,
+          variant,
         })
+      } else {
+        sdk.client.session
+          .prompt(
+            {
+              sessionID,
+              ...selectedModel,
+              agent: agent.name,
+              model: selectedModel,
+              variant,
+              parts: [
+                ...editorParts,
+                {
+                  type: "text",
+                  text: inputText,
+                },
+                ...nonTextParts,
+              ],
+            },
+            { throwOnError: true },
+          )
+          .catch((error) => {
+            toast.show({
+              title: "Failed to send prompt",
+              message: errorMessage(error),
+              variant: "error",
+            })
+          })
+      }
       if (editorParts.length > 0) editor.markSelectionSent()
     }
     history.append({
@@ -1348,6 +1391,9 @@ export function Prompt(props: PromptProps) {
   return (
     <>
       <box ref={(r: BoxRenderable) => (anchor = r)} visible={props.visible !== false} width="100%">
+        <Show when={props.visible !== false && !!props.sessionID}>
+          <GoalBar sessionID={props.sessionID} />
+        </Show>
         <box
           width="100%"
           border={["left"]}
@@ -1537,13 +1583,22 @@ export function Prompt(props: PromptProps) {
                         if (!r) return
                         if (r.message.includes("exceeded your current quota") && r.message.includes("gemini"))
                           return "gemini is way too hot right now"
-                        if (r.message.length > 80) return r.message.slice(0, 80) + "…"
-                        return r.message
+                        const sanitized = sanitizeRetryMessage(r.message)
+                        const lower = sanitized.toLowerCase()
+                        if (
+                          lower.includes("rate-limit") ||
+                          lower.includes("rate limited") ||
+                          lower.includes("429") ||
+                          lower.includes("temporarily")
+                        )
+                          return "Rate limited – retrying"
+                        if (sanitized.length > 60) return sanitized.slice(0, 59) + "…"
+                        return sanitized
                       })
                       const isTruncated = createMemo(() => {
                         const r = retry()
                         if (!r) return false
-                        return r.message.length > 120
+                        return r.message.length > 80
                       })
                       const [seconds, setSeconds] = createSignal(0)
                       onMount(() => {
@@ -1570,14 +1625,16 @@ export function Prompt(props: PromptProps) {
                         const baseMessage = message()
                         const truncatedHint = isTruncated() ? " (click to expand)" : ""
                         const duration = formatDuration(seconds())
-                        const retryInfo = ` [retrying ${duration ? `in ${duration} ` : ""}attempt #${r.attempt}]`
+                        const retryInfo = ` · retrying${duration ? ` in ${duration}` : ""} (attempt ${r.attempt}/∞)`
                         return baseMessage + truncatedHint + retryInfo
                       }
 
                       return (
                         <Show when={retry()}>
-                          <box onMouseUp={handleMessageClick}>
-                            <text fg={theme.error}>{retryText()}</text>
+                          <box flexShrink={0} width="100%" overflow="hidden" onMouseUp={handleMessageClick}>
+                            <text fg={theme.error} wrapMode="none" width="100%">
+                              {retryText()}
+                            </text>
                           </box>
                         </Show>
                       )

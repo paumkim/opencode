@@ -9,7 +9,6 @@ import { Truncate } from "@/tool/truncate"
 import { Auth } from "../auth"
 import { ProviderTransform } from "@/provider/transform"
 
-import PROMPT_GENERATE from "./generate.txt"
 import { PROMPT_COMPACTION, PROMPT_EXPLORE, PROMPT_SUMMARY, PROMPT_TITLE } from "./prompt/agents"
 import { Permission } from "@/permission"
 import { mergeDeep, pipe, sortBy, values } from "remeda"
@@ -28,6 +27,15 @@ import { LocationServiceMap, locationServiceMapLayer } from "@opencode-ai/core/l
 import { Reference } from "@opencode-ai/core/reference"
 import { Location } from "@opencode-ai/core/location"
 import { PluginV2 } from "@opencode-ai/core/plugin"
+
+let PROMPT_GENERATE_CACHE: string | undefined
+
+async function loadPromptGenerate(): Promise<string> {
+  if (PROMPT_GENERATE_CACHE !== undefined) return PROMPT_GENERATE_CACHE
+  const mod = await import("./generate.txt")
+  PROMPT_GENERATE_CACHE = mod.default
+  return PROMPT_GENERATE_CACHE
+}
 
 export const Info = Schema.Struct({
   name: Schema.String,
@@ -380,7 +388,7 @@ const layer = Layer.effect(
           ? Option.getOrUndefined(yield* Effect.serviceOption(OtelTracer.OtelTracer))
           : undefined
 
-        const system = [PROMPT_GENERATE]
+        const system: string[] = [yield* Effect.promise(() => loadPromptGenerate())]
         yield* plugin.trigger("experimental.chat.system.transform", { model: resolved }, { system })
         const existing = yield* InstanceState.useEffect(state, (s) => s.list())
 

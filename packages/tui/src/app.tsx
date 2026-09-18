@@ -39,6 +39,7 @@ import { DataProvider } from "./context/data"
 import { LocationProvider } from "./context/location"
 import { LocalProvider, useLocal } from "./context/local"
 import { PermissionProvider } from "./context/permission"
+import { SharedWorkspaceProvider, createSharedWorkspaceEventSource } from "./context/shared-workspace"
 import { DialogModel } from "./component/dialog-model"
 import { useConnected } from "./component/use-connected"
 import { DialogMcp } from "./component/dialog-mcp"
@@ -59,7 +60,7 @@ import { PromptStashProvider } from "./component/prompt/stash"
 import { DialogAlert } from "./ui/dialog-alert"
 import { DialogConfirm } from "./ui/dialog-confirm"
 import { ToastProvider, useToast } from "./ui/toast"
-import { isDefaultTitle } from "./util/session"
+import { TerminalTitle } from "./terminal-title"
 import { KVProvider, useKV } from "./context/kv"
 import * as Model from "./util/model"
 import { ArgsProvider, useArgs, type Args } from "./context/args"
@@ -149,6 +150,7 @@ export type TuiInput = {
   fetch?: typeof fetch
   headers?: RequestInit["headers"]
   events?: EventSource
+  shared?: boolean
   pluginHost: TuiPluginHost
 }
 
@@ -296,44 +298,87 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
                                   >
                                     <TuiConfigProvider config={input.config}>
                                       <PluginRuntimeProvider value={pluginRuntime}>
-                                        <SDKProvider
-                                          url={input.url}
-                                          directory={input.directory}
-                                          fetch={input.fetch}
-                                          headers={input.headers}
-                                          events={input.events}
-                                        >
-                                          <PermissionProvider>
-                                            <ProjectProvider>
-                                              <SyncProvider>
-                                                <DataProvider>
-                                                  <ThemeProvider mode={mode}>
-                                                    <LocalProvider>
-                                                      <PromptStashProvider>
-                                                        <DialogProvider>
-                                                          <FrecencyProvider>
-                                                            <PromptHistoryProvider>
-                                                              <PromptRefProvider>
-                                                                <EditorContextProvider>
-                                                                  <LocationProvider>
-                                                                    <App
-                                                                      onSnapshot={input.onSnapshot}
-                                                                      pluginHost={input.pluginHost}
-                                                                    />
-                                                                  </LocationProvider>
-                                                                </EditorContextProvider>
-                                                              </PromptRefProvider>
-                                                            </PromptHistoryProvider>
-                                                          </FrecencyProvider>
-                                                        </DialogProvider>
-                                                      </PromptStashProvider>
-                                                    </LocalProvider>
-                                                  </ThemeProvider>
-                                                </DataProvider>
-                                              </SyncProvider>
-                                            </ProjectProvider>
-                                          </PermissionProvider>
-                                        </SDKProvider>
+                                        {input.shared ? (
+                                          <SharedWorkspaceProvider>
+                                            <SDKProvider
+                                              url={input.url}
+                                              directory={input.directory}
+                                              fetch={input.fetch}
+                                              headers={input.headers}
+                                              events={createSharedWorkspaceEventSource(input.url)}
+                                            >
+                                              <PermissionProvider>
+                                                <ProjectProvider>
+                                                  <SyncProvider>
+                                                    <DataProvider>
+                                                      <ThemeProvider mode={mode}>
+                                                        <LocalProvider>
+                                                          <PromptStashProvider>
+                                                            <DialogProvider>
+                                                              <FrecencyProvider>
+                                                                <PromptHistoryProvider>
+                                                                  <PromptRefProvider>
+                                                                    <EditorContextProvider>
+                                                                      <LocationProvider>
+                                                                        <App
+                                                                          onSnapshot={input.onSnapshot}
+                                                                          pluginHost={input.pluginHost}
+                                                                        />
+                                                                      </LocationProvider>
+                                                                    </EditorContextProvider>
+                                                                  </PromptRefProvider>
+                                                                </PromptHistoryProvider>
+                                                              </FrecencyProvider>
+                                                            </DialogProvider>
+                                                          </PromptStashProvider>
+                                                        </LocalProvider>
+                                                      </ThemeProvider>
+                                                    </DataProvider>
+                                                  </SyncProvider>
+                                                </ProjectProvider>
+                                              </PermissionProvider>
+                                            </SDKProvider>
+                                          </SharedWorkspaceProvider>
+                                        ) : (
+                                          <SDKProvider
+                                            url={input.url}
+                                            directory={input.directory}
+                                            fetch={input.fetch}
+                                            headers={input.headers}
+                                            events={input.events}
+                                          >
+                                            <PermissionProvider>
+                                              <ProjectProvider>
+                                                <SyncProvider>
+                                                  <DataProvider>
+                                                    <ThemeProvider mode={mode}>
+                                                      <LocalProvider>
+                                                        <PromptStashProvider>
+                                                          <DialogProvider>
+                                                            <FrecencyProvider>
+                                                              <PromptHistoryProvider>
+                                                                <PromptRefProvider>
+                                                                  <EditorContextProvider>
+                                                                    <LocationProvider>
+                                                                      <App
+                                                                        onSnapshot={input.onSnapshot}
+                                                                        pluginHost={input.pluginHost}
+                                                                      />
+                                                                    </LocationProvider>
+                                                                  </EditorContextProvider>
+                                                                </PromptRefProvider>
+                                                              </PromptHistoryProvider>
+                                                            </FrecencyProvider>
+                                                          </DialogProvider>
+                                                        </PromptStashProvider>
+                                                      </LocalProvider>
+                                                    </ThemeProvider>
+                                                  </DataProvider>
+                                                </SyncProvider>
+                                              </ProjectProvider>
+                                            </PermissionProvider>
+                                          </SDKProvider>
+                                        )}
                                       </PluginRuntimeProvider>
                                     </TuiConfigProvider>
                                   </RouteProvider>
@@ -450,6 +495,10 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
     kv.get("paste_summary_enabled", !sync.data.config.experimental?.disable_paste_summary),
   )
 
+  // Only activity observed on an enabled session route can produce a finished title.
+  // This is effect-local history, not a reactive dependency or persisted session state.
+  const titleActivity = new Set<string>()
+
   // Update terminal window title based on current route and session
   createEffect(() => {
     if (!terminalTitleEnabled() || Flag.OPENCODE_DISABLE_TERMINAL_TITLE) return
@@ -460,14 +509,13 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
     }
 
     if (route.data.type === "session") {
-      const session = sync.session.get(route.data.sessionID)
-      if (!session || isDefaultTitle(session.title)) {
-        renderer.setTerminalTitle("OpenCode")
-        return
-      }
-
-      const title = session.title.length > 40 ? session.title.slice(0, 37) + "…" : session.title
-      renderer.setTerminalTitle(`OC | ${title}`)
+      const title = TerminalTitle.session({
+        id: route.data.sessionID,
+        data: sync.data,
+        observed: titleActivity,
+      })
+      if (title.active) titleActivity.add(title.id)
+      renderer.setTerminalTitle(title.title)
       return
     }
 
@@ -636,7 +684,8 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
         // Bias /mo toward /models over /move without changing global fuzzy scoring.
         slashAliases: ["mo"],
         run: () => {
-          dialog.replace(() => <DialogModel />)
+          const sessionID = route.data.type === "session" ? route.data.sessionID : undefined
+          dialog.replace(() => <DialogModel sessionID={sessionID} />)
         },
       },
       {

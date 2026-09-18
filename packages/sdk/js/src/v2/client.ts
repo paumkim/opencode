@@ -89,5 +89,6 @@ export function createOpencodeClient(config?: Config & { directory?: string; exp
     return response
   })
   client.interceptors.error.use(wrapClientError)
-  return new OpencodeClient({ client })
+  // Allow endpoints not yet in the generated SDK to reuse the configured transport.
+  return Object.assign(new OpencodeClient({ client }), { request: client.request })
 }

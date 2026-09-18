@@ -80,6 +80,19 @@ export const Model = Schema.Struct({
 })
 
 export const Info = Schema.Struct({
+  console: Schema.optional(
+    Schema.Union([
+      Schema.Literal(false),
+      Schema.Struct({
+        url: Schema.String,
+        accountID: Schema.optional(Schema.String),
+        orgID: Schema.optional(Schema.String),
+      }),
+    ]),
+  ).annotate({
+    description:
+      "Select a signed-in console for this provider, or false to use its direct API instead of the active console.",
+  }),
   api: Schema.optional(Schema.String),
   name: Schema.optional(Schema.String),
   env: Schema.optional(Schema.mutable(Schema.Array(Schema.String))),

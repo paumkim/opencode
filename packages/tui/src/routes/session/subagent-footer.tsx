@@ -3,6 +3,7 @@ import { useRouteData } from "../../context/route"
 import { useSync } from "../../context/sync"
 import { useTheme } from "../../context/theme"
 import { SplitBorder } from "../../ui/border"
+import { Spinner } from "../../component/spinner"
 import type { AssistantMessage } from "@opencode-ai/sdk/v2"
 import { Locale } from "../../util/locale"
 import { useTerminalDimensions } from "@opentui/solid"
@@ -28,6 +29,12 @@ export function SubagentFooter() {
     const index = siblings.findIndex((x) => x.id === s.id)
 
     return { label, index: index + 1, total: siblings.length }
+  })
+
+  const status = createMemo(() => sync.data.session_status[route.sessionID])
+  const isWorking = createMemo(() => {
+    const value = status()
+    return value !== undefined && value.type !== "idle"
   })
 
   const usage = createMemo(() => {
@@ -77,9 +84,18 @@ export function SubagentFooter() {
       >
         <box flexDirection="row" justifyContent="space-between" gap={1}>
           <box flexDirection="row" gap={1}>
-            <text fg={theme.text}>
-              <b>{subagentInfo().label}</b>
-            </text>
+            <Show
+              when={isWorking()}
+              fallback={
+                <text fg={theme.text}>
+                  <b>{subagentInfo().label}</b>
+                </text>
+              }
+            >
+              <Spinner color={theme.text}>
+                <b>{subagentInfo().label}</b>
+              </Spinner>
+            </Show>
             <Show when={subagentInfo().total > 0}>
               <text style={{ fg: theme.textMuted }}>
                 ({subagentInfo().index} of {subagentInfo().total})

@@ -50,6 +50,10 @@ const cli = yargs(args)
   .alias("help", "h")
   .version("version", "show version number", InstallationVersion)
   .alias("version", "v")
+  .option("internal-version", {
+    describe: "show internal fork build version (separate from compatibility version)",
+    type: "boolean",
+  })
   .option("print-logs", {
     describe: "print logs to stderr",
     type: "boolean",
@@ -69,6 +73,11 @@ const cli = yargs(args)
     type: "boolean",
   })
   .middleware(async (opts) => {
+    if (opts.internalVersion) {
+      const { internalVersion } = await import("@opencode-ai/core/installation/internal-version")
+      console.log(internalVersion())
+      process.exit(0)
+    }
     if (opts.printLogs) process.env.OPENCODE_PRINT_LOGS = "1"
     if (opts.logLevel) process.env.OPENCODE_LOG_LEVEL = opts.logLevel
     if (opts.debug) {

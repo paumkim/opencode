@@ -1,10 +1,8 @@
 import type { APIEvent } from "@solidjs/start/server"
 import { and, Database, eq, isNull, lt, or, sql } from "@opencode-ai/console-core/drizzle/index.js"
 import { KeyTable } from "@opencode-ai/console-core/schema/key.sql.js"
-import { BillingTable, LiteTable, SubscriptionTable, UsageTable } from "@opencode-ai/console-core/schema/billing.sql.js"
+import { BillingTable, LiteTable, SubscriptionTable } from "@opencode-ai/console-core/schema/billing.sql.js"
 import { centsToMicroCents } from "@opencode-ai/console-core/util/price.js"
-import { getMonthlyBounds, getWeekBounds } from "@opencode-ai/console-core/util/date.js"
-import { Identifier } from "@opencode-ai/console-core/identifier.js"
 import { Billing } from "@opencode-ai/console-core/billing.js"
 import { Actor } from "@opencode-ai/console-core/actor.js"
 import { WorkspaceTable } from "@opencode-ai/console-core/schema/workspace.sql.js"
@@ -12,6 +10,8 @@ import { ZenData } from "@opencode-ai/console-core/model.js"
 import { Subscription } from "@opencode-ai/console-core/subscription.js"
 import { BlackData } from "@opencode-ai/console-core/black.js"
 import { UserTable } from "@opencode-ai/console-core/schema/user.sql.js"
+import { User } from "@opencode-ai/console-core/user.js"
+import { Usage } from "@opencode-ai/console-core/usage.js"
 import { ModelTable } from "@opencode-ai/console-core/schema/model.sql.js"
 import { ProviderTable } from "@opencode-ai/console-core/schema/provider.sql.js"
 import { logger } from "./logger"
@@ -44,7 +44,6 @@ import { localeFromRequest } from "~/lib/language"
 import { createModelTpmLimiter } from "./modelTpmLimiter"
 import { createModelTpsLimiter } from "./modelTpsLimiter"
 import { createProviderBudgetTracker } from "./providerBudgetTracker"
-import { accumulateUsage, HOT_WORKSPACES } from "./usageBatcher"
 import { Workspace } from "@opencode-ai/console-core/workspace.js"
 import { countryFromRequest, isModelCountryRestricted } from "~/lib/request-country"
 import { isPeakPricing } from "./pricing"
@@ -774,7 +773,7 @@ export async function handler(
             isNull(LiteTable.timeDeleted),
           ),
         )
-        .where(and(eq(KeyTable.key, zenApiKey), isNull(KeyTable.timeDeleted)))
+        .where(User.activeKey(zenApiKey))
         .then((rows) => rows[0]),
     )
 
@@ -1102,174 +1101,38 @@ export async function handler(
     // Keep period bounds and persisted timestamps on one snapshot when a queued write crosses a reset boundary.
     const trackedAt = new Date()
 
-    // For hot workspaces, batch balance/usage updates through Redis to avoid
-    // row-level lock contention on BillingTable/UserTable. Returns the amount
-    // to flush this request, or null to skip the DB writes entirely.
-    const balanceFlush = await (async () => {
-      if (billingSource !== "subscription" && billingSource !== "lite" && HOT_WORKSPACES.has(authInfo.workspaceID)) {
-        const workspaceCost = billingSource === "free" || billingSource === "byok" ? 0 : cost
-        const flush = await accumulateUsage(authInfo.workspaceID, authInfo.user.id, workspaceCost, cost)
-        return { batched: true as const, flush }
-      }
-      return { batched: false as const, flush: null }
-    })()
-
-    await Database.use((db) =>
-      Promise.all([
-        db.insert(UsageTable).values({
-          workspaceID: authInfo.workspaceID,
-          id: Identifier.create("usage"),
-          model: modelInfo.id,
-          provider: providerInfo.id,
-          inputTokens,
-          outputTokens,
-          reasoningTokens,
-          cacheReadTokens,
-          cacheWrite5mTokens,
-          cacheWrite1hTokens,
-          cost,
-          keyID: authInfo.apiKeyId,
-          sessionID: sessionId.substring(0, 30),
-          enrichment: (() => {
-            if (billingSource === "subscription") return { plan: "sub" }
-            if (billingSource === "byok") return { plan: "byok" }
-            if (billingSource === "lite") return { plan: "lite", costMultiplier: modelInfo.costMultiplier }
-            return undefined
-          })(),
-        }),
-        ...(() => {
-          if (billingSource === "subscription") {
-            const plan = authInfo.billing.subscription!.plan
-            const black = BlackData.getLimits({ plan })
-            const week = getWeekBounds(trackedAt)
-            const rollingWindowSeconds = black.rollingWindow * 3600
-            return [
-              db
-                .update(SubscriptionTable)
-                .set({
-                  fixedUsage: sql`
-              CASE
-                WHEN ${SubscriptionTable.timeFixedUpdated} >= ${week.end} THEN ${SubscriptionTable.fixedUsage}
-                WHEN ${SubscriptionTable.timeFixedUpdated} >= ${week.start} THEN ${SubscriptionTable.fixedUsage} + ${cost}
-                ELSE ${cost}
-              END
-            `,
-                  timeFixedUpdated: sql`
-              CASE
-                WHEN ${SubscriptionTable.timeFixedUpdated} > ${trackedAt} THEN ${SubscriptionTable.timeFixedUpdated}
-                ELSE ${trackedAt}
-              END
-            `,
-                  rollingUsage: sql`
-              CASE
-                WHEN UNIX_TIMESTAMP(${SubscriptionTable.timeRollingUpdated}) >= UNIX_TIMESTAMP(now()) - ${rollingWindowSeconds} THEN ${SubscriptionTable.rollingUsage} + ${cost}
-                ELSE ${cost}
-              END
-            `,
-                  timeRollingUpdated: sql`
-              CASE
-                WHEN UNIX_TIMESTAMP(${SubscriptionTable.timeRollingUpdated}) >= UNIX_TIMESTAMP(now()) - ${rollingWindowSeconds} THEN ${SubscriptionTable.timeRollingUpdated}
-                ELSE now()
-              END
-            `,
-                })
-                .where(
-                  and(
-                    eq(SubscriptionTable.workspaceID, authInfo.workspaceID),
-                    eq(SubscriptionTable.userID, authInfo.user.id),
-                  ),
-                ),
-            ]
-          }
-          if (billingSource === "lite") {
-            const lite = LiteData.getLimits()
-            const week = getWeekBounds(trackedAt)
-            const month = getMonthlyBounds(trackedAt, authInfo.lite!.timeCreated)
-            const rollingWindowSeconds = lite.rollingWindow * 3600
-            const quotaCost = Math.round(cost * modelInfo.costMultiplier)
-            return [
-              db
-                .update(LiteTable)
-                .set({
-                  monthlyUsage: sql`
-              CASE
-                WHEN ${LiteTable.timeMonthlyUpdated} >= ${month.end} THEN ${LiteTable.monthlyUsage}
-                WHEN ${LiteTable.timeMonthlyUpdated} >= ${month.start} THEN ${LiteTable.monthlyUsage} + ${quotaCost}
-                ELSE ${quotaCost}
-              END
-            `,
-                  timeMonthlyUpdated: sql`
-              CASE
-                WHEN ${LiteTable.timeMonthlyUpdated} > ${trackedAt} THEN ${LiteTable.timeMonthlyUpdated}
-                ELSE ${trackedAt}
-              END
-            `,
-                  weeklyUsage: sql`
-              CASE
-                WHEN ${LiteTable.timeWeeklyUpdated} >= ${week.end} THEN ${LiteTable.weeklyUsage}
-                WHEN ${LiteTable.timeWeeklyUpdated} >= ${week.start} THEN ${LiteTable.weeklyUsage} + ${quotaCost}
-                ELSE ${quotaCost}
-              END
-            `,
-                  timeWeeklyUpdated: sql`
-              CASE
-                WHEN ${LiteTable.timeWeeklyUpdated} > ${trackedAt} THEN ${LiteTable.timeWeeklyUpdated}
-                ELSE ${trackedAt}
-              END
-            `,
-                  rollingUsage: sql`
-              CASE
-                WHEN UNIX_TIMESTAMP(${LiteTable.timeRollingUpdated}) >= UNIX_TIMESTAMP(now()) - ${rollingWindowSeconds} THEN ${LiteTable.rollingUsage} + ${quotaCost}
-                ELSE ${quotaCost}
-              END
-            `,
-                  timeRollingUpdated: sql`
-              CASE
-                WHEN UNIX_TIMESTAMP(${LiteTable.timeRollingUpdated}) >= UNIX_TIMESTAMP(now()) - ${rollingWindowSeconds} THEN ${LiteTable.timeRollingUpdated}
-                ELSE now()
-              END
-            `,
-                })
-                .where(and(eq(LiteTable.workspaceID, authInfo.workspaceID), eq(LiteTable.userID, authInfo.user.id))),
-            ]
-          }
-
-          // Batched hot workspace: skip DB writes unless this request is the flush.
-          if (balanceFlush.batched && !balanceFlush.flush) return []
-
-          const workspaceDelta = balanceFlush.flush?.workspaceCost ?? cost
-          const userDelta = balanceFlush.flush?.userCost ?? cost
-          const balanceDelta = billingSource === "free" || billingSource === "byok" ? 0 : workspaceDelta
-
-          return [
-            db
-              .update(BillingTable)
-              .set({
-                balance: sql`${BillingTable.balance} - ${balanceDelta}`,
-                monthlyUsage: sql`
-              CASE
-                WHEN MONTH(${BillingTable.timeMonthlyUsageUpdated}) = MONTH(now()) AND YEAR(${BillingTable.timeMonthlyUsageUpdated}) = YEAR(now()) THEN ${BillingTable.monthlyUsage} + ${workspaceDelta}
-                ELSE ${workspaceDelta}
-              END
-            `,
-                timeMonthlyUsageUpdated: sql`now()`,
-              })
-              .where(eq(BillingTable.workspaceID, authInfo.workspaceID)),
-            db
-              .update(UserTable)
-              .set({
-                monthlyUsage: sql`
-              CASE
-                WHEN MONTH(${UserTable.timeMonthlyUsageUpdated}) = MONTH(now()) AND YEAR(${UserTable.timeMonthlyUsageUpdated}) = YEAR(now()) THEN ${UserTable.monthlyUsage} + ${userDelta}
-                ELSE ${userDelta}
-              END
-            `,
-                timeMonthlyUsageUpdated: sql`now()`,
-              })
-              .where(and(eq(UserTable.workspaceID, authInfo.workspaceID), eq(UserTable.id, authInfo.user.id))),
-          ]
-        })(),
-      ]),
+    // Direct transactional accounting for every workspace: the usage ledger row
+    // and all totals commit or roll back together. No Redis, no batching, and no
+    // post-commit acknowledgement that can strand chargeable usage.
+    await Database.transaction((tx) =>
+      Usage.record(tx, {
+        source: billingSource,
+        workspaceID: authInfo.workspaceID,
+        userID: authInfo.user.id,
+        keyID: authInfo.apiKeyId,
+        sessionID: sessionId,
+        model: modelInfo.id,
+        provider: providerInfo.id,
+        usage: usageInfo,
+        cost,
+        trackedAt,
+        costMultiplier: modelInfo.costMultiplier,
+        subscription:
+          billingSource === "subscription"
+            ? {
+                plan: authInfo.billing.subscription!.plan,
+                rollingWindowSeconds: BlackData.getLimits({ plan: authInfo.billing.subscription!.plan }).rollingWindow * 3600,
+              }
+            : undefined,
+        lite:
+          billingSource === "lite"
+            ? {
+                rollingWindowSeconds: LiteData.getLimits().rollingWindow * 3600,
+                quotaCost: Math.round(cost * modelInfo.costMultiplier),
+                timeCreated: authInfo.lite!.timeCreated,
+              }
+            : undefined,
+      }),
     )
 
     return { costInMicroCents: cost }

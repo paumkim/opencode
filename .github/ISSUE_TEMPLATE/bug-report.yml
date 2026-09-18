@@ -1,5 +1,5 @@
 name: Bug report
-description: Report an issue that should be fixed (avoid pasting giant AI generated summaries or your issue may be closed/ignored)
+description: Report an issue that should be fixed
 body:
   - type: textarea
     id: description
@@ -11,18 +11,10 @@ body:
       required: true
 
   - type: input
-    id: plugins
-    attributes:
-      label: Plugins
-      description: What plugins are you using?
-    validations:
-      required: false
-
-  - type: input
     id: opencode-version
     attributes:
       label: OpenCode version
-      description: What version of OpenCode are you using?
+      description: What version/commit of OpenCode are you using?
     validations:
       required: false
 
@@ -52,7 +44,7 @@ body:
     attributes:
       label: Operating System
       description: what OS are you using?
-      placeholder: e.g., macOS 26.0.1, Ubuntu 22.04, Windows 11
+      placeholder: e.g., Arch Linux, macOS 26.0.1, Ubuntu 22.04, Windows 11
     validations:
       required: false
 

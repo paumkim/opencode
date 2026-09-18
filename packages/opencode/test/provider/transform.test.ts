@@ -1029,6 +1029,87 @@ describe("ProviderTransform.schema - gemini type arrays", () => {
   })
 })
 
+describe("ProviderTransform.schema - gemini orphaned required cleanup", () => {
+  const cases: { name: string; input: Record<string, unknown>; expected: Record<string, unknown> }[] = [
+    { name: "missing properties", input: { required: ["name"] }, expected: {} },
+    { name: "null properties", input: { properties: null, required: ["name"] }, expected: { properties: null } },
+    { name: "string properties", input: { properties: "name", required: ["name"] }, expected: { properties: "name" } },
+    { name: "true properties", input: { properties: true, required: ["name"] }, expected: { properties: true } },
+    { name: "false properties", input: { properties: false, required: ["name"] }, expected: { properties: false } },
+    { name: "zero properties", input: { properties: 0, required: ["name"] }, expected: { properties: 0 } },
+    { name: "number properties", input: { properties: 42, required: ["name"] }, expected: { properties: 42 } },
+    { name: "empty properties", input: { properties: {}, required: ["name"] }, expected: { properties: {} } },
+    {
+      name: "array properties",
+      input: { properties: ["name"], required: ["0", "length"] },
+      expected: { properties: ["name"] },
+    },
+    {
+      name: "all orphaned requirements",
+      input: { properties: { name: { type: "string" } }, required: ["missing"] },
+      expected: { properties: { name: { type: "string" } } },
+    },
+    {
+      name: "empty required",
+      input: { properties: { name: { type: "string" } }, required: [] },
+      expected: { properties: { name: { type: "string" } } },
+    },
+    {
+      name: "mixed requirements",
+      input: { properties: { name: { type: "string" } }, required: ["missing", "name"] },
+      expected: { properties: { name: { type: "string" } }, required: ["name"] },
+    },
+    {
+      name: "valid requirements",
+      input: { properties: { name: { type: "string" } }, required: ["name"] },
+      expected: { properties: { name: { type: "string" } }, required: ["name"] },
+    },
+  ]
+
+  for (const route of [
+    { providerID: "google", api: { id: "model-alias", npm: "@ai-sdk/google" } },
+    { providerID: "github-copilot", api: { id: "gemini-3.5-flash", npm: "@ai-sdk/github-copilot" } },
+  ]) {
+    test.each(cases)(`${route.providerID} cleans $name at root and in nested array objects`, ({ input, expected }) => {
+      const model = { ...mockModel, ...route }
+      const schema = { type: "object", ...input } as Parameters<typeof ProviderTransform.schema>[1]
+      const before = structuredClone(schema)
+
+      expect(ProviderTransform.schema(model, schema)).toEqual({ type: "object", ...expected })
+      expect(
+        ProviderTransform.schema(model, {
+          type: "object",
+          properties: { rows: { type: "array", items: { type: "array", items: schema } } },
+          required: ["rows", "missing"],
+        }),
+      ).toEqual({
+        type: "object",
+        properties: { rows: { type: "array", items: { type: "array", items: { type: "object", ...expected } } } },
+        required: ["rows"],
+      })
+      expect(schema).toEqual(before)
+    })
+  }
+
+  for (const route of [
+    { providerID: "anthropic", api: { id: "claude-sonnet-4", npm: "@ai-sdk/anthropic" } },
+    { providerID: "github-copilot", api: { id: "gpt-4", npm: "@ai-sdk/github-copilot" } },
+  ]) {
+    test.each(cases)(`${route.providerID}/${route.api.id} preserves $name`, ({ input }) => {
+      const schema = { type: "object", ...input } as Parameters<typeof ProviderTransform.schema>[1]
+      const nested = {
+        type: "object",
+        properties: { rows: { type: "array", items: { type: "array", items: schema } } },
+        required: ["rows", "missing"],
+      } as Parameters<typeof ProviderTransform.schema>[1]
+      const before = structuredClone(nested)
+
+      expect(ProviderTransform.schema({ ...mockModel, ...route }, schema)).toEqual(schema)
+      expect(ProviderTransform.schema({ ...mockModel, ...route }, nested)).toEqual(before)
+    })
+  }
+})
+
 describe("ProviderTransform.schema - gemini combiner nodes", () => {
   const geminiModel = {
     providerID: "google",

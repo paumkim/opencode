@@ -13,7 +13,7 @@ import { Snapshot } from "@/snapshot"
 import { Session } from "./session"
 import { LLM } from "./llm"
 import { MessageV2 } from "./message-v2"
-import { isOverflow } from "./overflow"
+import { isOverflow, PreflightError } from "./overflow"
 import { PartID } from "./schema"
 import type { SessionID } from "./schema"
 import { SessionRetry } from "./retry"
@@ -30,16 +30,11 @@ import { EventV2Bridge } from "@/event-v2-bridge"
 import { NotFoundError } from "@/storage/storage"
 import { Database } from "@opencode-ai/core/database/database"
 import { Usage, type LLMEvent } from "@opencode-ai/llm"
-import { check } from "./watcher/watcher"
+import { Watcher } from "./watcher/service"
 
 const DOOM_LOOP_THRESHOLD = 3
 const TEXT_LOOP_THRESHOLD = 3
 const REASONING_LOOP_THRESHOLD = 3
-const NO_EDIT_STREAK_THRESHOLD = 3
-const CHURN_STREAK_THRESHOLD = 3
-const OSCILLATION_WINDOW = 8
-const OSCILLATION_UNIQUE_RATIO = 0.35
-const EDIT_TOOLS = new Set(["edit", "write", "apply_patch"])
 
 // Alternation detection: a model that bounces between two states (e.g. text A
 // → text B → text A → text B) never produces three consecutive identical
@@ -47,27 +42,6 @@ const EDIT_TOOLS = new Set(["edit", "write", "apply_patch"])
 // turn signatures and flag when the pattern is a strict alternation.
 const ALTERNATION_WINDOW = 6
 const ALTERNATION_MIN_UNIQUE = 2
-
-// Build a stable fingerprint for a tool call so we can detect cycles that
-// aren't strictly consecutive (e.g. read A → read B → read A → read B).
-function toolFingerprint(toolName: string, input: unknown): string {
-  const record = isRecord(input) ? input : { value: input }
-  const filePath =
-    typeof record.file_path === "string"
-      ? record.file_path
-      : typeof record.path === "string"
-        ? record.path
-        : typeof record.filePath === "string"
-          ? record.filePath
-          : ""
-  const command =
-    typeof record.command === "string"
-      ? record.command
-      : typeof record.cmd === "string"
-        ? record.cmd
-        : ""
-  return `${toolName}:${filePath || command}`
-}
 
 // Record a turn signature into the rolling per-session window and flag a
 // strict alternation (A → B → A → B) that the consecutive-identity detectors
@@ -97,6 +71,7 @@ export interface ProcessResult {
   result: Result
   noEditStreak: number
   runaway?: boolean
+  preflight?: boolean
 }
 
 export interface WatchEntry {
@@ -163,9 +138,6 @@ interface ProcessorContext extends Input {
   stateChanged: boolean
   alternationDetected: boolean
   noEditStreak: number
-  churnStreak: number
-  churnTarget: string
-  recentTools: string[]
   turnStarted: number
   lastDelta: number
 }
@@ -191,6 +163,7 @@ const layer = Layer.effect(
     const events = yield* EventV2Bridge.Service
     const checkpoint = yield* Checkpoint.Service
     const database = yield* Database.Service
+    const watcher = yield* Watcher.Service
 
     // Repetition streaks persist across turns. create() runs once per
     // assistant message, so per-turn state cannot catch a model that repeats
@@ -225,13 +198,11 @@ reasoningMap: {},
         stateChanged: false,
         alternationDetected: false,
         noEditStreak: 0,
-        churnStreak: 0,
-        churnTarget: "",
-        recentTools: [],
         turnStarted: Date.now(),
         lastDelta: Date.now(),
       }
       let aborted = false
+      let preflight = false
 
       const parse = (e: unknown) =>
         MessageV2.fromError(e, {
@@ -332,7 +303,7 @@ const saveToolLearning = Effect.fn("SessionProcessor.saveToolLearning")(function
         args?: any
       }) {
         try {
-          const home = globalThis.process.env.HOME ?? "/root"
+          const home = globalThis.process.env.OPENCODE_TEST_HOME ?? globalThis.process.env.HOME ?? "/root"
           const file = path.join(home, ".term", ".agents", "data", "term-memory", "tool-learnings.jsonl")
           const entry = {
             time: new Date().toISOString(),
@@ -391,126 +362,31 @@ const saveToolLearning = Effect.fn("SessionProcessor.saveToolLearning")(function
 
       // ── Self-Watch ──────────────────────────────────────────────
       // The session watches itself AND its child/subagent sessions.
-      // No separate model needed — the parent model IS the watcher.
-      // It reads its own state + children's state and produces verdicts.
+      // Uses the Watcher service for TF-IDF + Logistic Regression
+      // stall detection with full session info + latest messages.
 
       const selfWatch = Effect.fn("SessionProcessor.selfWatch")(function* () {
-        const now = Date.now()
-        const stallThreshold = (yield* config.get()).experimental?.stall_threshold ?? 30
-
-        const buildSummary = (info: Session.Info, secondsSinceTurn: number): Effect.Effect<string> => {
-          return Effect.gen(function* () {
-            const parts: string[] = []
-            if (info.title && info.title !== "New session") {
-              parts.push(`Session: ${info.title}`)
-            }
-
-            const secondsAgo = Math.floor((now - info.time.updated) / 1000)
-            const minutesAgo = Math.floor(secondsAgo / 60)
-
-            if (secondsAgo < 5) {
-              parts.push("actively generating")
-            } else if (secondsAgo < stallThreshold) {
-              parts.push(`last activity ${secondsAgo} seconds ago`)
-            } else if (minutesAgo < 2) {
-              parts.push(`last activity ${secondsAgo} seconds ago`)
-            } else if (minutesAgo < 15) {
-              parts.push(`last activity ${minutesAgo} minutes ago`)
-            } else {
-              parts.push(`last activity ${minutesAgo} minutes ago, possibly stalled`)
-            }
-
-            if (secondsSinceTurn > stallThreshold) {
-              parts.push(`no activity for ${secondsSinceTurn} seconds — stalled`)
-            }
-
-            if (info.tokens) {
-              if (info.tokens.output > 0) parts.push(`${info.tokens.output} tokens generated`)
-              if (info.tokens.input > 0) parts.push(`${info.tokens.input} input tokens`)
-            }
-
-            if (info.summary) {
-              const s = info.summary
-              const changes: string[] = []
-              if (s.additions > 0) changes.push(`+${s.additions} lines`)
-              if (s.deletions > 0) changes.push(`-${s.deletions} lines`)
-              if (s.files > 0) changes.push(`${s.files} files`)
-              if (changes.length > 0) parts.push(`code changes: ${changes.join(", ")}`)
-            }
-
-            const msgs = yield* session.messages({ sessionID: info.id, limit: 1 }).pipe(
-              Effect.catchIf(NotFoundError.isInstance, () => Effect.succeed([] as const)),
-            )
-            if (msgs.length > 0) {
-              const lastMsg = msgs[msgs.length - 1]
-              if (lastMsg) {
-                const textParts = (lastMsg.parts ?? []).filter(
-                  (p): p is SessionV1.TextPart => p.type === "text",
-                )
-                const text = textParts.map((p) => p.text).join(" ").trim().slice(0, 200)
-                if (text) parts.push(`latest ${lastMsg.info.role}: ${text}`)
-              }
-            }
-
-            return parts.join(". ")
-          })
-        }
-
-        const checkOne = (info: Session.Info, secondsSinceTurn: number): Effect.Effect<WatchEntry> => {
-          return Effect.gen(function* () {
-            const summary = yield* buildSummary(info, secondsSinceTurn)
-            const secondsAgo = Math.floor((now - info.time.updated) / 1000)
-
-            const hasContent =
-              (info.tokens && (info.tokens.output > 0 || info.tokens.input > 0)) ||
-              (info.summary && (info.summary.additions > 0 || info.summary.deletions > 0 || info.summary.files > 0))
-
-            if (!hasContent || secondsSinceTurn > stallThreshold) {
-              return {
-                sessionID: info.id,
-                title: info.title,
-                status: "STALLED" as const,
-                summary,
-                secondsSinceUpdate: secondsAgo,
-                secondsSinceTurn,
-              }
-            }
-
-            return {
-              sessionID: info.id,
-              title: info.title,
-              status: check(summary),
-              summary,
-              secondsSinceUpdate: secondsAgo,
-              secondsSinceTurn,
-            }
-          })
-        }
-
-        // Check self — catch any error so watch never throws
-        const selfInfo = yield* session.get(input.sessionID).pipe(
-          Effect.catchIf(NotFoundError.isInstance, () => Effect.succeed(null as Session.Info | null)),
+        // Check self
+        const self = yield* watcher.check(input.sessionID, ctx.lastDelta).pipe(
+          Effect.catchIf(NotFoundError.isInstance, () => Effect.succeed(null)),
         )
-        if (!selfInfo) return [] as unknown as WatchEntry[]
-
-        const selfSecondsSinceTurn = Math.floor((now - ctx.lastDelta) / 1000)
-        const self = yield* checkOne(selfInfo, selfSecondsSinceTurn)
+        if (!self) return []
 
         // Check children (subagent sessions)
         const children = yield* session.children(input.sessionID).pipe(
           Effect.catchIf(NotFoundError.isInstance, () => Effect.succeed([] as const)),
         )
         const childResults = yield* Effect.all(
-          children.map((c) => {
-            const childSecondsSinceTurn = Math.floor((now - ctx.lastDelta) / 1000)
-            return checkOne(c, childSecondsSinceTurn)
-          }),
+          children.map((c) =>
+            watcher.check(c.id).pipe(
+              Effect.catchIf(NotFoundError.isInstance, () => Effect.succeed(null)),
+            ),
+          ),
           { concurrency: "unbounded" },
         )
 
-        const all: WatchEntry[] = [self, ...childResults]
-        return all
-      }) as () => Effect.Effect<WatchEntry[]>
+        return [self, ...childResults.filter((result) => result !== null)]
+      })
 
       const finishReasoning = Effect.fn("SessionProcessor.finishReasoning")(function* (reasoningID: string) {
         if (!(reasoningID in ctx.reasoningMap)) return
@@ -707,48 +583,8 @@ const reasoning = ctx.reasoningMap[value.id]
                 : value.providerMetadata,
             }))
 
-            // Track whether this step produced a file edit. Models that
-            // only read/search/delete without ever editing will churn
-            // indefinitely on newer, less-instructed model generations.
-            if (EDIT_TOOLS.has(value.name)) ctx.hasEditInStep = true
-
-            // Churn: editing the same file over and over without net progress.
-            // A write that merely reverts the previous edit shouldn't reset
-            // the streak — it's still spinning, just in a different direction.
-            if (EDIT_TOOLS.has(value.name)) {
-              const fp = toolFingerprint(value.name, input)
-              ctx.churnStreak = fp === ctx.churnTarget ? ctx.churnStreak + 1 : 1
-              ctx.churnTarget = fp
-              if (ctx.churnStreak >= CHURN_STREAK_THRESHOLD) {
-                ctx.loopDetected = true
-                yield* Effect.logError("churn_loop", {
-                  "session.id": ctx.sessionID,
-                  messageID: ctx.assistantMessage.id,
-                  file: fp,
-                  streak: ctx.churnStreak,
-                })
-              }
-            }
-
-            // Oscillation: cycling between a small set of tools/files without
-            // ever landing. Unlike doom_loop this catches non-consecutive
-            // repeats (read A → read B → read A → read B).
-            ctx.recentTools = [...ctx.recentTools, toolFingerprint(value.name, input)].slice(
-              -OSCILLATION_WINDOW,
-            )
-            if (ctx.recentTools.length >= OSCILLATION_WINDOW) {
-              const unique = new Set(ctx.recentTools).size
-              if (unique / ctx.recentTools.length <= OSCILLATION_UNIQUE_RATIO) {
-                ctx.loopDetected = true
-                yield* Effect.logError("oscillation_loop", {
-                  "session.id": ctx.sessionID,
-                  messageID: ctx.assistantMessage.id,
-                  unique,
-                  total: ctx.recentTools.length,
-                  tools: [...new Set(ctx.recentTools)].join(","),
-                })
-              }
-            }
+            // Attempts are not progress. Cross-turn recovery observes settled
+            // tool parts in prompt.runLoop; snapshots below drive checkpoints.
 
             const parts = yield* MessageV2.parts(ctx.assistantMessage.id).pipe(
               Effect.provideService(Database.Service, database),
@@ -1094,6 +930,11 @@ if (ctx.currentText.text.trim()) {
       })
 
       const halt = Effect.fn("SessionProcessor.halt")(function* (e: unknown) {
+        if (e instanceof PreflightError) {
+          ctx.needsCompaction = true
+          preflight = true
+          return
+        }
         yield* Effect.logError("process", {
           "session.id": input.sessionID,
           messageID: input.assistantMessage.id,
@@ -1127,9 +968,12 @@ if (ctx.currentText.text.trim()) {
           messageID: input.assistantMessage.id,
         })
         ctx.needsCompaction = false
+        preflight = false
         ctx.shouldBreak = (yield* config.get()).experimental?.continue_loop_on_deny !== true
 
         return yield* Effect.gen(function* () {
+          let emptyRetries = 0
+          let outputSeen = false
           yield* Effect.gen(function* () {
             ctx.currentText = undefined
             ctx.reasoningMap = {}
@@ -1140,22 +984,70 @@ if (ctx.currentText.text.trim()) {
             ctx.stateChanged = false
             ctx.turnStarted = Date.now()
             ctx.lastDelta = Date.now()
-            yield* status.set(ctx.sessionID, { type: "busy" })
-            const stream = llm.stream(streamInput)
-
             const streamDelay = (yield* config.get()).experimental?.stream_delay ?? 0
-
-            yield* stream.pipe(
-              Stream.mapEffect((event) => {
-                if (streamDelay > 0 && (event.type === "text-delta" || event.type === "reasoning-delta")) {
-                  return Effect.sleep(Duration.millis(streamDelay)).pipe(Effect.as(event))
-                }
-                return Effect.succeed(event)
-              }),
-              Stream.tap((event) => handleEvent(event)),
-              Stream.takeUntil(() => ctx.needsCompaction),
-              Stream.runDrain,
-            )
+            while (true) {
+              const baseline = new Set((yield* MessageV2.parts(ctx.assistantMessage.id).pipe(
+                Effect.provideService(Database.Service, database),
+              )).map((part) => part.id))
+              const previous = {
+                finish: ctx.assistantMessage.finish,
+                tokens: ctx.assistantMessage.tokens,
+                cost: ctx.assistantMessage.cost,
+              }
+              yield* status.set(ctx.sessionID, { type: "busy" })
+              const stream = llm.stream({ ...streamInput, preflight: !ctx.assistantMessage.summary && streamInput.preflight !== false })
+              yield* stream.pipe(
+                Stream.mapEffect((event) => {
+                  if (streamDelay > 0 && (event.type === "text-delta" || event.type === "reasoning-delta")) {
+                    return Effect.sleep(Duration.millis(streamDelay)).pipe(Effect.as(event))
+                  }
+                  return Effect.succeed(event)
+                }),
+                Stream.tap((event) => {
+                  // Only absent/unknown finishes with no usage or content are replayable.
+                  // Keep this sticky across provider-error retries to never replay prior output.
+                  if (event.type === "step-finish" || event.type === "finish") {
+                    outputSeen ||= event.reason !== "unknown" || Object.values(event.usage ?? {}).some(
+                      (value) => value !== undefined && value !== 0,
+                    )
+                  } else if (event.type === "text-delta" || event.type === "reasoning-delta") {
+                    outputSeen ||= event.text.length > 0
+                  } else if (!["step-start", "text-start", "text-end", "reasoning-start", "reasoning-end"].includes(event.type)) {
+                    outputSeen = true
+                  }
+                  // Opaque reasoning/refusal metadata is not evidence of an empty response.
+                  outputSeen ||= "providerMetadata" in event && event.providerMetadata !== undefined
+                  return handleEvent(event)
+                }),
+                Stream.takeUntil(() => ctx.needsCompaction),
+                Stream.runDrain,
+              )
+              if (outputSeen || aborted || ctx.needsCompaction || ctx.blocked || ctx.loopDetected || ctx.assistantMessage.error) return
+              const parts = (yield* MessageV2.parts(ctx.assistantMessage.id).pipe(
+                Effect.provideService(Database.Service, database),
+              )).filter((part) => !baseline.has(part.id))
+              // Do not discard patches or content synthesized by plugins.
+              if (parts.some((part) => !(part.type === "step-start" || part.type === "step-finish" ||
+                ((part.type === "text" || part.type === "reasoning") && part.text === "")))) return
+              for (const part of parts) {
+                yield* session.removePart({ sessionID: ctx.sessionID, messageID: ctx.assistantMessage.id, partID: part.id })
+              }
+              ctx.currentText = undefined
+              ctx.reasoningMap = {}
+              Object.assign(ctx.assistantMessage, previous)
+              yield* session.updateMessage(ctx.assistantMessage)
+              if (emptyRetries === 2) {
+                ctx.assistantMessage.finish = "error"
+                yield* halt(new Error("Provider returned an empty response after 2 retries"))
+                return
+              }
+              emptyRetries += 1
+              const wait = SessionRetry.delay(emptyRetries)
+              yield* status.set(ctx.sessionID, {
+                type: "retry", attempt: emptyRetries, message: "Provider returned an empty response", next: Date.now() + wait,
+              })
+              yield* Effect.sleep(Duration.millis(wait))
+            }
           }).pipe(
             Effect.onInterrupt(() =>
               Effect.gen(function* () {
@@ -1188,7 +1080,7 @@ if (ctx.currentText.text.trim()) {
             Effect.ensuring(cleanup()),
           )
 
-          if (ctx.needsCompaction) return { result: "compact" as const, noEditStreak: ctx.noEditStreak, runaway: ctx.runawayDetected }
+          if (ctx.needsCompaction) return { result: "compact" as const, noEditStreak: ctx.noEditStreak, runaway: ctx.runawayDetected, ...(preflight ? { preflight: true } : {}) }
           if (ctx.blocked || ctx.assistantMessage.error)
             return { result: "stop" as const, noEditStreak: ctx.noEditStreak, runaway: ctx.runawayDetected }
           // Record the turn signature and check for strict alternation
@@ -1218,14 +1110,7 @@ if (ctx.currentText.text.trim()) {
           }
           const noEditStreak = ctx.hasEditInStep ? 0 : ctx.noEditStreak + 1
           ctx.noEditStreak = noEditStreak
-          if (noEditStreak >= NO_EDIT_STREAK_THRESHOLD) {
-            ctx.loopDetected = true
-            yield* Effect.logError("no_edit_loop", {
-              "session.id": input.sessionID,
-              messageID: input.assistantMessage.id,
-              streak: noEditStreak,
-            })
-          }
+
           ctx.hasEditInStep = false
           return { result: "continue" as const, noEditStreak, runaway: ctx.runawayDetected }
         })
@@ -1249,12 +1134,7 @@ get loopReason() {
             if (ctx.alternationDetected) return "alternation"
             if (textLoop.get(ctx.sessionID)?.count && textLoop.get(ctx.sessionID)!.count >= TEXT_LOOP_THRESHOLD) return "text"
             if (reasoningLoop.get(ctx.sessionID)?.count && reasoningLoop.get(ctx.sessionID)!.count >= REASONING_LOOP_THRESHOLD) return "reasoning"
-            if (ctx.churnStreak >= CHURN_STREAK_THRESHOLD) return "churn"
-            if (ctx.recentTools.length >= OSCILLATION_WINDOW) {
-              const unique = new Set(ctx.recentTools).size
-              if (unique / ctx.recentTools.length <= OSCILLATION_UNIQUE_RATIO) return "oscillation"
-            }
-            if (ctx.noEditStreak >= NO_EDIT_STREAK_THRESHOLD) return "no_edit"
+
             return "doom"
           },
         updateToolCall,
@@ -1285,6 +1165,7 @@ export const node = LayerNode.make({
     EventV2Bridge.node,
     Checkpoint.node,
     Database.node,
+    Watcher.node,
   ],
 })
 

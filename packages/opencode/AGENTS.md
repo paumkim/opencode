@@ -2,15 +2,15 @@
 
 ## Database
 
-- **Schema**: Drizzle schema lives in `packages/core/src/**/*.sql.ts`.
+- **Schema**: opencode storage entrypoint is `src/storage/schema.ts`, which re-exports Drizzle tables from `@opencode-ai/core` (`packages/core/src/**/*.sql.ts`, e.g. `src/database/schema.sql.ts`).
 - **Migrations**: database migrations live in `packages/core` and are applied by core.
 
 ## Development server
 
-- Running `bun dev` from `packages/opencode` starts the live interactive TUI. Do not run it as a blocking foreground command when you need to inspect the result.
-- Start it in `tmux` instead: `tmux new-session -d -s opencode-dev 'bun dev'`.
-- Capture the current TUI output with: `tmux capture-pane -pt opencode-dev`.
-- Stop the session explicitly when done: `tmux kill-session -t opencode-dev`.
+- Running `bun dev` (shorthand for `bun run ./src/index.ts`, see the `dev` script in `package.json`) from `packages/opencode` starts the live interactive TUI. Do not run it as a blocking foreground command when you need to inspect the result.
+- Use the `ghostty_terminal` tool instead of `tmux`: `create` a named terminal running `bun dev`, then `write` input and `screen` to inspect the TUI viewport.
+- Prefer `ghostty_terminal create/write/screen` over `tmux send-keys` / `tmux capture-pane` polling: it is the default fast path for interactive, TUI, and persistent process work.
+- Dispose the named terminal when done.
 
 # Module shape
 
@@ -98,14 +98,14 @@ See `specs/effect/migration.md` for the compact pattern reference and examples.
 
 ## Runtime vs InstanceState
 
-- Use `makeRuntime` (from `src/effect/run-service.ts`) for all services. It returns `{ runPromise, runFork, runCallback }` backed by a shared `memoMap` that deduplicates layers.
+- Use `makeRuntime` (from `src/effect/run-service.ts`) for all services. It returns `{ runSync, runPromiseExit, runPromise, runFork, runCallback }` backed by a shared `memoMap` that deduplicates layers.
 - Use `InstanceState` (from `src/effect/instance-state.ts`) for per-directory or per-project state that needs per-instance cleanup. It uses `ScopedCache` keyed by directory — each open project gets its own state, automatically cleaned up on disposal.
 - If two open directories should not share one copy of the service, it needs `InstanceState`.
 - Do the work directly in the `InstanceState.make` closure — `ScopedCache` handles run-once semantics. Don't add fibers, `ensure()` callbacks, or `started` flags on top.
 - Use `Effect.addFinalizer` or `Effect.acquireRelease` inside the `InstanceState.make` closure for cleanup (subscriptions, process teardown, etc.).
 - Use `Effect.forkScoped` inside the closure for background stream consumers — the fiber is interrupted when the instance is disposed.
 - To make a service's `init()` non-blocking, fork `InstanceState.get(state)` at the `init()` call site (e.g. `Effect.forkIn(scope)`), not by forking work inside the `InstanceState.make` closure. Forking inside the closure leaves state incomplete for other methods that read it.
-- `src/project/bootstrap.ts` already wraps every service `init()` in `Effect.forkDetach`, so `init()` is fire-and-forget in production. Keep `init()` methods synchronous internally; the caller controls concurrency.
+- `src/project/bootstrap.ts` awaits every service `init()` via `Effect.forEach` with unbounded concurrency (each service self-manages slow work via `Effect.forkScoped` against its per-instance state scope), so keep `init()` methods synchronous internally; the caller controls concurrency.
 
 ## Effect v4 beta API
 

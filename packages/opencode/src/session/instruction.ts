@@ -72,6 +72,8 @@ const layer: Layer.Layer<
         Effect.succeed({
           // Track which instruction files have already been attached for a given assistant message.
           claims: new Map<MessageID, Set<string>>(),
+          // Cache instruction file contents keyed by path.
+          cache: new Map<string, string>(),
         }),
       ),
     )
@@ -89,7 +91,12 @@ const layer: Layer.Layer<
     })
 
     const read = Effect.fnUntraced(function* (filepath: string) {
-      return yield* fs.readFileString(filepath).pipe(Effect.catch(() => Effect.succeed("")))
+      const s = yield* InstanceState.get(state)
+      const cached = s.cache.get(filepath)
+      if (cached !== undefined) return cached
+      const content = yield* fs.readFileString(filepath).pipe(Effect.catch(() => Effect.succeed("")))
+      s.cache.set(filepath, content)
+      return content
     })
 
     const fetch = Effect.fnUntraced(function* (url: string) {

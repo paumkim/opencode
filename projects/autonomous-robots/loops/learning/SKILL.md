@@ -1,15 +1,32 @@
 ---
 name: learning
 description: >
-  The learning loop handles adaptation from experience and policy improvement. It
-  collects experience data, computes reward signals, evaluates current policies,
-  improves them through gradient-based or evolutionary updates, and generalizes
-  across tasks. Trigger keywords: learning, adaptation, reinforcement learning,
+  Design specification for a proposed learning loop: adaptation from experience
+  and policy improvement. It would collect experience data, compute reward
+  signals, evaluate current policies, improve them through gradient-based or
+  evolutionary updates, and generalize across tasks. Not a runnable module.
+  Trigger keywords: learning, adaptation, reinforcement learning,
   policy improvement, experience-based, training, neural plasticity, skill
   acquisition.
 ---
 
 # Learning Loop
+
+## Current Status and Deployment Boundary
+
+**Design specification, not a runnable module.** All robot loops currently have
+only `SKILL.md`; `src/` implements a generic software supervisory runtime, not
+learning algorithms, replay storage, or robot policies. The interfaces,
+parameters, integrations, and examples below describe proposed behavior.
+
+Learned outputs are **candidates**, not permission to deploy. Deployment requires
+validation, explicit operator approval, and a rollback plan retaining a known
+approved policy. These gates are requirements, not implemented runtime features.
+Hardware limits must be immutable to learning; adaptive advisory setpoints must
+remain inside them. A reward penalty is not a safety constraint. Physical work
+would require independent, always-on monitoring and protective controls outside
+the sequential JS runtime, which provides no actuator enforcement, hardware
+safety certification, real-time guarantees, or persistence/resume.
 
 ## Purpose
 
@@ -101,8 +118,9 @@ The learning loop is a **cross-cutting layer** that connects to all other loops:
   meta-control to allocate additional exploration budget.
 - **Sensorimotor** (downstream): Receives updated control policies and parameter
   adjustments. Streams (state, action, outcome) experience data for offline
-  learning. When learning produces a new policy, sensorimotor can hot-swap to the
-  improved version at the next safe boundary.
+  learning. A newly learned policy is a candidate that must pass validation and
+  explicit operator approval (with rollback) before any deployment; "hot-swap"
+  at a safe boundary is proposed, not implemented.
 - **Planning** (sideways): Receives improved cost models and dynamics predictions
   from the predictor template. Planning reports plan success/failure data and
   trajectory deviations. When planning's models are updated, it re-evaluates
@@ -125,7 +143,7 @@ The learning loop is a **cross-cutting layer** that connects to all other loops:
 | `convergence_threshold` | 0.001 | Minimum policy improvement per iteration to continue training |
 | `replay_buffer_size` | 10000 | Maximum number of experience tuples retained for replay |
 
-## Example
+## Example (Conceptual)
 
 **Task**: A robotic arm must learn to grasp novel objects it has never encountered
 before.
@@ -141,8 +159,13 @@ before.
 4. **learn**: Using the RL template, the loop runs a policy gradient update on the
    collected batch of grasp attempts. The policy learns that wider finger spread
    and slightly higher grip force improve success on this object category.
-5. **update**: The updated grasp policy parameters are written to the sensorimotor
-   loop's grasp controller. The next grasp attempt uses the improved policy.
+5. **update**: The updated grasp policy parameters are stored as a **candidate**
+   policy, not deployed. The candidate is validated against the grasp
+   controller's safety envelope, then submitted for explicit operator approval.
+   On approval, the previously approved policy is retained as the rollback
+   target and the candidate is deployed to the sensorimotor loop's grasp
+   controller; the next grasp attempt uses the improved policy. Without
+   approval, the candidate remains stored and the current policy stays active.
 6. **generalize**: The learning loop recognizes that this object shares geometric
    features with previously encountered objects and applies transfer learning to
    adapt the policy for similar shapes. It packages the refined grasp strategy as

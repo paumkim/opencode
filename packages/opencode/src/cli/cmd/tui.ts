@@ -140,6 +140,10 @@ export const TuiThreadCommand = cmd({
       .option("demo", {
         type: "boolean",
         hidden: true,
+      })
+      .option("shared", {
+        type: "boolean",
+        describe: "enable shared workspace mode (multiple TUIs, one server)",
       }),
   handler: async (args) => {
     if (args.replay === true) {
@@ -293,6 +297,7 @@ export const TuiThreadCommand = cmd({
               fork: args.fork,
               auto: args.auto || args.yolo || args["dangerously-skip-permissions"],
             },
+            shared: args.shared || process.env.OPENCODE_SHARED_WORKSPACE === "true",
           }),
         )
       } finally {

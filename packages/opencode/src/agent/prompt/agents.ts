@@ -1,4 +1,4 @@
-import { LOOP_AWARENESS, LOOP_WORD_GUARD, PARALLEL_READING, SILENT_EXECUTION, wrapSystemDirective } from "./shared"
+import { LOOP_AWARENESS, LOOP_WORD_GUARD, PARALLEL_READING, SILENT_EXECUTION, wrapSystemDirective } from "@/session/prompt/shared"
 
 export const PROMPT_EXPLORE =
   wrapSystemDirective(LOOP_AWARENESS) +

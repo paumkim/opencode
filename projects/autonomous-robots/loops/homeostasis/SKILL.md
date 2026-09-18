@@ -1,26 +1,45 @@
 ---
 name: homeostasis
 description: >
-  The homeostasis loop handles internal state regulation for the robot. It
-  continuously monitors vital signs — battery level, temperature, CPU usage,
-  motor current — compares them against setpoints and safety margins, detects
-  deviations, prioritizes which needs attention first, selects and executes
-  corrective actions (power-saving, cooling, maintenance), and verifies the
-  response. Trigger keywords: homeostasis, internal state, battery, power
-  management, thermal regulation, resource monitoring, energy budget,
-  self-maintenance, vital signs, health monitoring.
+  Design specification for a proposed homeostasis loop: internal state
+  regulation for the robot. It would continuously monitor vital signs —
+  battery level, temperature, CPU usage, motor current — compare them against
+  setpoints and safety margins, detect deviations, prioritize which needs
+  attention first, select and execute corrective actions (power-saving, cooling,
+  maintenance), and verify the response. Not a runnable module. Trigger
+  keywords: homeostasis, internal state, battery, power management, thermal
+  regulation, resource monitoring, energy budget, self-maintenance, vital
+  signs, health monitoring.
 ---
 
 # Homeostasis Loop
 
+## Current Status and Safety Boundary
+
+**Design specification, not a runnable module.** All robot loops currently have
+only `SKILL.md`; `src/` is a generic software supervisory runtime. The regulation
+policies, monitoring, integrations, and parameters below are not implemented.
+There is no hardware safety certification, actuator enforcement, real-time or
+latency guarantee, persistence/resume, or adaptive scheduling.
+
+Any physical operation requires independent, always-on physical monitoring and
+protective controls **outside the sequential JavaScript runtime**. Foreground
+context switching or homeostasis teardown must never disable that monitoring.
+The software watchdog/interlock cannot replace it. `clearViolations()` clears
+history only; a critical software halt stays latched until explicit `reset()`.
+Reset rearms software admission, not physical clearance or authorization to move.
+
+Hardware limits are immutable to learning and mission urgency. Adaptive advisory
+setpoints must remain inside those limits; changing a learned response policy
+requires validation, explicit operator approval, and a rollback plan. These
+physical safeguards and deployment gates are requirements, not implemented checks.
+
 ## Purpose
 
-The homeostasis loop is the **internal regulation layer** of the autonomous
-robotics framework. While sensorimotor reacts to the external world and planning
-anticipates future goals, homeostasis ensures the robot's own physical and
-computational systems remain within safe, sustainable operating ranges. It is
-the robot's autonomic nervous system: always running, always watching, and
-always ready to intervene when a vital sign drifts toward danger.
+The proposed homeostasis loop is an **advisory internal regulation layer**:
+assess battery, thermal, and compute conditions and recommend responses. It is
+not an always-on protective layer in this runtime and cannot ensure safe
+physical operating ranges.
 
 The core cycle is: **monitor → assess → prioritize → act → verify → adapt**.
 
@@ -112,8 +131,8 @@ problem and the available models:
 
 ## Integration
 
-The homeostasis loop is a **parallel layer** that runs continuously alongside
-all other loops:
+The proposed homeostasis loop would perform periodic or on-demand advisory
+assessments while activated, not run continuously alongside all other loops:
 
 - **Meta-control** (upstream): Reports critical states that may require
   mission-level re-sequencing. When a vital sign crosses the `critical_threshold`,
@@ -159,7 +178,7 @@ all other loops:
 | `response_urgency` | 0.7 | Minimum priority score (0–1) for a deviation to trigger an immediate corrective action |
 | `adaptation_rate` | 0.05 | Learning rate for updating setpoints and response policies based on observed effectiveness |
 
-## Example
+## Example (Conceptual)
 
 **Task**: A mobile robot is exploring an unknown maze to map its layout. During
 exploration, the battery level drops to 15% and the motor temperature rises to
@@ -180,8 +199,10 @@ exploration, the battery level drops to 15% and the motor temperature rises to
    `response_urgency` of 0.7.
 4. **act**: The homeostasis loop selects a cooling action: reduce motor output
    by 20% and activate cooling fans at 80% speed. This command is dispatched to
-   sensorimotor. The battery deviation is below `response_urgency` for immediate
-   action, so it is logged for the next cycle.
+   sensorimotor. The battery deviation also exceeds `response_urgency`, but it
+   is deferred because temperature ranks higher and the loop acts on the
+   highest-priority deviation first; the battery deviation is logged for the
+   next cycle.
 5. **verify**: After 5 seconds, the homeostasis loop re-reads vital signs.
    Motor temperature has dropped to 72°C and is now stable. The cooling action
    was effective. Battery is at 14.5% — still declining but slowly.
@@ -197,6 +218,8 @@ mission. Planning receives the task deferral signal and pauses the mapping
 sub-goals. The robot navigates back to the charging station, plugs in, and
 resumes exploration once the battery is restored to 90%.
 
-Throughout, the homeostasis loop continues monitoring at 10 Hz, ensuring that
-temperature, CPU, and motor current remain within safe ranges during the
-return-to-base maneuver.
+Throughout this conceptual example, the proposed homeostasis loop would
+continue monitoring at 10 Hz, aiming to keep temperature, CPU, and motor
+current within safe ranges during the return-to-base maneuver. In an actual
+deployment, that protection must come from independent, always-on physical
+monitoring outside this runtime, not from this design spec.

@@ -1,7 +1,7 @@
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { afterEach, describe, expect } from "bun:test"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
-import { Cause, Effect, Exit, Layer, Stream } from "effect"
+import { Cause, Deferred, Effect, Exit, Fiber, Layer, Stream } from "effect"
 import path from "path"
 import { Agent } from "../../src/agent/agent"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
@@ -313,12 +313,108 @@ describe("tool.read env file permissions", () => {
 })
 
 describe("tool.read truncation", () => {
+  for (const offset of [undefined, 2, 3]) {
+    it.instance(`clamps zero file limit and advances pagination at offset ${offset ?? "default"}`, () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "lines.txt")
+        yield* put(filepath, "first\nsecond\nthird")
+
+        const result = yield* run({ filePath: filepath, limit: 0, offset })
+        const start = offset ?? 1
+        const text = ["first", "second", "third"][start - 1]
+        expect(result.metadata.preview).toBe(text)
+        expect(result.metadata.truncated).toBe(start < 3)
+        expect(result.metadata.display).toEqual({
+          type: "file",
+          path: filepath,
+          text,
+          lineStart: start,
+          lineEnd: start,
+          totalLines: 3,
+          truncated: start < 3,
+        })
+        expect(result.output).toContain(`${start}: ${text}`)
+        expect(result.output).not.toContain(`${start + 1}:`)
+        expect(result.output).toContain(
+          start < 3
+            ? `Showing lines ${start}-${start} of 3. Use offset=${start + 1} to continue.`
+            : "End of file - total 3 lines",
+        )
+      }),
+    )
+
+    it.instance(`clamps zero directory limit and advances pagination at offset ${offset ?? "default"}`, () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "folder")
+        yield* put(path.join(filepath, "a.txt"), "a")
+        yield* put(path.join(filepath, "b.txt"), "b")
+        yield* put(path.join(filepath, "c.txt"), "c")
+
+        const result = yield* run({ filePath: filepath, limit: 0, offset })
+        const start = offset ?? 1
+        const entry = ["a.txt", "b.txt", "c.txt"][start - 1]
+        expect(result.metadata.preview).toBe(entry)
+        expect(result.metadata.truncated).toBe(start < 3)
+        expect(result.metadata.display).toEqual({
+          type: "directory",
+          path: filepath,
+          entries: [entry],
+          offset: start,
+          totalEntries: 3,
+          truncated: start < 3,
+        })
+        expect(result.output).toContain(`<entries>\n${entry}\n`)
+        expect(result.output).toContain(
+          start < 3
+            ? `Showing 1 of 3 entries. Use 'offset' parameter to read beyond entry ${start + 1}`
+            : "(3 entries)",
+        )
+      }),
+    )
+  }
+
+  it.instance("allows zero limit on an empty file but preserves offset validation", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const filepath = path.join(test.directory, "empty.txt")
+      yield* put(filepath, "")
+
+      const result = yield* run({ filePath: filepath, limit: 0 })
+      expect(result.metadata.preview).toBe("")
+      expect(result.metadata.truncated).toBe(false)
+      expect(result.metadata.display).toMatchObject({ text: "", lineStart: 1, lineEnd: 0, totalLines: 0 })
+      expect(result.output).toContain("End of file - total 0 lines")
+      expect(result.output).not.toContain("Use offset=")
+
+      const err = yield* fail(test.directory, { filePath: filepath, limit: 0, offset: 2 })
+      expect(err.message).toContain("Offset 2 is out of range for this file (0 lines)")
+    }),
+  )
+
+  it.instance("allows zero limit on an empty directory without suggesting another page", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const filepath = path.join(test.directory, "empty")
+      const fs = yield* FSUtil.Service
+      yield* fs.makeDirectory(filepath)
+
+      for (const offset of [undefined, 2]) {
+        const result = yield* run({ filePath: filepath, limit: 0, offset })
+        expect(result.metadata.preview).toBe("")
+        expect(result.metadata.truncated).toBe(false)
+        expect(result.metadata.display).toMatchObject({ entries: [], offset: offset ?? 1, totalEntries: 0 })
+        expect(result.output).toContain("(0 entries)")
+        expect(result.output).not.toContain("beyond entry")
+      }
+    }),
+  )
+
   it.instance("truncates large file by bytes and sets truncated metadata", () =>
     Effect.gen(function* () {
       const test = yield* TestInstance
-      const base = yield* load(path.join(FIXTURES_DIR, "models-api.json"))
-      const target = 60 * 1024
-      const content = base.length >= target ? base : base.repeat(Math.ceil(target / base.length))
+      const content = `${"x".repeat(80)}\n`.repeat(800)
       yield* put(path.join(test.directory, "large.json"), content)
 
       const result = yield* run({ filePath: path.join(test.directory, "large.json") })
@@ -562,6 +658,288 @@ root_type Monster;`
         const result = yield* exec(dir, { filePath: path.join(dir, item[0]) })
         expect(result.attachments).toBeUndefined()
         expect(result.output).toContain(item[1])
+      }
+    }),
+  )
+})
+
+describe("tool.read notebooks", () => {
+  for (const extension of ["ipynb", "IPYNB"]) {
+    it.instance(`extracts ${extension} cell sources in order, excluding outputs and metadata`, () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, `analysis.${extension}`)
+        yield* put(
+          filepath,
+          JSON.stringify({
+            metadata: { secret: "hidden notebook metadata" },
+            cells: [
+              {
+                cell_type: "markdown",
+                source: ["# Analysis\n", "Introduction"],
+                metadata: { secret: "hidden cell metadata" },
+              },
+              {
+                cell_type: "code",
+                source: "print('data only')\n",
+                outputs: [{ text: "hidden output" }],
+                execution_count: 42,
+              },
+              { cell_type: "markdown", source: "String markdown" },
+              { cell_type: "code", source: ["x = 1\n", "print(x)"] },
+              { cell_type: "raw", source: "hidden raw cell" },
+              null,
+              [],
+              { cell_type: "code", source: ["invalid mixed array", 7] },
+              { cell_type: "code", source: null, outputs: ["hidden invalid output"] },
+              { cell_type: "markdown" },
+            ],
+          }),
+        )
+        const expected =
+          "<markdown_cell>\n# Analysis\nIntroduction\n</markdown_cell>\n\n<code_cell>\nprint('data only')\n</code_cell>\n\n<markdown_cell>\nString markdown\n</markdown_cell>\n\n<code_cell>\nx = 1\nprint(x)\n</code_cell>"
+        const result = yield* run({ filePath: filepath })
+        expect(result.title.endsWith(`analysis.${extension}`)).toBe(true)
+        expect(result.metadata.preview).toBe(expected)
+        expect(result.metadata.display).toEqual({
+          type: "file",
+          path: filepath,
+          text: expected,
+          lineStart: 1,
+          lineEnd: 17,
+          totalLines: 17,
+          truncated: false,
+        })
+        expect(result.metadata.loaded).toEqual([])
+        expect(result.metadata.truncated).toBe(false)
+        expect(result.attachments).toBeUndefined()
+        expect(result.output).not.toContain("hidden")
+        expect(result.output).not.toContain("invalid mixed array")
+        expect(result.output).not.toContain("execution_count")
+      }),
+    )
+  }
+
+  for (const raw of ['{"cells":[', '{"metadata":{"name":"missing cells"}}', '{"cells":null}', "[]", "null", ""]) {
+    it.instance(`falls back to raw text for invalid notebook structure ${JSON.stringify(raw)}`, () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "broken.ipynb")
+        yield* put(filepath, raw)
+        const result = yield* run({ filePath: filepath })
+        expect(result.metadata.preview).toBe(raw)
+        expect(result.metadata.truncated).toBe(false)
+        expect(result.output).not.toContain("<markdown_cell>")
+      }),
+    )
+  }
+
+  it.instance("reports empty or unreadable cells without leaking other payloads", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const filepath = path.join(test.directory, "empty.ipynb")
+      for (const cells of [[], [null, { cell_type: "raw", source: "hidden" }, { cell_type: "code", source: 7 }]]) {
+        yield* put(filepath, JSON.stringify({ cells, metadata: "hidden" }))
+        const result = yield* run({ filePath: filepath })
+        expect(result.metadata.preview).toBe("(Notebook contains no markdown or code cell content.)")
+        expect(result.metadata.display).toMatchObject({ totalLines: 1, truncated: false })
+        expect(result.output).not.toContain("hidden")
+      }
+      yield* put(
+        filepath,
+        JSON.stringify({
+          cells: [
+            { cell_type: "code", source: [] },
+            { cell_type: "markdown", source: "" },
+          ],
+        }),
+      )
+      const result = yield* run({ filePath: filepath })
+      expect(result.metadata.preview).toBe("<code_cell>\n\n</code_cell>\n\n<markdown_cell>\n\n</markdown_cell>")
+    }),
+  )
+
+  it.instance("pages extracted lines, clamps zero limit, and validates offsets", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const filepath = path.join(test.directory, "paged.ipynb")
+      yield* put(filepath, JSON.stringify({ cells: [{ cell_type: "code", source: "first\nsecond\nthird" }] }))
+      const result = yield* run({ filePath: filepath, offset: 2, limit: 2 })
+      expect(result.metadata.preview).toBe("first\nsecond")
+      expect(result.metadata.display).toEqual({
+        type: "file",
+        path: filepath,
+        text: "first\nsecond",
+        lineStart: 2,
+        lineEnd: 3,
+        totalLines: 5,
+        truncated: true,
+      })
+      expect(result.output).toContain("2: first\n3: second")
+      expect(result.output).toContain("Showing lines 2-3 of 5. Use offset=4 to continue.")
+      const last = yield* run({ filePath: filepath, offset: 4, limit: 2 })
+      expect(last.metadata.preview).toBe("third\n</code_cell>")
+      expect(last.metadata.truncated).toBe(false)
+      expect(last.output).toContain("End of file - total 5 lines")
+      const zero = yield* run({ filePath: filepath, offset: 0, limit: 0 })
+      expect(zero.metadata.preview).toBe("<code_cell>")
+      expect(zero.output).toContain("Use offset=2 to continue.")
+      const err = yield* fail(test.directory, { filePath: filepath, offset: 6 })
+      expect(err.message).toContain("Offset 6 is out of range for this file (5 lines)")
+    }),
+  )
+
+  it.instance("keeps the default line limit and preview cap on extracted text", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const filepath = path.join(test.directory, "many.ipynb")
+      yield* put(filepath, JSON.stringify({ cells: [{ cell_type: "code", source: "x\n".repeat(2100) }] }))
+      const result = yield* run({ filePath: filepath })
+      expect(result.metadata.display).toMatchObject({ lineEnd: 2000, totalLines: 2102, truncated: true })
+      expect(result.metadata.preview.split("\n")).toHaveLength(20)
+      expect(result.output).toContain("Use offset=2001 to continue.")
+    }),
+  )
+
+  it.instance("caps extracted UTF-8 bytes and long lines with resumable pagination", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const filepath = path.join(test.directory, "large.ipynb")
+      yield* put(
+        filepath,
+        JSON.stringify({ cells: [{ cell_type: "code", source: `${"é".repeat(80)}\n`.repeat(800) }] }),
+      )
+      const result = yield* run({ filePath: filepath })
+      const display = result.metadata.display
+      if (display?.type !== "file") throw new Error("expected file display")
+      expect(Buffer.byteLength(display.text)).toBeLessThanOrEqual(50 * 1024)
+      expect(Buffer.byteLength(display.text) + 161).toBeGreaterThan(50 * 1024)
+      expect(result.metadata.truncated).toBe(true)
+      expect(result.output).toContain(
+        `Output capped at 50 KB. Showing lines 1-${display.lineEnd}. Use offset=${display.lineEnd + 1}`,
+      )
+      const next = yield* run({ filePath: filepath, offset: display.lineEnd + 1, limit: 1 })
+      expect(next.metadata.preview).toBe("é".repeat(80))
+      yield* put(filepath, JSON.stringify({ cells: [{ cell_type: "markdown", source: "x".repeat(3000) }] }))
+      const long = yield* run({ filePath: filepath })
+      expect(long.metadata.preview).toBe(
+        `<markdown_cell>\n${"x".repeat(2000)}... (line truncated to 2000 chars)\n</markdown_cell>`,
+      )
+      yield* put(filepath, `not JSON\n${"x".repeat(80)}\n`.repeat(800))
+      const fallback = yield* run({ filePath: filepath })
+      expect(fallback.output).toContain("Output capped at 50 KB")
+    }),
+  )
+
+  it.live("preserves external/read permissions and loaded instructions", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped({ git: true })
+      const outer = yield* tmpdirScoped()
+      const filepath = path.join(outer, "nested", "analysis.ipynb")
+      const instructions = path.join(outer, "nested", "AGENTS.md")
+      yield* put(instructions, "# Notebook test instructions")
+      yield* put(filepath, JSON.stringify({ cells: [{ cell_type: "code", source: "print(1)" }] }))
+      const { items, next } = asks()
+      const result = yield* exec(dir, { filePath: filepath }, next)
+      expect(items.map((item) => item.permission)).toEqual(["external_directory", "read"])
+      expect(items[1].patterns).toEqual([path.relative(dir, filepath)])
+      expect(result.metadata.loaded).toEqual([])
+      const local = yield* exec(outer, { filePath: filepath })
+      expect(local.metadata.loaded).toContain(instructions)
+      expect(local.output).toContain("<system-reminder>")
+      expect(local.output).toContain("# Notebook test instructions")
+      const fs = yield* FSUtil.Service
+      let opened = false
+      const err = yield* fail(
+        dir,
+        { filePath: filepath },
+        {
+          ...ctx,
+          ask: () => Effect.die(new Error("permission denied")),
+        },
+      ).pipe(
+        Effect.provideService(
+          FSUtil.Service,
+          FSUtil.Service.of({
+            ...fs,
+            readFile: (file) => {
+              opened = true
+              return fs.readFile(file)
+            },
+          }),
+        ),
+      )
+      expect(err.message).toContain("permission denied")
+      expect(opened).toBe(false)
+    }),
+  )
+
+  it.instance("interrupts pending notebook I/O without returning extracted content", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const filepath = path.join(test.directory, "cancel.ipynb")
+      yield* put(filepath, JSON.stringify({ cells: [] }))
+      const fs = yield* FSUtil.Service
+      const started = yield* Deferred.make<void>()
+      let finalized = false
+      const fiber = yield* run({ filePath: filepath }).pipe(
+        Effect.provideService(
+          FSUtil.Service,
+          FSUtil.Service.of({
+            ...fs,
+            readFile: (file) =>
+              file !== filepath
+                ? fs.readFile(file)
+                : Effect.gen(function* () {
+                    yield* Deferred.succeed(started, undefined)
+                    return yield* Effect.never
+                  }).pipe(
+                    Effect.ensuring(
+                      Effect.sync(() => {
+                        finalized = true
+                      }),
+                    ),
+                  ),
+          }),
+        ),
+        Effect.forkChild,
+      )
+      yield* Deferred.await(started)
+      yield* Fiber.interrupt(fiber)
+      const exit = yield* Fiber.await(fiber)
+      if (!Exit.isFailure(exit)) throw new Error("expected interrupted read")
+      expect(Cause.hasInterruptsOnly(exit.cause)).toBe(true)
+      expect(finalized).toBe(true)
+    }),
+  )
+
+  it.instance("keeps JSON text and native image/PDF attachment behavior", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const raw = JSON.stringify({ cells: [{ cell_type: "code", source: "print(1)" }] })
+      const json = path.join(test.directory, "notebook.json")
+      yield* put(json, raw)
+      expect((yield* run({ filePath: json })).metadata.preview).toBe(raw)
+      for (const [name, bytes, mime, output] of [
+        ["document.pdf", Buffer.from("%PDF-1.4\nminimal content"), "application/pdf", "PDF read successfully"],
+        ["disguised.ipynb", Buffer.from("%PDF-1.4\nminimal content"), "application/pdf", "PDF read successfully"],
+        [
+          "image.ipynb",
+          Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01]),
+          "image/jpeg",
+          "Image read successfully",
+        ],
+      ] as const) {
+        const filepath = path.join(test.directory, name)
+        yield* put(filepath, bytes)
+        const result = yield* run({ filePath: filepath })
+        expect(result.output).toBe(output)
+        expect(result.metadata.truncated).toBe(false)
+        expect(result.attachments?.[0]).toEqual({
+          type: "file",
+          mime,
+          url: `data:${mime};base64,${bytes.toString("base64")}`,
+        })
       }
     }),
   )

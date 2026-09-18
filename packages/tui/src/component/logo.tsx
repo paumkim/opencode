@@ -56,6 +56,11 @@ export function Logo() {
           </box>
         )}
       </For>
+      <box flexDirection="row">
+        <text fg={theme.warning} selectable={false}>
+          {"                   dev."}
+        </text>
+      </box>
     </box>
   )
 }

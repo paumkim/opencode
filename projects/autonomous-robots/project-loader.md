@@ -1,24 +1,44 @@
 ---
 name: project-loader
 description: >
-  Entry point for the autonomous robotics framework. Receives a project or task
-  description from the user, activates the meta-control loop, and coordinates the
-  lazy loading and sequencing of specialized loops (sensorimotor, planning,
-  learning, attention, homeostasis, social, memory, error-correction, resource).
+  Design entry point for a proposed autonomous robotics workflow, not an
+  executable natural-language loader. Describes meta-control coordination of
+  specialized loops (sensorimotor, planning, learning, attention, homeostasis,
+  social, memory, error-correction, resource).
   Trigger phrase: "load loops, work on project X".
 ---
 
 # Project Loader
 
-**To use:** say *"load loops, work on project X"*
+**Proposed trigger phrase:** *"load loops, work on project X"* (not a runtime command).
 
-The project loader is the user-facing entry point for the autonomous robotics
-framework. It is the single command that activates the entire system — from
-project decomposition to loop orchestration to result delivery.
+## Current Status and Safety Boundary
+
+The implementation in `src/` is a **generic software supervisory runtime**:
+module discovery, lifecycle management, sequential scheduling, cooperative
+cancellation, and a software interlock/watchdog. All ten robot loops currently
+contain only `SKILL.md` design specifications, not runnable modules. The skills
+and templates below are documented designs, not implemented robot policies.
+
+There is **no hardware safety certification, actuator enforcement, real-time or
+latency guarantee, persistence/resume, DAG execution, or adaptive scheduling**.
+This Markdown file does not parse tasks or activate a robot. The architecture,
+protocols, and walkthrough below describe proposed behavior unless explicitly
+identified as current software semantics.
+
+Physical operation would require independent, always-on physical monitoring and
+protective controls **outside this sequential JavaScript runtime**, including
+while foreground context changes or homeostasis is inactive. JavaScript timers,
+abort signals, and software admission checks are not emergency stops. Hardware
+limits must remain immutable to learning and task-priority changes; adaptive
+advisory setpoints must stay inside those limits. Learned-policy deployment
+requires validation, explicit operator approval, and a rollback plan. These
+physical safeguards and deployment gates are requirements, **not implemented
+features**.
 
 ---
 
-## Architecture Overview
+## Architecture Overview (Design)
 
 ```
 User
@@ -109,8 +129,13 @@ templates/             — reusable loop implementations
   └── predictor-template/ — predictive models (outcome forecasting)
 ```
 
-Only loops with a `SKILL.md` file are considered **active**. Empty directories
-are registered as available but not yet implemented.
+**Current discovery semantics** (`src/registry.ts`): the default `activeOnly`
+option filters directories by the presence of `SKILL.md`; despite its name,
+it does not indicate lifecycle activation. `getAvailableNames()` lists discovered
+directories. Directories without `SKILL.md` require `activeOnly: false` to appear.
+`getNames()` lists runnable registrations only: a supported JS/TS module must
+export a valid loop object. SKILL-only directories have no runnable registration;
+`getActiveNames()` lists loops whose lifecycle has been activated.
 
 ### 3. Decompose
 
@@ -141,32 +166,42 @@ Each sub-task maps to one or more loops:
 | **error-correction** | Anomaly detection, recovery | Safety-critical or uncertain domains |
 | **resource** | Compute, power, bandwidth allocation | Multi-loop contention |
 
-### 5. Lazy-Load
+### 5. Lazy-Load (Design) vs Current Import Semantics
 
-**Only the loops needed for the current sub-task are loaded.** The loader does
-not preload all 10 loops — it loads each loop's `SKILL.md` and associated
-modules on demand, right before that loop's sub-task is scheduled.
+Design intent: only the loops needed for the current sub-task are activated,
+and a loop is deactivated when no pending sub-task needs it.
 
-When a loop finishes its sub-task and no other pending sub-task requires it,
-the loop is **unloaded** — its context is cleared, freeing resources for the
-next loop.
+Current software semantics (`src/registry.ts`, `src/runtime.ts`):
 
-This is the primary mechanism for **avoiding context overload**: at any given
-moment, only one loop's full context is active in memory.
+- Directory listing does not execute code, but runnable-module discovery uses
+  dynamic imports during registry/runtime creation, before lifecycle activation.
+  Module top-level code can execute then; discovery is not a sandbox or a safety
+  gate. Repeated imports of the same URL use the JavaScript module cache.
+- `activate()` invokes `init()`; successful teardown clears registry context and
+  changes lifecycle state to `unloaded`. Resource release depends on the loop's
+  implementation. Neither deactivation nor teardown evicts imported code.
+- Multiple loops can remain lifecycle-active. `eager: true` requests activation
+  of all registrations; `Runtime` defers that activation until startup checks.
+  Successful `runLoop`/`runSequence` calls do not automatically deactivate loops.
+  Sequential execution is not a single-context or bounded-memory guarantee.
 
 ### 6. Activate
 
-Each loop is activated by calling its interface:
+Each loop implements this interface (`src/types.ts`); the runtime passes an
+optional `AbortSignal` to `init` and `run`:
 
 ```
-loop.init(context)     — load configuration, allocate resources
-loop.run(input)        — execute one iteration, return LoopResult
-loop.status()          — report health, resource usage, confidence
-loop.teardown()        — release resources, persist state
+loop.init(context, signal?)   — load configuration, allocate resources
+loop.run(input, signal?)      — execute one iteration, return LoopResult
+loop.status()                 — report health, resource usage, confidence
+loop.teardown()               — release resources
 ```
 
-The meta-control loop calls these in sequence, passing `LoopResult` from one
-loop to the next as input.
+Current software semantics: cancellation is **cooperative** — aborting the
+signal requests cancellation, but a loop that ignores it keeps running until
+its work settles; cleanup runs after settlement. `runSequence` forwards each
+loop's `result.data` as the next loop's input. `teardown()` neither persists
+state (no persistence exists) nor unloads imported code.
 
 ---
 
@@ -174,8 +209,10 @@ loop to the next as input.
 
 ### Loop Communication
 
-Loops communicate through a **shared context object** that flows through the
-task graph. Each `LoopResult` contains:
+Current software passes context to initialization and forwards `result.data`
+between steps of `Runtime.runSequence`. The scheduler executes a supplied list
+in order, not a task graph; it does not interpret recommendations or apply robot
+policies. `LoopResult` has this shape (`src/types.ts`; confidence is not range-validated):
 
 ```typescript
 interface LoopResult {
@@ -188,7 +225,7 @@ interface LoopResult {
 }
 ```
 
-### Default Sequencing
+### Default Sequencing (Design)
 
 The bottom-up default sequence ensures foundational layers are established
 before higher-level reasoning:
@@ -205,9 +242,9 @@ resource ─────┘
               social (if human-in-loop)
 ```
 
-### Adaptive Re-sequencing
+### Adaptive Re-sequencing (Design, Not Implemented)
 
-The meta-control loop monitors results and re-sequences dynamically:
+The meta-control loop would monitor results and re-sequence dynamically:
 
 - **Learning detects a performance gap** → re-run planning with updated model
 - **Error-correction detects an anomaly** → pause sensorimotor, engage homeostasis
@@ -230,26 +267,42 @@ The meta-control loop recommends which template to use for each loop:
 
 ---
 
-## Context Overload Avoidance
+## Foreground Context and Physical Monitoring
 
-The system is designed so that **only one loop is fully loaded at a time**:
+A single **foreground reasoning context** is a proposed way to limit document
+context, not a restriction on retained module instances or a physical control
+strategy. Switching that context must never switch off required physical
+monitoring. Independent, always-on protective controls would have to remain
+operational outside the sequential JS runtime throughout any physical task.
 
-1. **Lazy loading** — loops are loaded only when their sub-task is scheduled,
-   not at startup.
-2. **Eager unloading** — when a loop's sub-task completes and no pending
-   sub-task needs it, the loop is torn down and its context is cleared.
-3. **Streaming handoff** — `LoopResult` is the only data passed between loops.
-   The full context of the previous loop is not retained.
-4. **Checkpointing** — critical state (learned policies, discovered anomalies,
-   successful plans) is persisted to `memory` before a loop is unloaded, so it
-   can be recalled later without keeping the loop active.
+Current software can initialize on demand and forward `result.data`, but keeps
+successful loops active until explicitly deactivated/stopped. Imported code,
+loop-owned references, context, and returned results may remain in memory;
+there is no bounded-memory guarantee. Persisting checkpoints and resuming robot
+missions are unimplemented design work.
 
-This means the system's memory footprint scales with the **complexity of the
-current sub-task**, not the total number of loops in the framework.
+### Software Halt and Reset (Implemented, Not Physical Clearance)
+
+`SafetyInterlock` evaluates caller-supplied rules; it includes no robot-specific
+policy. Critical violations and predicate exceptions latch a software halt;
+warnings do not stop evaluation of later rules. `clearViolations()` clears only
+history, **not the halt latch**. An explicit `reset()` rearms software admission
+and clears the latched violation, but preserves history. It does not verify
+physical conditions, authorize motion, or certify recovery. Physical clearance
+and any operator approval must be established independently; those gates are
+not implemented here. Watchdog timers share the JS event loop, so they cannot
+guarantee detection latency or preempt blocked/non-cooperative work.
+
+A software halt/watchdog violation does not itself abort an in-flight operation's AbortSignal. In-flight work may continue until it settles; admission checks reject further work when reached. Signal cancellation is a separate mechanism.
 
 ---
 
-## Example Walkthrough
+## Example Walkthrough (Conceptual)
+
+This walkthrough is a **conceptual illustration of the proposed workflow**, not
+a record of an executed run. No robot, sensor, or actuator is involved; the
+numbers are illustrative. It also assumes the unimplemented design properties
+above (single active context, checkpointing, adaptive re-sequencing).
 
 **User input:**
 
@@ -292,7 +345,8 @@ Meta-control breaks this into sub-tasks:
 - **Load**: sensorimotor, planning, homeostasis
 - **Execute**: homeostasis checks battery → sensorimotor reads sensors → planning computes path → sensorimotor follows waypoints
 - **Result**: Robot reaches kitchen entrance. Battery at 85%.
-- **Unload**: homeostasis (no longer needed), planning (path complete)
+- **Unload**: Deactivate advisory homeostasis; independent protective monitoring remains operational.
+  Unload planning (path complete).
 - **Keep**: sensorimotor (still needed for next sub-task)
 
 **Sub-task 2: locate(soda_can)**
@@ -351,28 +405,28 @@ What to do next:
 
 ```
 autonomous-robots/
-├── project-loader.md          ← THIS FILE (entry point)
+├── project-loader.md          ← THIS FILE (design entry point)
 ├── loops/
-│   ├── meta-control/SKILL.md  ← orchestrator (active)
-│   ├── sensorimotor/SKILL.md  ← reflex layer (active)
-│   ├── planning/SKILL.md      ← strategic layer (active)
-│   ├── learning/SKILL.md      ← adaptation layer (active)
-│   ├── attention/SKILL.md     ← saliency and focus selection (active)
-│   ├── homeostasis/SKILL.md   ← battery, temperature, safety margins (active)
-│   ├── memory/SKILL.md        ← episodic + semantic storage and recall (active)
-│   ├── error-correction/SKILL.md ← anomaly detection and recovery (active)
-│   ├── resource/SKILL.md      ← compute, power, bandwidth allocation (active)
-│   └── social/SKILL.md        ← human interaction and communication (active)
+│   ├── meta-control/SKILL.md  ← orchestrator (design spec)
+│   ├── sensorimotor/SKILL.md  ← reflex layer (design spec)
+│   ├── planning/SKILL.md      ← strategic layer (design spec)
+│   ├── learning/SKILL.md      ← adaptation layer (design spec)
+│   ├── attention/SKILL.md     ← saliency and focus selection (design spec)
+│   ├── homeostasis/SKILL.md   ← battery, temperature, safety margins (design spec)
+│   ├── memory/SKILL.md        ← episodic + semantic storage and recall (design spec)
+│   ├── error-correction/SKILL.md ← anomaly detection and recovery (design spec)
+│   ├── resource/SKILL.md      ← compute, power, bandwidth allocation (design spec)
+│   └── social/SKILL.md        ← human interaction and communication (design spec)
 ├── skills/
-│   ├── navigate/SKILL.md      ← path planning and obstacle avoidance (active)
-│   ├── manipulate/SKILL.md    ← grasping, lifting, tool use (active)
-│   ├── communicate/SKILL.md   ← human interaction, status reporting (active)
-│   └── learn/SKILL.md         ← skill acquisition and policy tuning (active)
+│   ├── navigate/SKILL.md      ← path planning and obstacle avoidance (design spec)
+│   ├── manipulate/SKILL.md    ← grasping, lifting, tool use (design spec)
+│   ├── communicate/SKILL.md   ← human interaction, status reporting (design spec)
+│   └── learn/SKILL.md         ← skill acquisition and policy tuning (design spec)
 └── templates/
-    ├── cpg-template/SKILL.md  ← central pattern generators (rhythmic motion) (active)
-    ├── fsm-template/SKILL.md  ← finite state machines (discrete states) (active)
-    ├── rl-template/SKILL.md   ← reinforcement learning (policy optimization) (active)
-    └── predictor-template/SKILL.md ← predictive models (outcome forecasting) (active)
+    ├── cpg-template/SKILL.md  ← central pattern generators (rhythmic motion) (design spec)
+    ├── fsm-template/SKILL.md  ← finite state machines (discrete states) (design spec)
+    ├── rl-template/SKILL.md   ← reinforcement learning (policy optimization) (design spec)
+    └── predictor-template/SKILL.md ← predictive models (outcome forecasting) (design spec)
 ```
 
 ---
@@ -381,18 +435,20 @@ autonomous-robots/
 
 | Command | Effect |
 |---------|--------|
-| `load loops, work on project X` | Activate the full pipeline for project X |
-| `load loops, work on project X` (with prior context) | Resume from last checkpoint, reuse learned models |
-| `load loops, work on project X` (with constraints) | Apply constraints during decomposition |
+| `load loops, work on project X` | Proposed trigger for the design workflow (no runtime command exists) |
+| `load loops, work on project X` (with prior context) | Proposed: resume from last checkpoint, reuse learned models (persistence unimplemented) |
+| `load loops, work on project X` (with constraints) | Proposed: apply constraints during decomposition |
 
-**Trigger phrase:** `load loops, work on project`
+**Trigger phrase (proposed):** `load loops, work on project`
 
 **Entry point:** This file (`project-loader.md`)
 
 **Orchestrator:** `loops/meta-control/SKILL.md`
 
-**Active loops (have SKILL.md):** `meta-control`, `sensorimotor`, `planning`, `learning`, `attention`, `homeostasis`, `memory`, `error-correction`, `resource`, `social` — all 10 loops active
+**Loops with SKILL.md (design specs, not runnable modules):** `meta-control`,
+`sensorimotor`, `planning`, `learning`, `attention`, `homeostasis`, `memory`,
+`error-correction`, `resource`, `social` — all 10 present as design specs
 
-**Active templates:** `cpg-template`, `fsm-template`, `rl-template`, `predictor-template`
+**Templates (design specs):** `cpg-template`, `fsm-template`, `rl-template`, `predictor-template`
 
-**Active skills:** `navigate`, `manipulate`, `communicate`, `learn`
+**Skills (design specs):** `navigate`, `manipulate`, `communicate`, `learn`

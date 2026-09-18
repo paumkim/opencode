@@ -6,7 +6,7 @@ import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
 import { Context, Effect, Layer } from "effect"
 import * as Stream from "effect/Stream"
-import { streamText, wrapLanguageModel, type ModelMessage, type Tool } from "ai"
+import { streamText, wrapLanguageModel, parsePartialJson, type ModelMessage, type Tool } from "ai"
 import type { LLMEvent } from "@opencode-ai/llm"
 import { LLMClient } from "@opencode-ai/llm/route"
 import type { LLMClientService } from "@opencode-ai/llm/route"
@@ -29,6 +29,7 @@ import * as OtelTracer from "@effect/opentelemetry/Tracer"
 import { LLMAISDK } from "./llm/ai-sdk"
 import { LLMNativeRuntime } from "./llm/native-runtime"
 import { LLMRequestPrep } from "./llm/request"
+import { PreflightError, shouldCompactRequest } from "./overflow"
 
 export const OUTPUT_TOKEN_MAX = ProviderTransform.OUTPUT_TOKEN_MAX
 
@@ -42,6 +43,9 @@ export type StreamInput = {
   system: string[]
   messages: ModelMessage[]
   small?: boolean
+  preflight?: boolean
+  continuation?: boolean
+  firstTurn?: boolean
   tools: Record<string, Tool>
   retries?: number
   toolChoice?: "auto" | "required" | "none"
@@ -111,6 +115,21 @@ const live: Layer.Layer<
         flags,
         isWorkflow,
       })
+
+      const isOpenaiOauth = item.id === "openai" && info?.type === "oauth"
+      if (input.preflight === true && shouldCompactRequest({
+        cfg,
+        model: input.model,
+        messages: isOpenaiOauth || isWorkflow
+          ? [{ role: "system", content: isOpenaiOauth ? String(prepared.params.options.instructions ?? "") : prepared.system.join("\n") }, ...prepared.messages]
+          : prepared.messages,
+        tools: prepared.tools,
+        outputTokenMax: prepared.params.maxOutputTokens,
+        continuation: input.continuation,
+        firstTurn: input.firstTurn,
+      })) {
+        return yield* Effect.fail(new PreflightError())
+      }
 
       // Wire up toolExecutor for DWS workflow models so that tool calls
       // from the workflow service are executed via opencode's tool system
@@ -299,6 +318,19 @@ const live: Layer.Layer<
               return {
                 ...failed.toolCall,
                 toolName: lower,
+              }
+            }
+            // Small local models truncate tool-call JSON (e.g. missing the
+            // closing brace) at the output-token limit. Try the AI SDK's
+            // partial-JSON repair before giving up; the repaired input is
+            // still schema-validated by the tool.
+            if (failed.toolCall.input.trim() !== "") {
+              const partial = await parsePartialJson(failed.toolCall.input)
+              if (partial.state === "successful-parse" || partial.state === "repaired-parse") {
+                return {
+                  ...failed.toolCall,
+                  input: JSON.stringify(partial.value),
+                }
               }
             }
             return {

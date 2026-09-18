@@ -32,6 +32,7 @@ import { batch, onMount } from "solid-js"
 import path from "path"
 import { useKV } from "./kv"
 import { usePermission } from "./permission"
+import { useOptionalSharedWorkspace } from "./shared-workspace"
 
 const emptyConsoleState: ConsoleState = {
   consoleManagedProviders: [],
@@ -146,6 +147,7 @@ export const {
     const event = useEvent()
     const project = useProject()
     const sdk = useSDK()
+    const sharedWs = useOptionalSharedWorkspace()
 
     const fullSyncedSessions = new Set<string>()
     const syncingSessions = new Map<string, Promise<void>>()
@@ -196,12 +198,16 @@ export const {
         case "permission.asked": {
           const request = event.properties
           if (permission.mode === "auto") {
-            void sdk.client.permission.reply({
-              requestID: request.id,
-              reply: "once",
-              directory,
-              workspace,
-            })
+            if (sharedWs) {
+              sharedWs.sendPermissionReply(request.sessionID, request.id, "once")
+            } else {
+              void sdk.client.permission.reply({
+                requestID: request.id,
+                reply: "once",
+                directory,
+                workspace,
+              })
+            }
             break
           }
           const requests = store.permission[request.sessionID]

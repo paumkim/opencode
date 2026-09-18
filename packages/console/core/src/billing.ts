@@ -72,6 +72,18 @@ export namespace Billing {
     return Math.round(((x + 30) / 0.956) * 0.044 + 30)
   }
 
+  export async function invoicePaymentError(invoiceID: string, client = stripe()) {
+    // Basil invoices expose payment intents through invoice payments, not the
+    // invoice ID itself. Diagnostic lookups must not prevent disabling reload.
+    return (async () => {
+      const invoice = await client.invoices.retrieve(invoiceID, { expand: ["payments"] })
+      const intent = invoice.payments?.data.find((item) => item.payment.payment_intent)?.payment.payment_intent
+      if (!intent) return undefined
+      if (typeof intent !== "string") return intent.last_payment_error?.message
+      return (await client.paymentIntents.retrieve(intent)).last_payment_error?.message
+    })().catch(() => undefined)
+  }
+
   export const reload = async () => {
     const billing = await Database.use((tx) =>
       tx
@@ -134,9 +146,12 @@ export namespace Billing {
     }
   }
 
-  export const grantCredit = async (workspaceID: string, dollarAmount: number) => {
+  export const grantCredit = async (workspaceID: string, dollarAmount: number, transaction = Database.transaction) => {
     const amountInMicroCents = centsToMicroCents(dollarAmount * 100)
-    await Database.transaction(async (tx) => {
+    await transaction(async (tx) => {
+      const rows = await tx.select({ id: BillingTable.id }).from(BillingTable)
+        .where(eq(BillingTable.workspaceID, workspaceID)).for("update")
+      if (rows.length !== 1) throw new Error("Expected one workspace billing record")
       await tx
         .update(BillingTable)
         .set({
@@ -175,34 +190,28 @@ export namespace Billing {
     })
   }
 
-  export const redeemCoupon = async (email: string, type: (typeof CouponType)[number]) => {
-    // validate coupon type
-    await (async () => {
-      if (type === "GO1MONTH50") return
-      const coupon = await Database.use((tx) =>
-        tx
-          .select()
-          .from(CouponTable)
-          .where(and(eq(CouponTable.email, email), eq(CouponTable.type, type)))
-          .then((rows) => rows[0]),
-      )
+  export const redeemCoupon = async (
+    email: string,
+    type: (typeof CouponType)[number],
+    transaction = Database.transaction,
+  ) => {
+    await transaction(async (tx) => {
+      // Public coupon: create an unredeemed row while taking the existing PK
+      // lock. Never overwrite timeRedeemed on a conflicting redemption.
+      if (type === "GO1MONTH50") {
+        await tx.insert(CouponTable).values({ email, type })
+          .onDuplicateKeyUpdate({ set: { email: sql`${CouponTable.email}` } })
+      }
+      const coupon = await tx.select().from(CouponTable)
+        .where(and(eq(CouponTable.email, email), eq(CouponTable.type, type)))
+        .for("update").then((rows) => rows[0])
       if (!coupon) throw new Error("Invalid coupon code")
       if (coupon.timeRedeemed) throw new Error("Coupon already redeemed")
-    })()
 
-    // handle coupon type
-    if (type === "BUILDATHON") await grantCredit(Actor.workspace(), 500)
-
-    await Database.use((tx) =>
-      tx
-        .insert(CouponTable)
-        .values({ email, type, timeRedeemed: sql`now()` })
-        .onDuplicateKeyUpdate({
-          set: {
-            timeRedeemed: sql`now()`,
-          },
-        }),
-    )
+      if (type === "BUILDATHON") await grantCredit(Actor.workspace(), 500, (apply) => apply(tx))
+      await tx.update(CouponTable).set({ timeRedeemed: sql`now()` })
+        .where(and(eq(CouponTable.email, email), eq(CouponTable.type, type)))
+    })
   }
 
   export const setMonthlyLimit = fn(z.number(), async (input) => {
@@ -452,22 +461,35 @@ export namespace Billing {
     },
   )
 
-  export const generateReceiptUrl = fn(
-    z.object({
-      paymentID: z.string(),
-    }),
-    async (input) => {
-      const { paymentID } = input
+  export const receiptUrl = async (
+    input: { paymentID: string },
+    use = Database.use,
+    client = stripe(),
+  ) => {
+    const { paymentID } = input
 
-      const intent = await Billing.stripe().paymentIntents.retrieve(paymentID)
-      if (!intent.latest_charge) throw new Error("No charge found")
+    // Receipt URLs are customer PII: only resolve payments owned by the actor's
+    // workspace, and never hit Stripe for a foreign paymentID.
+    const payment = await use((tx) =>
+      tx
+        .select({ id: PaymentTable.id })
+        .from(PaymentTable)
+        .where(and(eq(PaymentTable.workspaceID, Actor.workspace()), eq(PaymentTable.paymentID, paymentID)))
+        .limit(1)
+        .then((rows) => rows[0]),
+    )
+    if (!payment) throw new Error("Payment not found")
 
-      const charge = await Billing.stripe().charges.retrieve(intent.latest_charge as string)
-      if (!charge.receipt_url) throw new Error("No receipt URL found")
+    const intent = await client.paymentIntents.retrieve(paymentID)
+    if (!intent.latest_charge) throw new Error("No charge found")
 
-      return charge.receipt_url
-    },
-  )
+    const charge = await client.charges.retrieve(intent.latest_charge as string)
+    if (!charge.receipt_url) throw new Error("No receipt URL found")
+
+    return charge.receipt_url
+  }
+
+  export const generateReceiptUrl = fn(z.object({ paymentID: z.string() }), (input) => receiptUrl(input))
 
   export const subscribeBlack = fn(
     z.object({

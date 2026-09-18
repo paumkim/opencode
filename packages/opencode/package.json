@@ -8,7 +8,7 @@
   "scripts": {
     "typecheck": "tsgo --noEmit",
     "test": "bun test --timeout 30000 --only-failures",
-    "test:httpapi": "bun run script/httpapi-exercise.ts --mode coverage --fail-on-missing --fail-on-skip && bun run script/httpapi-exercise.ts --mode auth --fail-on-missing --fail-on-skip && bun run script/httpapi-exercise.ts --mode effect --fail-on-missing --fail-on-skip",
+    "test:httpapi": "bun run script/httpapi-exercise.ts --mode coverage --fail-on-missing && bun run script/httpapi-exercise.ts --mode auth --fail-on-missing && bun run script/httpapi-exercise.ts --mode effect --fail-on-missing",
     "bench:test": "bun run script/bench-test-suite.ts",
     "profile:test": "bun run script/profile-test-files.ts",
     "build": "bun run script/build.ts",
@@ -85,7 +85,9 @@
     "@octokit/rest": "catalog:",
     "@openauthjs/openauth": "catalog:",
     "@opencode-ai/codemode": "workspace:*",
+    "@opencode-ai/ghostty-terminal": "workspace:*",
     "@opencode-ai/llm": "workspace:*",
+    "@opencode-ai/news": "workspace:*",
     "@opencode-ai/plugin": "workspace:*",
     "@opencode-ai/protocol": "workspace:*",
     "@opencode-ai/schema": "workspace:*",

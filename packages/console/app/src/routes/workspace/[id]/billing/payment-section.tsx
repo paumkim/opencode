@@ -6,13 +6,7 @@ import { formatDateUTC, formatDateForTable } from "../../common"
 import styles from "./payment-section.module.css"
 import { useI18n } from "~/context/i18n"
 
-function money(amount: number, currency?: string) {
-  const formatter =
-    currency === "inr"
-      ? new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR" })
-      : new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" })
-  return formatter.format(amount / 100_000_000)
-}
+import { paymentMoney, paymentRefund } from "./payment-refund"
 
 const getPaymentsInfo = query(async (workspaceID: string) => {
   "use server"
@@ -87,8 +81,8 @@ export function PaymentSection() {
               <For each={payments()}>
                 {(payment) => {
                   const date = new Date(payment.timeCreated)
-                  const amount =
-                    payment.enrichment?.type === "subscription" && payment.enrichment.couponID ? 0 : payment.amount
+                  const amount = payment.amount
+                  const refund = paymentRefund(payment)
                   const currency =
                     payment.enrichment?.type === "subscription" || payment.enrichment?.type === "lite"
                       ? payment.enrichment.currency
@@ -99,8 +93,16 @@ export function PaymentSection() {
                         {formatDateForTable(date)}
                       </td>
                       <td data-slot="payment-id">{payment.id}</td>
-                      <td data-slot="payment-amount" data-refunded={!!payment.timeRefunded}>
-                        {money(amount, currency)}
+                      <td data-slot="payment-amount" data-refund-status={refund.status}>
+                        <span style={{ "text-decoration": refund.status === "full" ? "line-through" : "none" }}>
+                          {paymentMoney(amount, currency)}
+                        </span>
+                        <Show when={refund.status !== "none"}>
+                          <div data-slot="payment-refund">
+                            {refund.status === "partial" ? "Partially refunded" : "Fully refunded"}:{" "}
+                            {paymentMoney(refund.amount, currency)}
+                          </div>
+                        </Show>
                         <Switch>
                           <Match when={payment.enrichment?.type === "credit"}>
                             {" "}

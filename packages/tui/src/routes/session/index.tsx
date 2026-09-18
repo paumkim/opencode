@@ -68,6 +68,7 @@ import { normalizePath } from "../../util/path"
 import { PermissionPrompt } from "./permission"
 import { QuestionPrompt } from "./question"
 import { DialogExportOptions } from "../../ui/dialog-export-options"
+import { DialogModel } from "../../component/dialog-model"
 import * as Model from "../../util/model"
 import { formatTranscript } from "../../util/transcript"
 import { sessionEpilogue } from "../../util/presentation"
@@ -507,6 +508,17 @@ export function Session() {
       },
       run: () => {
         dialog.replace(() => <DialogSessionRename session={route.sessionID} />)
+      },
+    },
+    {
+      title: "Switch model",
+      value: "session.switch_model",
+      category: "Session",
+      slash: {
+        name: "model",
+      },
+      run: () => {
+        dialog.replace(() => <DialogModel sessionID={route.sessionID} />)
       },
     },
     {
@@ -2279,7 +2291,7 @@ function Task(props: ToolProps) {
 
     const retrying = retry()
     if (isRunning() && retrying) {
-      content.push(`↳ ${formatSubagentRetry(retrying.attempt, Locale.truncate(retrying.message, 80))}`)
+      content.push(`↳ ${formatSubagentRetry(retrying.attempt, retrying.message)}`)
     } else if (isRunning() && tools().length > 0) {
       if (current()) {
         const state = current()!.state
@@ -2326,7 +2338,21 @@ export function formatSubagentTitle(agent: string, description: string, backgrou
 }
 
 export function formatSubagentRetry(attempt: number, message: string) {
-  return `Retrying (attempt ${attempt}) · ${message}`
+  const sanitized = message
+    .replace(/^\[[^\]]+\]\s*/, "")
+    .replace(/\s+/g, " ")
+    .trim()
+  const lower = sanitized.toLowerCase()
+  const label =
+    lower.includes("rate-limit") ||
+    lower.includes("rate limited") ||
+    lower.includes("429") ||
+    lower.includes("temporarily")
+      ? "Rate limited – retrying"
+      : sanitized.length > 60
+        ? sanitized.slice(0, 59) + "…"
+        : sanitized
+  return `Retrying (attempt ${attempt}) · ${label}`
 }
 
 export function formatCompletedSubagentDetail(toolcalls: number, duration: string) {

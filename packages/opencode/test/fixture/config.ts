@@ -6,6 +6,28 @@ export function make(overrides: Partial<Config.Interface> = {}) {
   return Config.Service.of({
     get: () => Effect.succeed({}),
     getGlobal: () => Effect.succeed({}),
+    getOverlay: () => Effect.succeed({
+      scope: "global",
+      effective: {},
+      global: {},
+      project: {},
+      targets: {
+        global: { scope: "global", path: "", revision: "", exists: false, raw: {} },
+        project: { scope: "project", path: "", revision: "", exists: false, raw: {} },
+        active: { scope: "global", path: "", revision: "", exists: false, raw: {} },
+      },
+    }),
+    updateOverlay: () => Effect.succeed({ overlay: {
+      scope: "global",
+      effective: {},
+      global: {},
+      project: {},
+      targets: {
+        global: { scope: "global", path: "", revision: "", exists: false, raw: {} },
+        project: { scope: "project", path: "", revision: "", exists: false, raw: {} },
+        active: { scope: "global", path: "", revision: "", exists: false, raw: {} },
+      },
+    }, changed: false }),
     getConsoleState: () => Effect.succeed(emptyConsoleState),
     update: () => Effect.void,
     updateGlobal: (config) => Effect.succeed({ info: config, changed: false }),

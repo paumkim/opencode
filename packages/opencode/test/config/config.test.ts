@@ -399,6 +399,103 @@ it.effect("updates global config and omits empty shell key in jsonc", () =>
   ),
 )
 
+for (const action of ["ask", "allow", "deny"] as const) {
+  for (const wildcard of [undefined, "deny"] as const) {
+    it.live(`JSONC update promotes permission ${action} with wildcard ${wildcard ?? "inherited"}`, () =>
+      withGlobalConfig({}, ({ dir }) =>
+        Effect.gen(function* () {
+          const fs = yield* FSUtil.Service
+          const config = yield* Config.Service
+          const file = path.join(dir, "opencode.jsonc")
+          yield* fs.writeFileString(
+            file,
+            `{
+  // Keep the permission default when adding exceptions.
+  "permission": {
+    "bash": "${action}", // Keep this rule comment.
+    "edit": "deny"
+  },
+  /* Keep unrelated settings. */
+  "username": "unchanged",
+}`,
+          )
+          const patch: ConfigV1.Info = {
+            permission: { bash: wildcard ? { "*": wildcard, "git *": "allow" } : { "git *": "allow" } },
+          }
+          const updated = yield* config.updateGlobal(patch)
+          const written = yield* fs.readFileString(file)
+          const expected: ConfigV1.Info = {
+            permission: { bash: { "*": wildcard ?? action, "git *": "allow" }, edit: "deny" },
+            username: "unchanged",
+          }
+          expect(ConfigParse.jsonc(written, file)).toEqual(expected)
+          expect(updated.info).toEqual(expected)
+          expect(updated.changed).toBe(true)
+          expect(Object.keys(updated.info.permission?.bash ?? {})).toEqual(["*", "git *"])
+          expect(written).toContain("// Keep the permission default when adding exceptions.")
+          expect(written).toContain('// Keep this rule comment.\n    "edit": "deny"')
+          expect(written).toContain('/* Keep unrelated settings. */\n  "username": "unchanged",')
+
+          expect((yield* config.updateGlobal(patch)).changed).toBe(false)
+          expect(yield* fs.readFileString(file)).toBe(written)
+        }),
+      ),
+    )
+  }
+}
+
+for (const entry of [
+  { name: "string to object", before: "old", patch: { nested: true }, expected: { nested: true } },
+  { name: "boolean to object", before: false, patch: { nested: true }, expected: { nested: true } },
+  { name: "number to object", before: 42, patch: { nested: true }, expected: { nested: true } },
+  { name: "null to object", before: null, patch: { nested: true }, expected: { nested: true } },
+  { name: "array to object", before: ["old"], patch: { nested: true }, expected: { nested: true } },
+  { name: "scalar to empty object", before: "old", patch: {}, expected: {} },
+  { name: "object to scalar", before: { old: true }, patch: "new", expected: "new" },
+  { name: "object to null value", before: { old: true }, patch: null, expected: null },
+  {
+    name: "ordinary nested object merge",
+    before: { nested: { old: true, changed: false } },
+    patch: { nested: { changed: true, added: null } },
+    expected: { nested: { old: true, changed: true, added: null } },
+  },
+]) {
+  it.live(`JSONC update handles non-permission ${entry.name}`, () =>
+    withGlobalConfig({}, ({ dir }) =>
+      Effect.gen(function* () {
+        const fs = yield* FSUtil.Service
+        const config = yield* Config.Service
+        const file = path.join(dir, "opencode.jsonc")
+        yield* fs.writeFileString(
+          file,
+          `{
+  "provider": {
+    "example": {
+      "options": {
+        "setting": ${JSON.stringify(entry.before)},
+        // Keep the sibling option.
+        "sibling": "unchanged"
+      }
+    }
+  },
+  "username": "unchanged"
+}`,
+        )
+        const updated = yield* config.updateGlobal({ provider: { example: { options: { setting: entry.patch } } } })
+        const written = yield* fs.readFileString(file)
+        const expected = {
+          provider: { example: { options: { setting: entry.expected, sibling: "unchanged" } } },
+          username: "unchanged",
+        }
+        expect(ConfigParse.jsonc(written, file)).toEqual(expected)
+        expect(updated.info).toEqual(expected)
+        expect(updated.changed).toBe(true)
+        expect(written).toContain('// Keep the sibling option.\n        "sibling": "unchanged"')
+      }),
+    ),
+  )
+}
+
 it.effect("logs global update diagnostics once without exposing values", () =>
   withGlobalConfig(
     {
@@ -781,6 +878,143 @@ accountTokenIt.instance("resolves env templates in account config with account t
   Effect.gen(function* () {
     const config = yield* Config.use.get()
     expect(config.provider?.["opencode"]?.options?.apiKey).toBe("st_test_token")
+  }),
+)
+
+accountTokenIt.instance("keeps direct providers out of the active console", () =>
+  Effect.gen(function* () {
+    const test = yield* TestInstance
+    yield* writeConfigEffect(test.directory, {
+      provider: { opencode: { console: false, options: { apiKey: "direct-key" } } },
+    })
+    const config = yield* Config.use.get()
+    expect(config.provider?.opencode?.options?.apiKey).toBe("direct-key")
+    expect((yield* Config.use.getConsoleState()).consoleManagedProviders).not.toContain("opencode")
+  }),
+)
+
+accountTokenIt.instance("preserves explicitly configured provider endpoints", () =>
+  Effect.gen(function* () {
+    const test = yield* TestInstance
+    yield* writeConfigEffect(test.directory, {
+      provider: { opencode: { options: { baseURL: "https://direct.example.com/v1", apiKey: "direct-key" } } },
+    })
+    const config = yield* Config.use.get()
+    expect(config.provider?.opencode?.options).toEqual({
+      baseURL: "https://direct.example.com/v1",
+      apiKey: "direct-key",
+    })
+  }),
+)
+
+const consoleRoutesIt = configIt({
+  account: Layer.mock(Account.Service)({
+    active: () => Effect.succeed(Option.none()),
+    list: () =>
+      Effect.succeed([
+        {
+          id: AccountID.make("console-a"),
+          email: "a@example.com",
+          url: "https://a.example.com",
+          active_org_id: OrgID.make("org-a"),
+        },
+        {
+          id: AccountID.make("console-a-secondary"),
+          email: "secondary@example.com",
+          url: "https://a.example.com",
+          active_org_id: OrgID.make("org-secondary"),
+        },
+        {
+          id: AccountID.make("console-b"),
+          email: "b@example.com",
+          url: "https://b.example.com",
+          active_org_id: OrgID.make("org-b"),
+        },
+      ]),
+    token: (id) => Effect.succeed(Option.some(AccessToken.make(`token-${id}`))),
+    config: (id, orgID) =>
+      Effect.succeed(
+        Option.some({
+          username: "must-not-import",
+          provider: Object.fromEntries(
+            ["opencode", "kilo", "openai", "anthropic", "meta"].map((provider) => [
+              provider,
+              {
+                options: {
+                  baseURL: `https://${id}.example.com/${orgID}/${provider}/v1`,
+                  apiKey: "{env:OPENCODE_CONSOLE_TOKEN}",
+                },
+              },
+            ]),
+          ),
+        }),
+      ),
+  }),
+})
+
+consoleRoutesIt.instance("routes providers to separate consoles with isolated credentials", () =>
+  Effect.gen(function* () {
+    const test = yield* TestInstance
+    yield* writeConfigEffect(test.directory, {
+      username: "local-user",
+      provider: {
+        opencode: { console: { url: "https://a.example.com/", accountID: "console-a" } },
+        kilo: { console: { url: "https://b.example.com", orgID: "org-selected" } },
+        openai: { console: false, options: { apiKey: "openai-key" } },
+        anthropic: { console: false, options: { apiKey: "anthropic-key" } },
+        meta: { console: false, options: { apiKey: "meta-key" } },
+      },
+    })
+    const config = yield* Config.use.get()
+    expect(config.username).toBe("local-user")
+    expect(config.provider?.opencode?.options).toEqual({
+      baseURL: "https://console-a.example.com/org-a/opencode/v1",
+      apiKey: "token-console-a",
+    })
+    expect(config.provider?.kilo?.options).toEqual({
+      baseURL: "https://console-b.example.com/org-selected/kilo/v1",
+      apiKey: "token-console-b",
+    })
+    expect(config.provider?.openai?.options?.apiKey).toBe("openai-key")
+    expect(config.provider?.anthropic?.options?.apiKey).toBe("anthropic-key")
+    expect(config.provider?.meta?.options?.apiKey).toBe("meta-key")
+    expect((yield* Config.use.getConsoleState()).consoleManagedProviders).toEqual(["opencode", "kilo"])
+  }),
+)
+
+consoleRoutesIt.instance("fails closed when the selected console account is missing", () =>
+  Effect.gen(function* () {
+    const test = yield* TestInstance
+    yield* writeConfigEffect(test.directory, {
+      provider: { opencode: { console: { url: "https://missing.example.com" } } },
+    })
+    const exit = yield* Config.use.get().pipe(Effect.exit)
+    expect(Exit.isFailure(exit)).toBe(true)
+    expect(String(Exit.isFailure(exit) ? Cause.squash(exit.cause) : "")).toContain("exactly one signed-in account")
+  }),
+)
+
+consoleRoutesIt.instance("rejects ambiguous console accounts without selecting one silently", () =>
+  Effect.gen(function* () {
+    const test = yield* TestInstance
+    yield* writeConfigEffect(test.directory, {
+      provider: { opencode: { console: { url: "https://a.example.com" } } },
+    })
+    const exit = yield* Config.use.get().pipe(Effect.exit)
+    expect(Exit.isFailure(exit)).toBe(true)
+    expect(String(Exit.isFailure(exit) ? Cause.squash(exit.cause) : "")).toContain("console.accountID")
+  }),
+)
+
+consoleRoutesIt.instance("rejects a provider missing from the selected console", () =>
+  Effect.gen(function* () {
+    const test = yield* TestInstance
+    yield* writeConfigEffect(test.directory, {
+      provider: { unavailable: { console: { url: "https://b.example.com" } } },
+    })
+    const exit = yield* Config.use.get().pipe(Effect.exit)
+    expect(Exit.isFailure(exit)).toBe(true)
+    expect(String(Exit.isFailure(exit) ? Cause.squash(exit.cause) : "")).toContain("does not provide unavailable")
   }),
 )
 

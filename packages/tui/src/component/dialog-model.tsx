@@ -10,6 +10,7 @@ import { DialogVariant } from "./dialog-variant"
 import * as fuzzysort from "fuzzysort"
 import { useConnected } from "./use-connected"
 import { useSync } from "../context/sync"
+import { useSDK } from "../context/sdk"
 import { TextAttributes } from "@opentui/core"
 import {
   MODEL_SEARCH_KEYS,
@@ -24,13 +25,15 @@ import {
   smartCategory,
 } from "../util/model-categories"
 
-export function DialogModel(props: { providerID?: string }) {
+export function DialogModel(props: { providerID?: string; sessionID?: string }) {
   const local = useLocal()
   const sync = useSync()
   const dialog = useDialog()
+  const sdk = useSDK()
   const { theme } = useTheme()
   const dimensions = useTerminalDimensions()
   const [query, setQuery] = createSignal("")
+  const [switching, setSwitching] = createSignal(false)
 
   const connected = useConnected()
   const providers = createDialogProviderOptions()
@@ -240,6 +243,27 @@ export function DialogModel(props: { providerID?: string }) {
     local.model.set({ providerID, modelID }, { recent: true })
     const list = local.model.variant.list()
     const cur = local.model.variant.selected()
+
+    // Mid-session model switch: persist to the server so the next
+    // provider turn uses the new model.
+    if (props.sessionID) {
+      setSwitching(true)
+      sdk.client.v2.session
+        .switchModel({
+          sessionID: props.sessionID,
+          model: { providerID, id: modelID },
+        })
+        .then(() => {
+          setSwitching(false)
+          dialog.clear()
+        })
+        .catch(() => {
+          setSwitching(false)
+          dialog.clear()
+        })
+      return
+    }
+
     if (cur === "default" || (cur && list.includes(cur))) {
       dialog.clear()
       return
@@ -294,16 +318,21 @@ export function DialogModel(props: { providerID?: string }) {
               return
             }
             const o = option as any
-            setPreview({
-              title: o.title,
-              description: o.description,
-              providerID: o.providerID,
-              releaseDate: o.releaseDate,
-              reasoning: o.reasoning,
-              toolcall: o.toolcall,
-              context: o.context,
-              isFree: o.isFree,
-              cost: o.cost,
+            const key = `${o.providerID ?? ""}:${o.modelID ?? o.title}`
+            setPreview((prev) => {
+              const prevKey = `${prev?.providerID ?? ""}:${(prev as any)?.modelID ?? prev?.title}`
+              if (prev && prevKey === key) return prev
+              return {
+                title: o.title,
+                description: o.description,
+                providerID: o.providerID,
+                releaseDate: o.releaseDate,
+                reasoning: o.reasoning,
+                toolcall: o.toolcall,
+                context: o.context,
+                isFree: o.isFree,
+                cost: o.cost,
+              }
             })
           }}
           skipFilter={true}
@@ -311,9 +340,8 @@ export function DialogModel(props: { providerID?: string }) {
           current={local.model.current()}
         />
       </box>
-      <Show when={wide() && preview()}>
-        {(item) => {
-          const p = item()!
+      <Show when={wide() && preview()} keyed>
+        {(p) => {
           const cost = p.cost
           const ctx = p.context
           const free = p.isFree

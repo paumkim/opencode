@@ -6,6 +6,7 @@ import type { TextareaRenderable } from "@opentui/core"
 import { useTheme, selectedForeground } from "../../context/theme"
 import type { PermissionRequest } from "@opencode-ai/sdk/v2"
 import { useSDK } from "../../context/sdk"
+import { useOptionalSharedWorkspace } from "../../context/shared-workspace"
 import { SplitBorder } from "../../ui/border"
 import { useSync } from "../../context/sync"
 import { useProject } from "../../context/project"
@@ -112,6 +113,7 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
   const sdk = useSDK()
   const project = useProject()
   const sync = useSync()
+  const sharedWs = useOptionalSharedWorkspace()
   const [store, setStore] = createStore({
     stage: "permission" as PermissionStage,
   })
@@ -165,25 +167,33 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
           onSelect={(option) => {
             setStore("stage", "permission")
             if (option === "cancel") return
-            void sdk.client.permission.reply({
-              reply: "always",
-              requestID: props.request.id,
-              directory: props.directory,
-              workspace: project.workspace.current(),
-            })
+            if (sharedWs) {
+              sharedWs.sendPermissionReply(props.request.sessionID, props.request.id, "always")
+            } else {
+              void sdk.client.permission.reply({
+                reply: "always",
+                requestID: props.request.id,
+                directory: props.directory,
+                workspace: project.workspace.current(),
+              })
+            }
           }}
         />
       </Match>
       <Match when={store.stage === "reject"}>
         <RejectPrompt
           onConfirm={(message) => {
-            void sdk.client.permission.reply({
-              reply: "reject",
-              requestID: props.request.id,
-              directory: props.directory,
-              message: message || undefined,
-              workspace: project.workspace.current(),
-            })
+            if (sharedWs) {
+              sharedWs.sendPermissionReply(props.request.sessionID, props.request.id, "reject", message || undefined)
+            } else {
+              void sdk.client.permission.reply({
+                reply: "reject",
+                requestID: props.request.id,
+                directory: props.directory,
+                message: message || undefined,
+                workspace: project.workspace.current(),
+              })
+            }
           }}
           onCancel={() => {
             setStore("stage", "permission")
@@ -415,20 +425,28 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
                     setStore("stage", "reject")
                     return
                   }
+                  if (sharedWs) {
+                    sharedWs.sendPermissionReply(props.request.sessionID, props.request.id, "reject")
+                  } else {
+                    void sdk.client.permission.reply({
+                      reply: "reject",
+                      requestID: props.request.id,
+                      directory: props.directory,
+                      workspace: project.workspace.current(),
+                    })
+                  }
+                  return
+                }
+                if (sharedWs) {
+                  sharedWs.sendPermissionReply(props.request.sessionID, props.request.id, "once")
+                } else {
                   void sdk.client.permission.reply({
-                    reply: "reject",
+                    reply: "once",
                     requestID: props.request.id,
                     directory: props.directory,
                     workspace: project.workspace.current(),
                   })
-                  return
                 }
-                void sdk.client.permission.reply({
-                  reply: "once",
-                  requestID: props.request.id,
-                  directory: props.directory,
-                  workspace: project.workspace.current(),
-                })
               }}
             />
           )

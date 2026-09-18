@@ -149,10 +149,20 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
   // Codex parity: OpenAI Responses-family providers hardcode `strict: false`
   // on every function tool so MCP-sourced and dynamic schemas that don't
   // satisfy OpenAI's structured-outputs constraints still register.
+  // Stealth gateways (e.g. stealth/union-alpha via OpenRouter or
+  // openai-compatible) likewise reject strict schemas, so force strict:false
+  // there too to avoid aborts on tool registration.
+  const stealthModelID = `${input.model.id} ${input.model.api.id}`.toLowerCase()
+  const isStealthUnionAlpha =
+    stealthModelID.includes("union-alpha") || stealthModelID.includes("stealth/") || stealthModelID.includes("stealth")
+  const isStealthCompatibleProvider =
+    input.model.api.npm === "@openrouter/ai-sdk-provider" || input.model.api.npm === "@ai-sdk/openai-compatible"
   if (
     input.model.api.npm === "@ai-sdk/openai" ||
     input.model.api.npm === "@ai-sdk/azure" ||
-    input.model.api.npm === "@ai-sdk/amazon-bedrock/mantle"
+    input.model.api.npm === "@ai-sdk/amazon-bedrock/mantle" ||
+    isStealthUnionAlpha ||
+    (isStealthCompatibleProvider && isStealthUnionAlpha)
   ) {
     for (const key of Object.keys(tools)) tools[key] = { ...tools[key], strict: false }
   }

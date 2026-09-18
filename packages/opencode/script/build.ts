@@ -14,7 +14,10 @@ process.chdir(dir)
 const generated = await import("./generate.ts")
 
 import { Script } from "@opencode-ai/script"
+import { readInternalVersion } from "../../core/src/installation/internal-version"
 import pkg from "../package.json"
+
+const internalVersion = readInternalVersion()
 
 const singleFlag = process.argv.includes("--single")
 const baselineFlag = process.argv.includes("--baseline")
@@ -196,6 +199,7 @@ for (const item of targets) {
     define: {
       FFF_LIBC: JSON.stringify(item.abi === "musl" ? "musl" : "gnu"),
       OPENCODE_VERSION: `'${Script.version}'`,
+      OPENCODE_INTERNAL_VERSION: JSON.stringify(internalVersion),
       OPENCODE_MODELS_DEV: generated.modelsData,
       OTUI_TREE_SITTER_WORKER_PATH: bunfsRoot + treeSitterWorkerPath,
       OPENCODE_WORKER_PATH: workerPath,

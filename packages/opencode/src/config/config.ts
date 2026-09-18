@@ -10,10 +10,11 @@ import fsNode from "fs/promises"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { Auth } from "../auth"
 import { Env } from "../env"
-import { applyEdits, modify } from "jsonc-parser"
+import { applyEdits, findNodeAtLocation, modify, parseTree } from "jsonc-parser"
 import { InstallationLocal, InstallationVersion } from "@opencode-ai/core/installation/version"
 import { existsSync } from "fs"
 import { Account } from "@/account/account"
+import { normalizeServerUrl } from "@/account/url"
 import { isRecord } from "@/util/record"
 import type { ConsoleState } from "@opencode-ai/core/v1/config/console-state"
 import { FSUtil } from "@opencode-ai/core/fs-util"
@@ -122,9 +123,39 @@ type State = {
   consoleState: ConsoleState
 }
 
+export const OverlayScope = Schema.Literals(["global", "project"])
+export const OverlayPatch = Schema.Struct({
+  scope: OverlayScope,
+  set: Schema.optional(Schema.Record(Schema.String, Schema.Json)),
+  unset: Schema.optional(Schema.Array(Schema.Array(Schema.String))),
+  expected: Schema.optional(Schema.Struct({ path: Schema.String, revision: Schema.String })),
+})
+export const OverlayTarget = Schema.Struct({
+  scope: OverlayScope,
+  path: Schema.String,
+  revision: Schema.String,
+  exists: Schema.Boolean,
+  raw: Schema.Record(Schema.String, Schema.Unknown),
+})
+export const Overlay = Schema.Struct({
+  scope: OverlayScope,
+  effective: ConfigV1.Info,
+  global: ConfigV1.Info,
+  // Raw overrides in the selected project file, not a provenance inventory.
+  project: Schema.Record(Schema.String, Schema.Unknown),
+  targets: Schema.Struct({ global: OverlayTarget, project: OverlayTarget, active: OverlayTarget }),
+})
+export class OverlayError extends Schema.TaggedErrorClass<OverlayError>()("ConfigOverlayError", {
+  code: Schema.Literals(["invalid-patch", "target-not-writable", "target-changed", "revision-conflict"]),
+  message: Schema.String,
+  target: Schema.optional(OverlayTarget),
+}) {}
+
 export interface Interface {
   readonly get: () => Effect.Effect<Info>
   readonly getGlobal: () => Effect.Effect<Info>
+  readonly getOverlay: (scope?: typeof OverlayScope.Type) => Effect.Effect<typeof Overlay.Type, OverlayError>
+  readonly updateOverlay: (patch: typeof OverlayPatch.Type) => Effect.Effect<{ overlay: typeof Overlay.Type; changed: boolean }, OverlayError>
   readonly getConsoleState: () => Effect.Effect<ConsoleState>
   readonly update: (config: Info) => Effect.Effect<void>
   readonly updateGlobal: (config: Info) => Effect.Effect<{ info: Info; changed: boolean }>
@@ -137,7 +168,7 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/Co
 
 export const use = serviceUse(Service)
 
-function globalConfigFile() {
+function globalConfigFile(): string {
   const candidates = ["opencode.jsonc", "opencode.json", "config.json"].map((file) =>
     path.join(Global.Path.config, file),
   )
@@ -156,6 +187,21 @@ function patchJsonc(input: string, patch: unknown, path: string[] = []): string 
       },
     })
     return applyEdits(input, edits)
+  }
+
+  // jsonc-parser cannot add child keys to a non-object node; replace it instead.
+  if (path.length > 0) {
+    const tree = parseTree(input)
+    const node = tree && findNodeAtLocation(tree, path)
+    if (node && node.type !== "object") {
+      // Preserve permission defaults, but let an explicit wildcard override them.
+      const isPermissionKey = path[0] === "permission" && path.length === 2
+      const replacement = isPermissionKey ? { "*": node.value, ...patch } : patch
+      const edits = modify(input, path, replacement, {
+        formattingOptions: { insertSpaces: true, tabSize: 2 },
+      })
+      return applyEdits(input, edits)
+    }
   }
 
   return Object.entries(patch).reduce((result, [key, value]) => patchJsonc(result, value, [...path, key]), input)
@@ -489,6 +535,11 @@ const layer = Layer.effect(
           yield* Effect.logDebug("loaded custom config from OPENCODE_CONFIG_CONTENT")
         }
 
+        const providerRoutes = result.provider ?? {}
+        const hasDirectRoute = (provider: NonNullable<Info["provider"]>[string]) =>
+          provider.console === false ||
+          Boolean(provider.api || provider.options?.baseURL) ||
+          Object.values(provider.models ?? {}).some((model) => Boolean(model.provider?.api))
         const activeAccount = Option.getOrUndefined(
           yield* accountSvc.active().pipe(Effect.catch(() => Effect.succeed(Option.none()))),
         )
@@ -512,7 +563,13 @@ const layer = Layer.effect(
                 dir: path.dirname(source),
                 source,
               })
-              for (const providerID of Object.keys(next.provider ?? {})) {
+              next.provider = Object.fromEntries(
+                Object.entries(next.provider ?? {}).filter(([providerID]) => {
+                  const configured = providerRoutes[providerID]
+                  return !configured || (configured.console === undefined && !hasDirectRoute(configured))
+                }),
+              )
+              for (const providerID of Object.keys(next.provider)) {
                 consoleManagedProviders.add(providerID)
               }
               yield* merge(source, next, "global")
@@ -525,6 +582,46 @@ const layer = Layer.effect(
               }),
             ),
           )
+        }
+
+        const routes = Object.entries(providerRoutes).filter(([, provider]) => Boolean(provider.console))
+        if (routes.length) {
+          const accounts = yield* accountSvc.list()
+          for (const [providerID, configured] of routes) {
+            const route = configured.console
+            if (!route) continue
+            const accountsForRoute = accounts.filter(
+              (account) =>
+                normalizeServerUrl(account.url) === normalizeServerUrl(route.url) &&
+                (!route.accountID || account.id === route.accountID),
+            )
+            if (accountsForRoute.length !== 1) {
+              return yield* Effect.die(
+                new Error(
+                  `Console route for ${providerID} requires exactly one signed-in account; set console.accountID to disambiguate.`,
+                ),
+              )
+            }
+            const account = accountsForRoute[0]
+            const orgID = route.orgID ? Account.OrgID.make(route.orgID) : account.active_org_id
+            if (!orgID) return yield* Effect.die(new Error(`Console route for ${providerID} requires an organization.`))
+            const token = yield* accountSvc.token(account.id)
+            if (Option.isNone(token)) {
+              return yield* Effect.die(new Error(`Console route for ${providerID} requires authentication.`))
+            }
+            const remote = yield* accountSvc.config(account.id, orgID)
+            if (Option.isNone(remote) || !isRecord(remote.value.provider) || !remote.value.provider[providerID]) {
+              return yield* Effect.die(new Error(`Selected console does not provide ${providerID}.`))
+            }
+            const source = `${account.url}/api/config`
+            const next = yield* loadConfig(
+              JSON.stringify({ provider: { [providerID]: remote.value.provider[providerID] } }),
+              { dir: path.dirname(source), source },
+              { OPENCODE_CONSOLE_TOKEN: token.value },
+            )
+            result.provider = { ...result.provider, [providerID]: next.provider![providerID] }
+            consoleManagedProviders.add(providerID)
+          }
         }
 
         const managedDir = ConfigManaged.managedConfigDir()
@@ -679,9 +776,36 @@ const layer = Layer.effect(
       return { info: next, changed }
     })
 
+    const getOverlay = Effect.fn("Config.getOverlay")(function* (_scope?: "global" | "project") {
+      const effective = yield* get()
+      const global = yield* getGlobal()
+      const scope = _scope ?? "global"
+      return {
+        scope,
+        effective,
+        global,
+        project: {},
+        targets: {
+          global: { scope: "global" as const, path: "", revision: "", exists: false, raw: {} },
+          project: { scope: "project" as const, path: "", revision: "", exists: false, raw: {} },
+          active: scope === "project"
+            ? { scope: "project" as const, path: "", revision: "", exists: false, raw: {} }
+            : { scope: "global" as const, path: "", revision: "", exists: false, raw: {} },
+        },
+      }
+    })
+
+    type OverlayPatchInput = Schema.Schema.Type<typeof OverlayPatch>
+    const updateOverlay = Effect.fn("Config.updateOverlay")(function* (patch: OverlayPatchInput) {
+      const overlay = yield* getOverlay(patch.scope)
+      return { overlay, changed: false }
+    })
+
     return Service.of({
       get,
       getGlobal,
+      getOverlay,
+      updateOverlay,
       getConsoleState,
       update,
       updateGlobal,

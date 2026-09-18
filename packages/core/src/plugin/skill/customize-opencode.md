@@ -189,6 +189,56 @@ Register skills from non-default locations via `skills.paths` (scanned
 recursively for `**/SKILL.md`) and `skills.urls` (each URL serves a list of
 skills).
 
+## Creating New Skills
+
+When creating a new skill, use the proper high-quality template from the term-skills
+quality corpus rather than writing from scratch:
+
+```
+term/packages/term-skills/quality/writing-skills/SKILL.md
+```
+
+This is the canonical skill-authoring reference — it covers format, metadata
+validation, directory structure, and best practices. **Always start there** when
+creating a new skill.
+
+### Where skills live
+
+| Scope                         | Path                                                                                                                      |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| Project skills                | `.opencode/skill(s)/<name>/SKILL.md`                                                                                      |
+| Global skills                 | `~/.config/opencode/skill(s)/<name>/SKILL.md`                                                                             |
+| External skills (auto-loaded) | `~/.claude/skills/<name>/SKILL.md`, `~/.agents/skills/<name>/SKILL.md`                                                    |
+| **Quality corpus**            | `term/packages/term-skills/quality/<name>/SKILL.md`                                                                       |
+
+The quality corpus at `term/packages/term-skills/quality/` is the canonical
+location for curated, high-quality skills. When adding a new skill, place it
+there following the same directory layout (`<name>/SKILL.md`). The corpus is
+audited by `term/packages/term-skills/audit_skills.py` — run it after creating
+a new skill to validate format and metadata.
+
+### Skill format
+
+Every skill in the quality corpus follows this structure:
+
+```text
+<name>/
+  SKILL.md              # Required metadata and core instructions
+  scripts/              # Optional executable tools
+  references/           # Optional detailed documentation
+  assets/               # Optional templates and static resources
+```
+
+Required YAML frontmatter fields:
+- `name`: lowercase hyphen-separated, 1-64 chars, matches folder name
+- `description`: 1-1024 chars, covers both capability and triggers
+
+Optional fields: `license`, `compatibility`, `metadata` (string-string map),
+`allowed-tools` (experimental).
+
+See `term/packages/term-skills/quality/writing-skills/SKILL.md` for the full
+specification, including validation rules, naming conventions, and examples.
+
 ## References
 
 References make local directories and Git repositories outside the active

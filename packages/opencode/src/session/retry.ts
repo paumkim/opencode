@@ -38,6 +38,7 @@ const RETRYABLE_MESSAGE_PATTERNS = [
   /^timeout$|\b(?:request|response|connection|network|stream|read) (?:timeout|timed out|time out)\b/i,
   /try your request again|retry your request|resource exhausted|resource_exhausted/i,
   /\btry again (?:later|in\b)|\b(?:currently|temporarily) at capacity\b/i,
+  /\[stealth\]|stealth\/|union-alpha|rate-limited upstream|temporarily|capacity/i,
 ]
 
 function cap(ms: number) {

@@ -20,6 +20,15 @@
     "@opencode-ai/function#test": {
       "outputs": []
     },
+    "@opencode-ai/console-app#test": {
+      "outputs": []
+    },
+    "@opencode-ai/console-core#test": {
+      "outputs": []
+    },
+    "@opencode-ai/console-function#test": {
+      "outputs": []
+    },
     "@opencode-ai/app#test": {
       "dependsOn": ["^build"],
       "outputs": []

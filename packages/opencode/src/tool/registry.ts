@@ -31,6 +31,7 @@ import { WebSearchTool } from "./websearch"
 import { LspTool } from "./lsp"
 import * as Truncate from "./truncate"
 import { ApplyPatchTool } from "./apply_patch"
+import { GhosttyTerminalTool } from "./ghostty-terminal"
 import { Glob } from "@opencode-ai/core/util/glob"
 import path from "path"
 import { pathToFileURL } from "url"
@@ -111,6 +112,7 @@ const layer = Layer.effect(
     const webfetch = yield* WebFetchTool
     const websearch = yield* WebSearchTool
     const shell = yield* ShellTool
+    const terminal = yield* GhosttyTerminalTool
     const globtool = yield* GlobTool
     const writetool = yield* WriteTool
     const edit = yield* EditTool
@@ -214,6 +216,7 @@ const layer = Layer.effect(
           invalid: Tool.init(invalid),
           compact: Tool.init(compact),
           shell: Tool.init(shell),
+          terminal: Tool.init(terminal),
           read: Tool.init(read),
           glob: Tool.init(globtool),
           grep: Tool.init(greptool),
@@ -239,6 +242,7 @@ const layer = Layer.effect(
             tool.compact,
             ...(questionEnabled ? [tool.question] : []),
             tool.shell,
+            tool.terminal,
             tool.read,
             tool.glob,
             tool.grep,

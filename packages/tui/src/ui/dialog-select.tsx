@@ -97,6 +97,19 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
   let selection: { value: T; category?: string } | undefined
   let resetSelection = false
   let visibilityGeneration = 0
+  // Generation counter: incremented on every user/programmatic move so the
+  // pending setTimeout(0) current-sync can be ignored if the user already moved.
+  let moveGeneration = 0
+  // Dedup guard: onMove is driven both synchronously in moveTo() and via the
+  // selected() effect below — only notify when the value actually changed.
+  let lastNotified: T | undefined
+  let lastNotifiedInit = false
+  function notifyMove(option: DialogSelectOption<T>) {
+    if (lastNotifiedInit && isDeepEqual(lastNotified, option.value)) return
+    lastNotified = option.value
+    lastNotifiedInit = true
+    props.onMove?.(option)
+  }
 
   createEffect(
     on(
@@ -223,8 +236,30 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
   createEffect(() => {
     const option = selected()
     if (!option) return
-    props.onMove?.(option)
+    notifyMove(option)
   })
+
+  // Sync initial highlight to props.current synchronously (before the
+  // setTimeout(0) current-sync below) so the first arrow key steps from the
+  // current item instead of teleporting from index 0.
+  {
+    const init = () => {
+      if (props.current === undefined) return
+      const currentIndex = flat().findIndex((opt) => isDeepEqual(opt.value, props.current))
+      if (currentIndex >= 0 && currentIndex !== store.selected) {
+        setStore("selected", currentIndex)
+        selection = flat()[currentIndex]
+      }
+    }
+    init()
+    createEffect(() => {
+      // Re-run when options load async (e.g. providers fetch after mount),
+      // but never yank the highlight after the user has moved.
+      flat()
+      if (moveGeneration !== 0) return
+      init()
+    })
+  }
 
   createEffect(
     on(
@@ -286,7 +321,10 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
   createEffect(
     on([() => store.filter, () => props.current], ([filter, current]) => {
       if (filter.length > 0) resetSelection = true
+      const generation = moveGeneration
       setTimeout(() => {
+        // Ignore stale sync if the user already moved since scheduling.
+        if (generation !== moveGeneration) return
         if (filter.length > 0) {
           moveTo(0, true, false)
         } else if (current) {
@@ -302,13 +340,20 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
   function move(direction: number) {
     if (props.locked) return
     if (flat().length === 0) return
+    // Page jumps clamp instead of wrapping; single-step wraps.
+    if (Math.abs(direction) > 1) {
+      const next = Math.min(Math.max(store.selected + direction, 0), flat().length - 1)
+      moveTo(next, true)
+      return
+    }
     let next = store.selected + direction
     if (next < 0) next = flat().length - 1
     if (next >= flat().length) next = 0
-    moveTo(next, true)
+    moveTo(next, false)
   }
 
   function moveTo(next: number, center = false, preserve = true) {
+    moveGeneration++
     setFocusedAction(undefined)
     setStore("selected", next)
     // Access flat() directly instead of selected() — selected() is a
@@ -320,8 +365,9 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
       selection = option
       resetSelection = !preserve
       // Drive onMove synchronously so the detail/preview panel updates
-      // immediately on click, not on a later effect tick.
-      props.onMove?.(option)
+      // immediately on click, not on a later effect tick. Deduped against
+      // the selected() effect so one keypress = one notification.
+      notifyMove(option)
     }
     scrollToSelection(center)
   }
@@ -432,7 +478,7 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
           run() {
             if (props.locked) return
             setStore("input", "keyboard")
-            moveTo(0)
+            moveTo(0, true)
           },
         },
         {
@@ -442,7 +488,7 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
           run() {
             if (props.locked) return
             setStore("input", "keyboard")
-            moveTo(flat().length - 1)
+            moveTo(flat().length - 1, true)
           },
         },
         {
@@ -693,6 +739,10 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
                             }}
                             onMouseOver={() => {
                               if (props.locked) return
+                              // Keyboard guard: synthetic hover fires when the
+                              // preview resizes and the list reflows under the
+                              // cursor — ignore it during keyboard nav.
+                              if (store.input === "keyboard") return
                               const index = flat().findIndex((x) => isDeepEqual(x.value, option.value))
                               if (index === -1) return
                               setStore("input", "mouse")
@@ -820,7 +870,9 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
               ? Locale.truncateLeft(props.title, props.titleWidth ?? 45)
               : Locale.truncate(props.title, props.titleWidth ?? 45))}
         <Show when={props.description}>
-          <span style={{ fg: props.active && !props.muted ? fg : theme.textMuted, marginLeft: 4 }}>{Locale.truncate(props.description ?? "", 40)}</span>
+          <span style={{ fg: props.active && !props.muted ? fg : theme.textMuted }}>
+            {"  " + Locale.truncate(props.description ?? "", 40)}
+          </span>
         </Show>
       </text>
       <Show when={props.footer}>

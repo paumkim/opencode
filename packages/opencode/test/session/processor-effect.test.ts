@@ -3,7 +3,8 @@ import { Database } from "@opencode-ai/core/database/database"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { expect } from "bun:test"
-import { tool } from "ai"
+import { APICallError, jsonSchema, tool, type ModelMessage } from "ai"
+import { Config } from "@/config/config"
 import { Cause, Effect, Exit, Fiber, Layer, Stream } from "effect"
 import path from "path"
 import z from "zod"
@@ -167,6 +168,7 @@ const assistant = Effect.fn("TestSession.assistant")(function* (
 })
 
 const root = LayerNode.group([
+  Config.node,
   SessionProcessor.node,
   Session.node,
   SessionProjector.node,
@@ -186,6 +188,107 @@ const env = LayerNode.compile(
 )
 
 const it = testEffect(env)
+
+it.live("preflight requests compaction before provider invocation without retry or loop signals", () =>
+  provideTmpdirServer(
+    ({ dir, llm }) => Effect.gen(function* () {
+      const { processors, session, provider } = yield* boot()
+      const chat = yield* session.create({})
+      const parent = yield* user(chat.id, "x".repeat(300_000))
+      const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+      delete msg.finish
+      const model = yield* provider.getModel(ref.providerID, ref.modelID)
+      const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model })
+      const value = yield* handle.process({
+        user: parent,
+        sessionID: chat.id,
+        model,
+        agent: agent(),
+        system: [],
+        messages: [{ role: "user", content: "x".repeat(300_000) }],
+        tools: {},
+      })
+      expect(value).toMatchObject({ result: "compact", noEditStreak: 0, runaway: false })
+      expect(yield* llm.calls).toBe(0)
+      expect(handle.message.error).toBeUndefined()
+      expect(handle.message.finish).toBeUndefined()
+      expect(handle.message.time.completed).toBeDefined()
+      expect(handle.loopDetected).toBe(false)
+      expect(yield* MessageV2.parts(msg.id)).toEqual([])
+    }),
+    { config: (url) => ({ ...providerCfg(url), compaction: { threshold: 0.75 } }) },
+  ),
+)
+
+const large = "x".repeat(300_000)
+const continuation: ModelMessage[] = [
+  { role: "user", content: large },
+  { role: "assistant", content: [{ type: "tool-call", toolCallId: "done", toolName: "lookup", input: {} }] },
+  { role: "tool", content: [{ type: "tool-result", toolCallId: "done", toolName: "lookup", output: { type: "text", value: "done" } }] },
+]
+const preflightCases: Array<{
+  name: string
+  compact: boolean
+  compaction?: { auto?: boolean; threshold?: number; reserved?: number }
+  messages?: ModelMessage[]
+  tools?: LLM.StreamInput["tools"]
+  limit?: { context: number; input?: number; output: number }
+  summary?: boolean
+  preflight?: boolean
+  continuation?: boolean
+  system?: string[]
+}> = [
+  { name: "enabled", compact: true },
+  { name: "auto disabled", compact: false, compaction: { auto: false, threshold: 0.75 } },
+  { name: "threshold absent", compact: false, compaction: {} },
+  { name: "threshold out of range", compact: false, compaction: { threshold: 2 } },
+  { name: "unknown context", compact: false, limit: { context: 0, output: 10_000 } },
+  { name: "summary bypass", compact: false, summary: true },
+  { name: "attempt already made", compact: false, preflight: false },
+  { name: "fits capacity", compact: false, messages: [{ role: "user", content: "hi" }] },
+  { name: "output reserve", compact: true, compaction: { threshold: 1 }, limit: { context: 100_000, output: 32_000 }, messages: [{ role: "user", content: "x".repeat(220_000) }] },
+  { name: "input capacity", compact: true, limit: { context: 400_000, input: 100_000, output: 10_000 } },
+  { name: "configured reserve", compact: true, compaction: { threshold: 1, reserved: 50_000 }, limit: { context: 400_000, input: 100_000, output: 10_000 }, messages: [{ role: "user", content: "x".repeat(180_000) }] },
+  { name: "system prompt counted", compact: true, messages: [{ role: "user", content: "hi" }], system: [large] },
+  { name: "JSON schema counted", compact: true, messages: [{ role: "user", content: "hi" }], tools: { lookup: tool({ inputSchema: jsonSchema({ type: "object", description: large }) }) } },
+  { name: "Zod schema counted", compact: true, messages: [{ role: "user", content: "hi" }], tools: { lookup: tool({ inputSchema: z.object({ query: z.string().describe(large) }) }) } },
+  { name: "tool continuation protected", compact: false, messages: continuation, continuation: true },
+  { name: "new user after tool permits compaction", compact: true, messages: [...continuation, { role: "user", content: "next" }], continuation: false },
+  { name: "encoded image normalized", compact: false, messages: [{ role: "user", content: [{ type: "image", image: `data:image/png;base64,${large}` }] }] },
+  { name: "binary image normalized", compact: false, messages: [{ role: "user", content: [{ type: "image", image: new Uint8Array(300_000) }] }] },
+  { name: "encoded file normalized", compact: false, messages: [{ role: "user", content: [{ type: "file", mediaType: "image/png", data: large }] }] },
+  { name: "text beside media counted", compact: true, messages: [{ role: "user", content: [{ type: "text", text: large }, { type: "image", image: "data:image/png;base64,eA==" }] }] },
+  { name: "opaque reasoning normalized", compact: false, messages: [{ role: "assistant", content: [{ type: "reasoning", text: "thinking", providerOptions: { openai: { reasoningEncryptedContent: large } } }] }, { role: "user", content: "next" }] },
+]
+for (const item of preflightCases) {
+  it.live(`preflight production seam: ${item.name}`, () => provideTmpdirServer(
+    ({ dir, llm }) => Effect.gen(function* () {
+      const config = yield* Config.Service
+      expect((yield* config.get()).compaction?.threshold).toBe((item.compaction ?? { threshold: 0.75 }).threshold)
+      const { processors, session, provider } = yield* boot()
+      const chat = yield* session.create({})
+      const parent = yield* user(chat.id, "request")
+      const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+      delete msg.finish
+      msg.summary = item.summary
+      const base = yield* provider.getModel(ref.providerID, ref.modelID)
+      const model = { ...base, limit: item.limit ?? base.limit }
+      const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model })
+      yield* llm.push(reply().text("done").stop())
+      const value = yield* handle.process({
+        user: parent, sessionID: chat.id, model, agent: agent(), system: item.system ?? [],
+        messages: item.messages ?? [{ role: "user", content: large }], tools: item.tools ?? {}, preflight: item.preflight,
+        continuation: item.continuation,
+      })
+      expect(value.result).toBe(item.compact ? "compact" : "continue")
+      expect(value.preflight).toBe(item.compact ? true : undefined)
+      expect(yield* llm.calls).toBe(item.compact ? 0 : 1)
+      expect(handle.message.error).toBeUndefined()
+      expect(handle.loopDetected).toBe(false)
+    }),
+    { config: (url) => ({ ...providerCfg(url), compaction: item.compaction ?? { threshold: 0.75 } }) },
+  ))
+}
 
 const providerErrorLLM = Layer.succeed(
   LLM.Service,
@@ -305,6 +408,137 @@ const boot = Effect.fn("test.boot")(function* () {
   const provider = yield* Provider.Service
   return { processors, session, provider }
 })
+
+// Finite scripts fail immediately if the processor invokes the provider unexpectedly.
+function emptyRecoveryTest(name: string, scripts: (LLMEvent[] | APICallError)[], expected: { calls: number; exhausted?: boolean; cancel?: boolean; providerExhausted?: boolean }) {
+  let calls = 0
+  const scripted = Layer.succeed(LLM.Service, LLM.Service.of({
+    stream: () => {
+      const events = scripts[calls++]
+      if (events instanceof APICallError) return Stream.fail(events)
+      return events ? Stream.fromIterable(events) : Stream.die(new Error("Unexpected provider invocation"))
+    },
+  }))
+  testEffect(LayerNode.compile(root, [...replacements, [LLM.node, scripted]])).live(
+    `empty recovery: ${name}`,
+    () => provideTmpdirInstance((dir) => Effect.gen(function* () {
+      calls = 0
+      const { processors, session, provider } = yield* boot()
+      const status = yield* SessionStatus.Service
+      const chat = yield* session.create({})
+      const parent = yield* user(chat.id, "request")
+      const msg = yield* assistant(chat.id, parent.id, dir)
+      delete msg.finish
+      msg.cost = 7
+      msg.tokens.input = 11
+      const prior = yield* session.updatePart({
+        id: PartID.ascending(), messageID: msg.id, sessionID: chat.id, type: "text", text: "prior history",
+      })
+      const model = yield* provider.getModel(ref.providerID, ref.modelID)
+      const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model })
+      const run = handle.process({
+        user: parent, sessionID: chat.id, model, agent: agent(), system: [],
+        messages: [{ role: "user", content: "request" }], tools: {},
+      })
+      if (expected.cancel) {
+        const fiber = yield* run.pipe(Effect.forkChild)
+        yield* waitFor(status.get(chat.id).pipe(Effect.map((s) => s.type === "retry" ? true : undefined)), "missing empty retry status")
+        yield* Fiber.interrupt(fiber)
+        expect(Exit.isFailure(yield* Fiber.await(fiber))).toBe(true)
+        expect(handle.message.error?.name).toBe("MessageAbortedError")
+      } else {
+        const result = yield* run
+        expect(result.result).toBe(expected.exhausted || expected.providerExhausted ? "stop" : "continue")
+        expect(result.noEditStreak).toBe(expected.exhausted || expected.providerExhausted ? 0 : 1)
+        if (expected.providerExhausted) {
+          expect(handle.message.error).toMatchObject({ name: "APIError", data: { message: "scripted provider failure", statusCode: 503 } })
+        } else if (expected.exhausted) {
+          expect(handle.message.error).toMatchObject({ data: { message: "Provider returned an empty response after 2 retries" } })
+          expect(handle.message.finish).toBe("error")
+        } else {
+          expect(handle.message.error).toBeUndefined()
+        }
+      }
+      expect(calls).toBe(expected.calls)
+      expect(handle.loopDetected).toBe(false)
+      expect(handle.message.time.completed).toBeDefined()
+      const parts = yield* MessageV2.parts(msg.id)
+      expect(parts.find((part) => part.id === prior.id)).toEqual(prior)
+      if (expected.exhausted || expected.cancel || expected.providerExhausted) {
+        expect(parts).toEqual([prior])
+        expect(handle.message.cost).toBe(7)
+        expect(handle.message.tokens.input).toBe(11)
+        const stored = yield* MessageV2.get({ sessionID: chat.id, messageID: msg.id })
+        expect(stored.info.role).toBe("assistant")
+        if (stored.info.role === "assistant") {
+          expect(stored.info.error).toEqual(handle.message.error)
+          expect(stored.info.finish).toBe(handle.message.finish)
+          expect(stored.info.tokens).toEqual({ total: 0, input: 11, output: 0, reasoning: 0, cache: { read: 0, write: 0 } })
+          expect(stored.info.cost).toBe(7)
+        }
+        expect(yield* status.get(chat.id)).toMatchObject({ type: "idle" })
+      } else if (expected.calls > 1) {
+        expect(parts.filter((part) => part.type === "step-start")).toHaveLength(1)
+        expect(parts.filter((part) => part.type === "text").map((part) => part.text)).toEqual(["prior history", "recovered"])
+      }
+    }), { config: cfg }),
+    60000,
+  )
+}
+
+const unfinishedEmpty = [LLMEvent.stepStart({ index: 0 }), LLMEvent.textStart({ id: "empty" })]
+emptyRecoveryTest("empty then text removes unfinished empty step", [unfinishedEmpty, textTurn("recovered")], { calls: 2 })
+emptyRecoveryTest("three empties exhaust exactly two retries", [
+  unfinishedEmpty,
+  [LLMEvent.stepStart({ index: 0 }), LLMEvent.stepFinish({ index: 0, reason: "unknown", usage: { inputTokens: 0 } }), LLMEvent.finish({ reason: "unknown" })],
+  [],
+], { calls: 3, exhausted: true })
+emptyRecoveryTest("valid text never retries", [textTurn("valid")], { calls: 1 })
+emptyRecoveryTest("refusal never retries", [textTurn("I cannot help with that request.")], { calls: 1 })
+emptyRecoveryTest("reasoning alone never retries", [[
+  LLMEvent.reasoningStart({ id: "r" }), LLMEvent.reasoningDelta({ id: "r", text: "thinking" }),
+  LLMEvent.reasoningEnd({ id: "r" }), LLMEvent.finish({ reason: "unknown" }),
+]], { calls: 1 })
+emptyRecoveryTest("tool input never repeats", [[LLMEvent.toolInputStart({ id: "t", name: "lookup" })]], { calls: 1 })
+emptyRecoveryTest("tool call and result never repeat", [[
+  LLMEvent.toolCall({ id: "t", name: "lookup", input: {}, providerExecuted: true }),
+  LLMEvent.toolResult({ id: "t", name: "lookup", result: { type: "text", value: "done" }, providerExecuted: true }),
+]], { calls: 1 })
+emptyRecoveryTest("orphan tool result never repeats", [[
+  LLMEvent.toolResult({ id: "t", name: "lookup", result: { type: "text", value: "done" }, providerExecuted: true }),
+]], { calls: 1 })
+emptyRecoveryTest("usage is not empty", [[LLMEvent.finish({ reason: "unknown", usage: { reasoningTokens: 1 } })]], { calls: 1 })
+emptyRecoveryTest("explicit stop is not empty", [[LLMEvent.finish({ reason: "stop" })]], { calls: 1 })
+emptyRecoveryTest("opaque metadata is not empty", [[LLMEvent.reasoningStart({ id: "r", providerMetadata: { test: { encrypted: "opaque" } } })]], { calls: 1 })
+emptyRecoveryTest("cancellation during empty retry backoff", [unfinishedEmpty], { calls: 1, cancel: true })
+
+const retryableProviderFailure = new APICallError({
+  message: "scripted provider failure",
+  url: "http://localhost:1/v1",
+  requestBodyValues: {},
+  statusCode: 503,
+  isRetryable: true,
+  responseHeaders: { "retry-after-ms": "1" },
+})
+// Provider failures must not replenish the two empty-response retries.
+emptyRecoveryTest("interleaved provider failures preserve empty retry budget", [
+  unfinishedEmpty,
+  retryableProviderFailure,
+  [],
+  retryableProviderFailure,
+  [],
+], { calls: 5, exhausted: true })
+// Two empty successes must not replenish the five provider-error retries.
+emptyRecoveryTest("interleaved empty successes preserve provider retry budget", [
+  retryableProviderFailure,
+  unfinishedEmpty,
+  retryableProviderFailure,
+  retryableProviderFailure,
+  [],
+  retryableProviderFailure,
+  retryableProviderFailure,
+  retryableProviderFailure,
+], { calls: 8, providerExhausted: true })
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -1121,7 +1355,7 @@ itFragmentFailure.live("session.processor effect tests retain partial legacy par
             messages: [{ role: "user", content: "provider failure" }],
             tools: {},
           }),
-        ).toEqual({ result: "stop", noEditStreak: 0 })
+        ).toEqual({ result: "stop", noEditStreak: 0, runaway: false })
         yield* off
 
         const parts = yield* MessageV2.parts(msg.id)
@@ -1175,16 +1409,24 @@ itTextLoop.live("session.processor effect tests detect repeated text loop", () =
         const parts = yield* MessageV2.parts(msg.id)
         const textParts = parts.filter((part): part is SessionV1.TextPart => part.type === "text")
 
-        expect(value.result).toBe("continue")
+        expect(value).toEqual({ result: "stop", noEditStreak: 0, runaway: true })
         expect(handle.loopDetected).toBe(true)
+        expect(handle.loopReason).toBe("text")
+        expect(handle.message.error).toMatchObject({
+          name: "MessageAbortedError",
+          data: { message: "Runaway text detected — retrying" },
+        })
+        expect(handle.message.time.completed).toBeDefined()
         expect(textParts.map((part) => part.text)).toEqual(["same", "same", "same"])
+        expect(textParts.every((part) => part.time?.end !== undefined)).toBe(true)
+        expect(parts.filter((part) => part.type === "step-finish")).toHaveLength(1)
       }),
     { config: cfg },
   ),
 )
 
 itNoEdit.instance(
-  "session.processor effect tests detect no-edit read/search loops",
+  "session.processor effect tests stop repeated read/search text before no-edit accounting",
   () =>
     Effect.gen(function* () {
       const test = yield* TestInstance
@@ -1222,13 +1464,25 @@ itNoEdit.instance(
       pushLLM(textTurn("reading files"))
       pushLLM(textTurn("reading files"))
 
-      yield* handle.process(input)
-      yield* handle.process(input)
+      expect(yield* handle.process(input)).toEqual({ result: "continue", noEditStreak: 1, runaway: false })
+      expect(yield* handle.process(input)).toEqual({ result: "continue", noEditStreak: 2, runaway: false })
       const value = yield* handle.process(input)
 
-      expect(value.result).toBe("continue")
+      // Repeated text trips runaway before the third no-edit increment.
+      expect(value).toEqual({ result: "stop", noEditStreak: 2, runaway: true })
       expect(handle.loopDetected).toBe(true)
-      expect(handle.noEditStreak).toBe(3)
+      expect(handle.loopReason).toBe("text")
+      expect(handle.noEditStreak).toBe(2)
+      expect(handle.message.error).toMatchObject({
+        name: "MessageAbortedError",
+        data: { message: "Runaway text detected — retrying" },
+      })
+      expect(handle.message.time.completed).toBeDefined()
+      const parts = yield* MessageV2.parts(msg.id)
+      expect(parts.filter((part) => part.type === "text").map((part) => part.text)).toEqual([
+        "reading files", "reading files", "reading files",
+      ])
+      expect(parts.filter((part) => part.type === "step-finish")).toHaveLength(3)
     }),
   { config: cfg },
 )
@@ -1350,13 +1604,26 @@ itReasoning.live(
           pushReasoningLLM(reasoningTurn("circling the same thought"))
           pushReasoningLLM(reasoningTurn("circling the same thought"))
 
-          yield* handle.process(input)
-          yield* handle.process(input)
+          expect(yield* handle.process(input)).toEqual({ result: "continue", noEditStreak: 1, runaway: false })
+          expect(yield* handle.process(input)).toEqual({ result: "continue", noEditStreak: 2, runaway: false })
           const value = yield* handle.process(input)
 
-          expect(value.result).toBe("continue")
+          expect(value).toEqual({ result: "stop", noEditStreak: 2, runaway: true })
           expect(handle.loopDetected).toBe(true)
           expect(handle.loopReason).toBe("reasoning")
+          expect(handle.message.error).toMatchObject({
+            name: "MessageAbortedError",
+            data: { message: "Runaway reasoning detected — retrying" },
+          })
+          expect(handle.message.time.completed).toBeDefined()
+          const parts = yield* MessageV2.parts(msg.id)
+          expect(parts.filter((part) => part.type === "reasoning").map((part) => part.text)).toEqual([
+            "circling the same thought", "circling the same thought", "circling the same thought",
+          ])
+          expect(parts.filter((part) => part.type === "step-finish")).toHaveLength(3)
+          const tools = parts.filter((part) => part.type === "tool")
+          expect(tools).toHaveLength(3)
+          expect(tools.every((part) => part.tool === "write" && part.state.status === "error")).toBe(true)
         }),
       { config: cfg },
     ),
@@ -1413,7 +1680,7 @@ itReasoning.live(
 )
 
 itNoEdit.instance(
-  "session.processor effect tests reset no-edit streak after an edit",
+  "session.processor effect tests do not treat an uncompleted edit attempt as progress",
   () =>
     Effect.gen(function* () {
       const test = yield* TestInstance
@@ -1446,7 +1713,7 @@ itNoEdit.instance(
         tools: {},
       }
 
-      // Two read-only turns, then one edit. The streak should reset.
+      // Two read-only turns, then an uncompleted edit. No patch was observed.
       pushLLM(textTurn("reading files"))
       pushLLM(textTurn("reading more"))
       pushLLM(toolTurn("write", { path: "a.txt", content: "x" }))
@@ -1457,7 +1724,7 @@ itNoEdit.instance(
 
       expect(value.result).toBe("continue")
       expect(handle.loopDetected).toBe(false)
-      expect(handle.noEditStreak).toBe(0)
+      expect(handle.noEditStreak).toBe(3)
     }),
   { config: cfg },
 )
@@ -1501,13 +1768,26 @@ itReasoning.live(
           pushReasoningLLM(reasoningOnlyTurn("circling the same thought"))
           pushReasoningLLM(reasoningOnlyTurn("circling the same thought"))
 
-          yield* handle.process(input)
-          yield* handle.process(input)
+          expect(yield* handle.process(input)).toEqual({ result: "continue", noEditStreak: 1, runaway: false })
+          expect(yield* handle.process(input)).toEqual({ result: "continue", noEditStreak: 2, runaway: false })
           const value = yield* handle.process(input)
 
-          expect(value.result).toBe("continue")
+          // The error return precedes no-edit accounting for this turn.
+          expect(value).toEqual({ result: "stop", noEditStreak: 2, runaway: true })
           expect(handle.loopDetected).toBe(true)
           expect(handle.loopReason).toBe("reasoning")
+          expect(handle.noEditStreak).toBe(2)
+          expect(handle.message.error).toMatchObject({
+            name: "MessageAbortedError",
+            data: { message: "Runaway reasoning detected — retrying" },
+          })
+          expect(handle.message.time.completed).toBeDefined()
+          const parts = yield* MessageV2.parts(msg.id)
+          expect(parts.filter((part) => part.type === "reasoning").map((part) => part.text)).toEqual([
+            "circling the same thought", "circling the same thought", "circling the same thought",
+          ])
+          expect(parts.filter((part) => part.type === "step-finish")).toHaveLength(3)
+          expect(parts.filter((part) => part.type === "tool")).toEqual([])
         }),
       { config: cfg },
     ),
@@ -1560,7 +1840,12 @@ itNoEdit.instance(
 
           yield* handle.process(input)
           yield* handle.process(input)
-          yield* handle.process(input)
+          // Lack of edits is not itself a loop. A/B/A has not yet repeated B.
+          expect(yield* handle.process(input)).toEqual({ result: "continue", noEditStreak: 3, runaway: false })
+          expect(handle.loopDetected).toBe(false)
+          expect(handle.loopReason).toBe("none")
+          expect(handle.noEditStreak).toBe(3)
+          expect(handle.message.error).toBeUndefined()
           yield* handle.process(input)
           yield* handle.process(input)
           const value = yield* handle.process(input)

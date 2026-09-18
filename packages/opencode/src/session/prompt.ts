@@ -57,49 +57,10 @@ import { SessionTable } from "@opencode-ai/core/session/sql"
 import { SessionReminders } from "./reminders"
 import { SessionTools } from "./tools"
 import { LLMEvent } from "@opencode-ai/llm"
+import { ObservableProgress, PROGRESS_NUDGE, PROGRESS_STOP, type Observation } from "./observable-progress"
 
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
-
-const MAX_INTERVENTIONS = 3
-
-function loopBreakMessage(
-  reason: SessionProcessor.Handle["loopReason"],
-  noEditStreak: number,
-  intervention: number,
-): string {
-  let msg: string
-  switch (reason) {
-    case "churn":
-      msg = `You have edited the same file repeatedly without making net progress. Stop editing, read the current state of the file, identify what actually needs to change, then make one deliberate edit that moves the task forward. If the file is already correct, stop and report that.`
-      break
-    case "oscillation":
-      msg = `You are cycling between a small set of tools and files without ever landing on an answer. Stop calling tools. Write down what you know so far, identify the single open question, and either answer it with one targeted call or report your findings and stop.`
-      break
-    case "no_edit":
-      msg = `You have made ${noEditStreak} consecutive turns without editing any files. You appear to be reading and searching in a loop. Stop, then make an actual code change (edit/write/apply_patch) to progress the task. If the task is genuinely read-only, respond with your findings and stop.`
-      break
-    case "text":
-      msg = "You appear to be repeating the same output. Stop and try a completely different approach to solve the problem."
-      break
-    case "reasoning":
-      msg = "You are repeating the same reasoning/thinking content across turns. Stop circling. Produce a concrete answer, make a tool call, or report your findings now."
-      break
-    case "alternation":
-      msg = "You are alternating between the same two outputs without making progress. Stop cycling. Pick one direction and commit to it — either complete the task or report what is blocking you."
-      break
-    default:
-      msg = "You appear to be repeating the same tool call. Stop, then make an actual code change (edit/write/apply_patch) to progress the task. If the task is genuinely read-only, respond with your findings and stop."
-  }
-
-  if (intervention >= 3) {
-    return `STOP. Session ending after ${intervention} repeated loops. Report what you accomplished and what is blocking you.`
-  }
-  if (intervention >= 2) {
-    return `${msg} INTERVENTION ${intervention}: You have been warned ${intervention} times. You MUST make concrete progress now — produce a result, make an edit, or report findings. Continuing to loop will end the session.`
-  }
-  return msg
-}
 
 const decodeMessageInfo = Schema.decodeUnknownExit(SessionV1.Info)
 const decodeMessagePart = Schema.decodeUnknownExit(SessionV1.Part)
@@ -1148,9 +1109,11 @@ const layer = Layer.effect(
         const ctx = yield* InstanceState.context
         let structured: unknown
         let step = 0
-        let interventions = 0
+        // A large schema/system prompt cannot be shrunk by summarizing history.
+        let preflightAttempted = false
         const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
         const cfg = yield* config.get()
+        const progress = new ObservableProgress(cfg.experimental?.observable_progress)
 
         while (true) {
           yield* status.set(sessionID, { type: "busy" })
@@ -1159,6 +1122,26 @@ const layer = Layer.effect(
           let msgs = yield* MessageV2.filterCompactedEffect(sessionID).pipe(
             Effect.provideService(Database.Service, database),
           )
+
+          // Capture real turn boundaries before reminders/plugins/model conversion can
+          // append synthetic users. Any tool operation makes replay unsafe, regardless
+          // of its status or whether it was executed by the provider.
+          const realUsers = msgs.filter(
+            (m) =>
+              m.info.role === "user" &&
+              !m.parts.some((p) => p.type === "compaction") &&
+              m.parts.some((p) => !("synthetic" in p && p.synthetic)),
+          )
+          const latestRealUser = realUsers.at(-1)?.info
+          const currentUserID = latestRealUser?.role === "user" ? latestRealUser.replayOf ?? latestRealUser.id : undefined
+          progress.user(currentUserID)
+          const continuation = msgs.some(
+            (m) =>
+              m.info.role === "assistant" &&
+              (!currentUserID || m.info.id > currentUserID) &&
+              m.parts.some((p) => p.type === "tool"),
+          )
+          const firstTurn = new Set(realUsers.map((m) => m.info.role === "user" ? m.info.replayOf ?? m.info.id : m.info.id)).size < 2
 
           const { user: lastUser, assistant: lastAssistant, finished: lastFinished, tasks } = MessageV2.latest(msgs)
 
@@ -1170,6 +1153,9 @@ const layer = Layer.effect(
           // Some providers return "stop" even when the assistant message contains
           // tool calls. Keep the loop running so tool results can be sent back to
           // the model, but ignore cleanup-marked interrupted orphans.
+          if (lastAssistant?.parentID === lastUser.id && lastAssistantMsg?.parts.some(
+            (part) => part.type === "text" && part.metadata?.observable_progress === "stop",
+          )) break
           const hasToolCalls =
             lastAssistantMsg?.parts.some(
               (part) => part.type === "tool" && !part.metadata?.providerExecuted && !isOrphanedInterruptedTool(part),
@@ -1220,6 +1206,7 @@ const layer = Layer.effect(
               sessionID,
               auto: task.auto,
               overflow: task.overflow,
+              preflight: task.preflight,
             })
             if (result === "stop") break
             continue
@@ -1338,6 +1325,9 @@ const layer = Layer.effect(
             const format = lastUser.format ?? { type: "text" as const }
             if (format.type === "json_schema") system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
             const result = yield* handle.process({
+              preflight: !preflightAttempted,
+              continuation,
+              firstTurn,
               user: lastUser,
               agent,
               permission: session.permission,
@@ -1424,22 +1414,48 @@ const layer = Layer.effect(
               }
             }
 
-            if (result.result === "stop") {
-              if (handle.loopDetected) {
-                return "intervene" as const
-              }
+            // Cancellation, permission denial and provider errors take priority.
+            if (result.result === "stop" || handle.message.error) return "break" as const
+            const parts = yield* MessageV2.parts(handle.message.id).pipe(
+              Effect.provideService(Database.Service, database),
+            )
+            // A normal final answer must not be restarted by a historical
+            // detector flag. Skip the recovery guard for it; the loop's
+            // top-of-iteration exit still runs, so a prompt submitted during
+            // the run is picked up on the next iteration.
+            if (finished && result.result !== "compact" && !parts.some((p) => p.type === "tool" && !p.metadata?.providerExecuted && !isOrphanedInterruptedTool(p))) return "continue" as const
+            const decision = progress.turn(parts.flatMap<Observation>((part) => {
+              if (part.type !== "tool") return []
+              if (part.state.status === "completed") return [{
+                tool: part.tool, input: part.state.input, status: "completed" as const,
+                result: { output: part.state.output, attachments: part.state.attachments?.map((a) => ({ mime: a.mime, url: a.url })) },
+              }]
+              if (part.state.status === "error" && !part.state.metadata?.interrupted) return [{
+                tool: part.tool, input: part.state.input, status: "error" as const, result: part.state.error,
+              }]
+              return []
+            }), handle.loopDetected)
+            if (decision === "stop") {
+              yield* sessions.updatePart({
+                id: PartID.ascending(), messageID: handle.message.id, sessionID,
+                type: "text", text: PROGRESS_STOP,
+                metadata: { observable_progress: "stop" },
+                time: { start: Date.now(), end: Date.now() },
+              })
+              handle.message.finish = "stop"
+              yield* sessions.updateMessage(handle.message)
               return "break" as const
             }
-            if (handle.loopDetected) {
-              return "intervene" as const
-            }
+            if (decision === "nudge") return "intervene" as const
             if (result.result === "compact") {
+              if (result.preflight) preflightAttempted = true
               yield* compaction.create({
                 sessionID,
                 agent: lastUser.agent,
                 model: lastUser.model,
                 auto: true,
-                overflow: !handle.message.finish,
+                overflow: result.preflight ? false : !handle.message.finish || undefined,
+                preflight: result.preflight,
               })
             }
             return "continue" as const
@@ -1449,49 +1465,7 @@ const layer = Layer.effect(
           )
           if (outcome === "break") break
           if (outcome === "intervene") {
-            interventions++
-            yield* Effect.logError("loop_intervention", {
-              "session.id": sessionID,
-              messageID: handle.message.id,
-              reason: handle.loopReason,
-              noEditStreak: handle.noEditStreak,
-              intervention: interventions,
-            })
-            // Auto-compact: give the model fresh context before retrying
-            yield* compaction.create({
-              sessionID,
-              agent: lastUser.agent,
-              model: lastUser.model,
-              auto: true,
-              overflow: true,
-            }).pipe(Effect.catch(() => Effect.void))
-            if (interventions >= MAX_INTERVENTIONS) {
-              yield* Effect.logError("loop_max_interventions", {
-                "session.id": sessionID,
-                interventions,
-                reason: handle.loopReason,
-              })
-              const stopMsg: SessionV1.User = {
-                id: MessageID.ascending(),
-                role: "user",
-                sessionID,
-                time: { created: Date.now() },
-                agent: lastUser.agent,
-                model: lastUser.model,
-                format: { type: "text" },
-              }
-              yield* sessions.updateMessage(stopMsg)
-              const stopPart: SessionV1.Part = {
-                type: "text",
-                id: PartID.ascending(),
-                messageID: stopMsg.id,
-                sessionID,
-                text: `Session stopped after ${interventions} loop interventions. Reason: ${handle.loopReason}. Report what you accomplished and what is blocking you.`,
-              }
-              yield* sessions.updatePart(stopPart)
-              msgs = [...msgs, { info: stopMsg, parts: [stopPart] }]
-              break
-            }
+            yield* Effect.logWarning("observable_progress_nudge", { "session.id": sessionID, messageID: handle.message.id })
             const breakMsg: SessionV1.User = {
               id: MessageID.ascending(),
               role: "user",
@@ -1499,7 +1473,9 @@ const layer = Layer.effect(
               time: { created: Date.now() },
               agent: lastUser.agent,
               model: lastUser.model,
-              format: { type: "text" },
+              // DB reads return plain JSON; the event encoder requires the
+              // Format Schema.Class instance when publishing a new message.
+              format: lastUser.format ? Schema.decodeUnknownSync(SessionV1.Format)(lastUser.format) : undefined,
             }
             yield* sessions.updateMessage(breakMsg)
             const breakPart: SessionV1.Part = {
@@ -1507,7 +1483,9 @@ const layer = Layer.effect(
               id: PartID.ascending(),
               messageID: breakMsg.id,
               sessionID,
-              text: loopBreakMessage(handle.loopReason, handle.noEditStreak, interventions),
+              synthetic: true,
+              metadata: { observable_progress: "nudge" },
+              text: PROGRESS_NUDGE,
             }
             yield* sessions.updatePart(breakPart)
             msgs = [

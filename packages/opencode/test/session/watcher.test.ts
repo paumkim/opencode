@@ -14,6 +14,7 @@ import { MessageV2 } from "../../src/session/message-v2"
 import { SessionProcessor } from "../../src/session/processor"
 import { MessageID, PartID, SessionID } from "../../src/session/schema"
 import { SessionStatus } from "../../src/session/status"
+import { Watcher } from "@/session/watcher/service"
 import { SessionSummary } from "../../src/session/summary"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { Permission } from "../../src/permission"
@@ -153,6 +154,7 @@ const root = LayerNode.group([
   Database.node,
   EventV2Bridge.node,
   SessionStatus.node,
+  Watcher.node,
   CrossSpawnSpawner.node,
 ])
 const replacements = [
@@ -165,6 +167,55 @@ const env = LayerNode.compile(
 )
 
 const it = testEffect(env)
+
+it.instance(
+  "watcher uses configured thresholds and explicit progress timestamps",
+  () =>
+    Effect.gen(function* () {
+      const session = yield* Session.Service
+      const watcher = yield* Watcher.Service
+      const chat = yield* session.create({})
+      yield* user(chat.id, "actively generating tokens")
+      const now = Date.now()
+
+      const running = yield* watcher.check(chat.id, now - 60_000)
+      expect(running.status).toBe("RUNNING")
+      expect(running.secondsSinceTurn).toBeGreaterThanOrEqual(60)
+
+      const stalled = yield* watcher.check(chat.id, now - 180_000)
+      expect(stalled.status).toBe("STALLED")
+      expect(stalled.summary).toContain("no activity for")
+    }),
+  { config: { experimental: { stall_threshold: 120 } } },
+)
+
+it.instance("watcher reports active sessions and skips deleted sessions", () =>
+  Effect.gen(function* () {
+    const session = yield* Session.Service
+    const status = yield* SessionStatus.Service
+    const watcher = yield* Watcher.Service
+    const running = yield* session.create({})
+    const stalled = yield* session.create({})
+    const idle = yield* session.create({})
+    const deleted = yield* session.create({})
+    yield* user(running.id, "actively generating tokens")
+    yield* status.set(running.id, { type: "busy" })
+    yield* status.set(stalled.id, { type: "busy" })
+    yield* status.set(idle.id, { type: "busy" })
+    yield* status.set(idle.id, { type: "idle" })
+    yield* status.set(deleted.id, { type: "busy" })
+    yield* session.remove(deleted.id)
+
+    expect(yield* watcher.count()).toBe(3)
+    const active = yield* watcher.checkActive()
+    expect(active.map((entry) => entry.sessionID).sort()).toEqual([running.id, stalled.id].sort())
+    const report = yield* watcher.report()
+    expect(report.total).toBe(2)
+    expect(report.running).toBe(1)
+    expect(report.stalled).toBe(1)
+    expect(report.unknown).toBe(0)
+  }),
+)
 
 const boot = Effect.fn("test.boot")(function* () {
   const processors = yield* SessionProcessor.Service

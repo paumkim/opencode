@@ -116,29 +116,41 @@ export default {
       subjects,
       allow: ({ clientID, redirectURI }) => Promise.resolve(isAllowedAuthorizationRedirect(clientID, redirectURI)),
       async success(ctx, response) {
-        console.log(response)
+        console.log({
+          event: "auth.provider_callback",
+          provider: response.provider === "github" ? "github" : response.provider === "google" ? "google" : "unsupported",
+        })
 
         let subject: string | undefined
         let email: string | undefined
 
         if (response.provider === "github") {
-          const emails = (await fetch("https://api.github.com/user/emails", {
-            headers: {
-              Authorization: `Bearer ${response.tokenset.access}`,
-              "User-Agent": "opencode",
-              Accept: "application/vnd.github+json",
-            },
-          }).then((x) => x.json())) as any
-          const user = (await fetch("https://api.github.com/user", {
-            headers: {
-              Authorization: `Bearer ${response.tokenset.access}`,
-              "User-Agent": "opencode",
-              Accept: "application/vnd.github+json",
-            },
-          }).then((x) => x.json())) as any
-          subject = user.id.toString()
+          const [emailsResponse, userResponse] = await Promise.all(
+            ["user/emails", "user"].map(async (endpoint) => {
+              // Never propagate provider bodies or transport errors: they may contain credentials or claims.
+              try {
+                const result = await fetch(`https://api.github.com/${endpoint}`, {
+                  headers: {
+                    Authorization: `Bearer ${response.tokenset.access}`,
+                    "User-Agent": "opencode",
+                    Accept: "application/vnd.github+json",
+                  },
+                })
+                if (!result.ok) throw new Error("Unsuccessful GitHub response")
+                return await result.json()
+              } catch {
+                throw new Error("Unable to retrieve GitHub profile")
+              }
+            }),
+          )
+          const emails = z
+            .array(z.object({ email: z.string().email(), primary: z.boolean(), verified: z.boolean() }))
+            .safeParse(emailsResponse)
+          const user = z.object({ id: z.number().int().positive().max(Number.MAX_SAFE_INTEGER) }).safeParse(userResponse)
+          if (!emails.success || !user.success) throw new Error("Invalid GitHub profile")
+          subject = user.data.id.toString()
 
-          const primaryEmail = emails.find((x: any) => x.primary)
+          const primaryEmail = emails.data.find((x) => x.primary)
           if (!primaryEmail) throw new Error("No primary email found for GitHub user")
           if (!primaryEmail.verified) throw new Error("Primary email for GitHub user not verified")
           email = primaryEmail.email
@@ -179,7 +191,7 @@ export default {
           // create account if not found
           let accountID = idByProvider ?? idByEmail
           if (!accountID) {
-            console.log("creating account for", email)
+            console.log({ event: "auth.account_create" })
             accountID = await Account.create({})
             newAccount = true
           }

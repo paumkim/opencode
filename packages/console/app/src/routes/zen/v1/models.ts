@@ -4,6 +4,8 @@ import { and, Database, eq, isNull } from "@opencode-ai/console-core/drizzle/ind
 import { KeyTable } from "@opencode-ai/console-core/schema/key.sql.js"
 import { WorkspaceTable } from "@opencode-ai/console-core/schema/workspace.sql.js"
 import { ModelTable } from "@opencode-ai/console-core/schema/model.sql.js"
+import { UserTable } from "@opencode-ai/console-core/schema/user.sql.js"
+import { User } from "@opencode-ai/console-core/user.js"
 import { buildOptionsResponse, buildModelsResponse } from "~/routes/zen/util/modelsHandler"
 import { inferenceUnavailable, proxyInference } from "~/lib/inference-proxy"
 
@@ -28,8 +30,9 @@ export async function GET(input: APIEvent) {
         })
         .from(KeyTable)
         .innerJoin(WorkspaceTable, eq(WorkspaceTable.id, KeyTable.workspaceID))
+        .innerJoin(UserTable, and(eq(UserTable.workspaceID, KeyTable.workspaceID), eq(UserTable.id, KeyTable.userID)))
         .innerJoin(ModelTable, and(eq(ModelTable.workspaceID, KeyTable.workspaceID), isNull(ModelTable.timeDeleted)))
-        .where(and(eq(KeyTable.key, apiKey), isNull(KeyTable.timeDeleted)))
+        .where(User.activeKey(apiKey))
         .then((rows) => rows.map((row) => row.model)),
     )
   })()

@@ -1073,6 +1073,7 @@ export function RunModelSelectBody(props: {
               providerName: provider.name,
               category: provider.name,
               display: title,
+              description: provider.name,
               footer,
               reasoning: model.capabilities?.reasoning,
               tools: model.capabilities?.toolcall,

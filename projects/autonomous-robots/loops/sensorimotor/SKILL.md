@@ -1,22 +1,38 @@
 ---
 name: sensorimotor
 description: >
-  The sensorimotor loop handles immediate perception-action cycles. It reads raw
-  sensor data (visual, tactile, auditory, proprioceptive, environmental), filters
-  and classifies it, decides on an actuator response, executes the action, and
-  observes the result to adapt the next cycle. Trigger keywords: sensorimotor,
+  Design specification for a proposed sensorimotor loop: immediate
+  perception-action cycles. It would read raw sensor data (visual, tactile,
+  auditory, proprioceptive, environmental), filter and classify it, decide on
+  an actuator response, execute the action, and observe the result to adapt the
+  next cycle. Not a runnable module. Trigger keywords: sensorimotor,
   perception-action, feedback loop, real-time control, sensor fusion, actuator.
 ---
 
 # Sensorimotor Loop
 
+## Current Status and Safety Boundary
+
+**Design specification, not a runnable module.** All robot loops currently have
+only `SKILL.md`; `src/` is a generic software supervisory runtime. No sensors,
+actuators, reflexes, or robot policies below are implemented. There is no hardware
+safety certification, actuator enforcement, real-time or latency guarantee,
+persistence/resume, or adaptive scheduling.
+
+Physical control would require independent, always-on physical monitoring and
+protective controls outside the sequential JS runtime, even when this loop is
+inactive or foreground context changes. Optional `AbortSignal` support is
+cooperative; ignored cancellation cannot stop actuator activity. Software reset
+is not physical clearance. Hardware limits must remain immutable to learning;
+adaptive advisory setpoints stay within them. Learned-policy deployment requires
+validation, explicit operator approval, and a rollback plan; these gates and
+physical protections are requirements, not implemented features.
+
 ## Purpose
 
-Real-time **sense → process → act → sense** cycle. This is the lowest-level
-control loop — it runs at the highest frequency and reacts to immediate
-environmental changes without waiting for higher-level planning. It is the
-robot's reflex layer: fast, continuous, and always active when the robot is
-powered on.
+Proposed **sense → process → act → sense** cycle for low-level perception and
+control. Continuous reflex behavior would require a separately validated control
+implementation; lifecycle activation here does not create an always-on loop.
 
 ## Inputs
 
@@ -106,7 +122,7 @@ connects to meta-control as follows:
 | `error_tolerance` | 0.05 | Maximum prediction error before anomaly flag |
 | `attention_threshold` | 0.9 | Saliency score above which attention is requested |
 
-## Example
+## Example (Conceptual)
 
 **Task**: A mobile robot must avoid obstacles while navigating to a goal.
 

@@ -100,6 +100,8 @@ export function logo(pad?: string) {
     result.push(draw(other, right.fg, right.shadow, right.bg))
     result.push(EOL)
   })
+  const yellow = "\x1b[93m"
+  result.push(yellow, "                   dev.", reset, EOL)
   return result.join("").trimEnd()
 }
 

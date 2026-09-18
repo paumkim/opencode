@@ -56,6 +56,7 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { httpClient } from "@opencode-ai/core/effect/app-node-platform"
 import { EventV2 } from "@opencode-ai/core/event"
 import { ModelsDev } from "@opencode-ai/core/models-dev"
+import { News } from "@opencode-ai/news"
 import { Npm } from "@opencode-ai/core/npm"
 import { PermissionSaved } from "@opencode-ai/core/permission/saved"
 import { ProjectV2 } from "@opencode-ai/core/project"
@@ -90,6 +91,7 @@ import { fileHandlers } from "./handlers/file"
 import { globalHandlers } from "./handlers/global"
 import { instanceHandlers } from "./handlers/instance"
 import { mcpHandlers } from "./handlers/mcp"
+import { newsHandlers } from "./handlers/news"
 import { permissionHandlers } from "./handlers/permission"
 import { projectHandlers } from "./handlers/project"
 import { projectCopyHandlers } from "./handlers/project-copy"
@@ -97,6 +99,7 @@ import { providerHandlers } from "./handlers/provider"
 import { ptyConnectHandlers, ptyHandlers } from "./handlers/pty"
 import { questionHandlers } from "./handlers/question"
 import { sessionHandlers } from "./handlers/session"
+import { sharedHandlers } from "./handlers/shared-workspace"
 import { syncHandlers } from "./handlers/sync"
 import { tuiHandlers } from "./handlers/tui"
 import { handlers } from "@opencode-ai/server/handlers"
@@ -158,6 +161,7 @@ const instanceApiRoutes = HttpApiBuilder.layer(InstanceHttpApi).pipe(
     fileHandlers,
     instanceHandlers,
     mcpHandlers,
+    newsHandlers,
     projectHandlers,
     projectCopyHandlers,
     ptyHandlers,
@@ -165,6 +169,7 @@ const instanceApiRoutes = HttpApiBuilder.layer(InstanceHttpApi).pipe(
     permissionHandlers,
     providerHandlers,
     sessionHandlers,
+    sharedHandlers,
     syncHandlers,
     tuiHandlers,
     workspaceHandlers,
@@ -223,6 +228,7 @@ const app = LayerNode.group([
   Snapshot.node,
   Plugin.node,
   ModelsDev.node,
+  News.node,
   Provider.node,
   ProviderAuth.node,
   Agent.node,

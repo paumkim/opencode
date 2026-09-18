@@ -1,15 +1,33 @@
 ---
 name: cpg-template
 description: >
-  A reusable central pattern generator (CPG) template for rhythmic, periodic
-  control in loops and skills. Produces stable limit-cycle oscillations through
-  coupled oscillators, enabling smooth, self-sustaining periodic motion without
-  explicit planning. Trigger keywords: central pattern generator, CPG, rhythmic
-  pattern, oscillatory control, gait generation, periodic motion, rhythmic
-  locomotion, oscillator, limit cycle.
+  Design specification for a proposed central pattern generator (CPG) template
+  for rhythmic, periodic control in loops and skills. It would produce stable
+  limit-cycle oscillations through coupled oscillators, enabling smooth,
+  self-sustaining periodic motion without explicit planning. Not a runnable
+  module. Trigger keywords: central pattern generator, CPG, rhythmic pattern,
+  oscillatory control, gait generation, periodic motion, rhythmic locomotion,
+  oscillator, limit cycle.
 ---
 
 # CPG Template
+
+## Current Status and Safety Boundary
+
+**Design specification, not an executable template.** All robot loops currently
+have only `SKILL.md`; `src/` is a generic software supervisory runtime, not a CPG
+solver or robot controller. The oscillator model, actuator mappings, feedback,
+and policies below are unimplemented. There is no hardware safety certification,
+actuator enforcement, real-time or latency guarantee, or persistence/resume.
+
+Physical operation would require independent, always-on physical monitoring and
+protective controls outside the sequential JS runtime. Mathematical oscillator
+stability is not proof of a stable or safe robot gait. Hardware limits must be
+immutable to learning; adaptive advisory setpoints stay within those limits.
+Learned parameter/policy deployment requires validation, explicit operator
+approval, and a rollback plan. Those gates and physical protections are
+requirements, not implemented features. All rates and values below are
+illustrative design targets, not validated robot settings or timing guarantees.
 
 ## Purpose
 
@@ -90,7 +108,7 @@ To apply this template to a loop or skill:
 | `coupling_strength` | 0.5 | Strength of coupling between oscillators. Higher values enforce tighter phase coordination. |
 | `damping` | 0.1 | Rate at which the oscillator returns to its limit cycle after a perturbation. Higher damping reduces overshoot. |
 
-## Example
+## Example (Conceptual)
 
 **Applying the CPG template to leg-gait generation for a quadruped robot.**
 

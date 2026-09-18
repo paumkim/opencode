@@ -27,12 +27,19 @@ export interface AuthSession {
 }
 
 export function useAuthSession() {
+  const request = getRequestEvent()?.request
+  const url = request ? new URL(request.url) : undefined
+  // Only an explicit Vite dev server on HTTP loopback may use an insecure cookie.
+  const local =
+    import.meta.env.DEV === true &&
+    url?.protocol === "http:" &&
+    ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)
   return useSession<AuthSession>({
     password: Resource.ZEN_SESSION_SECRET.value,
     name: "auth",
     maxAge: 60 * 60 * 24 * 365,
     cookie: {
-      secure: false,
+      secure: !local,
       httpOnly: true,
     },
   })

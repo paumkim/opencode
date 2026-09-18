@@ -1,7 +1,12 @@
-// @ts-nocheck
+/** @jsxImportSource react */
 import React from "react"
 import { Font, Text as JEText, type TextProps } from "@jsx-email/all"
 import { baseText } from "./styles"
+
+type TitleProps = React.ComponentPropsWithoutRef<"title">
+type AProps = React.ComponentPropsWithoutRef<"a">
+type SpanProps = React.ComponentPropsWithoutRef<"span">
+type WbrProps = React.ComponentPropsWithoutRef<"wbr">
 
 export function Text(props: TextProps) {
   return <JEText {...props} style={{ ...baseText, ...props.style }} />
@@ -61,7 +66,7 @@ export function Fonts({ assetsUrl }: { assetsUrl: string }) {
 }
 
 export function SplitString({ text, split }: { text: string; split: number }) {
-  const segments: JSX.Element[] = []
+  const segments: React.ReactElement[] = []
   for (let i = 0; i < text.length; i += split) {
     segments.push(<>{text.slice(i, i + split)}</>)
     if (i + split < text.length) {

@@ -4,7 +4,8 @@ import { SessionV1 } from "@opencode-ai/core/v1/session"
 import type { NamedError } from "@opencode-ai/core/util/error"
 import { APICallError } from "ai"
 import { setTimeout as sleep } from "node:timers/promises"
-import { Effect, Schedule, Schema } from "effect"
+import { Clock, Effect, Exit, Fiber, Schedule, Schema } from "effect"
+import { TestClock } from "effect/testing"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { SessionRetry } from "../../src/session/retry"
 import { MessageV2 } from "../../src/session/message-v2"
@@ -149,6 +150,44 @@ describe("session.retry.delay", () => {
 })
 
 describe("session.retry.retryable", () => {
+  it.effect("retries the logged OpenRouter Union Alpha upstream limit with bounded backoff", () =>
+    Effect.gen(function* () {
+      // The log records APICallError and this message, but no status, retryability, or headers.
+      const message = "[Stealth] stealth/union-alpha is temporarily rate-limited upstream. Please retry shortly."
+      const error = new APICallError({
+        message,
+        url: "https://openrouter.ai/api/v1/chat/completions",
+        requestBodyValues: {},
+      })
+      const parse = (error: unknown) => MessageV2.fromError(error, { providerID: ProviderV2.ID.make("openrouter") })
+      expect(SessionRetry.retryable(parse(error), "openrouter")).toEqual({ message })
+      expect(SessionRetry.retryable(wrap(message), "openrouter")).toEqual({ message })
+      const attempts: number[] = []
+      const step = yield* Schedule.toStepWithMetadata(
+        SessionRetry.policy({
+          provider: "openrouter",
+          parse,
+          set: (info) =>
+            Effect.gen(function* () {
+              const now = yield* Clock.currentTimeMillis
+              attempts.push(info.attempt)
+              expect(info.message).toBe(message)
+              expect(info.next - now).toBeGreaterThanOrEqual(SessionRetry.delay(info.attempt, undefined, 0))
+              expect(info.next - now).toBeLessThanOrEqual(SessionRetry.delay(info.attempt, undefined, 1))
+            }),
+        }),
+      )
+      const fiber = yield* Effect.forEach(Array.from({ length: 6 }), () => Effect.exit(step(error))).pipe(
+        Effect.forkChild,
+      )
+      yield* TestClock.adjust("2 minutes")
+      const results = yield* Fiber.join(fiber)
+      expect(attempts).toEqual([1, 2, 3, 4, 5])
+      expect(results.slice(0, 5).every(Exit.isSuccess)).toBe(true)
+      expect(Exit.isFailure(results[5])).toBe(true)
+    }),
+  )
+
   test("retries serialized too_many_requests messages", () => {
     const error = wrap(JSON.stringify({ type: "error", error: { type: "too_many_requests" } }))
     expect(SessionRetry.retryable(error, retryProvider)).toEqual({ message: "Too Many Requests" })

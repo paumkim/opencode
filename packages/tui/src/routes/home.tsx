@@ -12,6 +12,9 @@ import { useEditorContext } from "../context/editor"
 import { useTerminalDimensions } from "@opentui/solid"
 import { useTuiConfig } from "../config"
 import { HomeSessionDestinationProvider } from "./home/session-destination"
+import { HomeNews, loadHomeNews } from "./home/news"
+import { useSDK } from "../context/sdk"
+import { useTheme } from "../context/theme"
 
 let once = false
 const placeholder = {
@@ -30,6 +33,8 @@ export function Home() {
   const editor = useEditorContext()
   const dimensions = useTerminalDimensions()
   const tuiConfig = useTuiConfig()
+  const sdk = useSDK()
+  const { theme } = useTheme()
   const promptMaxWidth = createMemo(() => {
     const configured = tuiConfig.prompt?.max_width
     if (configured === "auto") return Math.max(75, Math.floor(dimensions().width * 0.7))
@@ -84,6 +89,11 @@ export function Home() {
           </pluginRuntime.Slot>
         </box>
         <pluginRuntime.Slot name="home_bottom" />
+        <HomeNews
+          load={(signal) => loadHomeNews(sdk.client, signal)}
+          color={theme.textMuted}
+          maxWidth={promptMaxWidth()}
+        />
         <box flexGrow={1} minHeight={0} />
         <Toast />
       </box>

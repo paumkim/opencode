@@ -287,11 +287,79 @@ function agentFromMessage(message: { info?: unknown } | undefined) {
   return undefined
 }
 
+async function resolveContinuationModel(
+  client: Parameters<Plugin>[0]["client"],
+  sessionID: string,
+): Promise<{ providerID: string; modelID: string; variant?: string } | undefined> {
+  // Inherit the parent session's current model so continuations don't fall back
+  // to the agent's hardcoded default (prompt.ts: `input.model ?? ag.model ?? currentModel`).
+  try {
+    const session = await client.session.get({ path: { id: sessionID } } as never)
+    const data = (session as { data?: unknown }).data ?? session
+    const info = (data as { info?: unknown }).info ?? data
+    const model = (info as { model?: { id?: unknown; providerID?: unknown; variant?: unknown } }).model
+    if (model && typeof model.id === "string" && typeof model.providerID === "string") {
+      const resolved: { providerID: string; modelID: string; variant?: string } = {
+        providerID: model.providerID,
+        modelID: model.id,
+      }
+      if (typeof model.variant === "string" && model.variant && model.variant !== "default") {
+        resolved.variant = model.variant
+      }
+      return resolved
+    }
+  } catch {
+    // Fall through to message-based lookup below.
+  }
+  try {
+    const result = await client.session.messages({ path: { id: sessionID }, query: { limit: 20 } })
+    const data = Array.isArray((result as { data?: unknown }).data)
+      ? ((result as { data: unknown[] }).data as { info?: unknown; role?: unknown }[])
+      : []
+    for (const message of [...data].reverse()) {
+      const info = (message as { info?: Record<string, unknown> }).info
+      const sources = [message as Record<string, unknown>, info]
+      for (const source of sources) {
+        if (!source || typeof source !== "object") continue
+        const model = source["model"] as { providerID?: unknown; modelID?: unknown; id?: unknown } | undefined
+        if (model && typeof model.providerID === "string") {
+          const modelID = model.modelID ?? model.id
+          if (typeof modelID === "string") return { providerID: model.providerID, modelID }
+        }
+        if (typeof source["providerID"] === "string") {
+          const modelID = source["modelID"] ?? source["model"]
+          if (typeof modelID === "string") {
+            return { providerID: source["providerID"] as string, modelID }
+          }
+        }
+      }
+      const variant = (info as { variant?: unknown } | undefined)?.variant
+      void variant
+    }
+  } catch {
+    return undefined
+  }
+  return undefined
+}
+
 async function sendContinuation(client: Parameters<Plugin>[0]["client"], sessionID: string, prompt: string, agent?: string | null) {
+  let model: { providerID: string; modelID: string } | undefined
+  let variant: string | undefined
+  try {
+    const resolved = await resolveContinuationModel(client, sessionID)
+    if (resolved) {
+      model = { providerID: resolved.providerID, modelID: resolved.modelID }
+      variant = resolved.variant
+    }
+  } catch {
+    model = undefined
+  }
   await client.session.promptAsync({
     path: { id: sessionID },
     body: {
       ...(agent ? { agent } : {}),
+      ...(model ? { model } : {}),
+      ...(variant ? { variant } : {}),
       parts: [{ type: "text", text: prompt }],
     },
   })

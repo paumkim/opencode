@@ -197,6 +197,7 @@ export const CompactionPart = Schema.Struct({
   type: Schema.Literal("compaction"),
   auto: Schema.Boolean,
   overflow: Schema.optional(Schema.Boolean),
+  preflight: Schema.optional(Schema.Boolean),
   tail_start_id: Schema.optional(MessageID),
 }).annotate({ identifier: "CompactionPart" })
 export type CompactionPart = Types.DeepMutable<Schema.Schema.Type<typeof CompactionPart>>
@@ -332,6 +333,9 @@ const messageBase = {
 export const User = Schema.Struct({
   ...messageBase,
   role: Schema.Literal("user"),
+  // Internal compaction provenance: replay content stays visible and retains
+  // its original synthetic flags, but is not a new user/reset boundary.
+  replayOf: Schema.optional(MessageID),
   time: Schema.Struct({
     created: Timestamp,
   }),

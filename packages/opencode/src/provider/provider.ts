@@ -179,6 +179,7 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
         options: {
           headers: {
             "anthropic-beta": "interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14",
+            "X-BILLING-INVOKE-ORIGIN": "OpenCode",
           },
         },
       }),
@@ -472,6 +473,7 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
             "HTTP-Referer": "https://opencode.ai/",
             "X-Title": "opencode",
             "X-Source": "opencode",
+            "X-BILLING-INVOKE-ORIGIN": "OpenCode",
           },
         },
       }),
@@ -482,6 +484,7 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
           headers: {
             "HTTP-Referer": "https://opencode.ai/",
             "X-Title": "opencode",
+            "X-BILLING-INVOKE-ORIGIN": "OpenCode",
           },
         },
       }),
@@ -503,6 +506,7 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
           headers: {
             "http-referer": "https://opencode.ai/",
             "x-title": "opencode",
+            "x-billing-invoke-origin": "OpenCode",
           },
         },
       }),
@@ -608,6 +612,7 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
           headers: {
             "HTTP-Referer": "https://opencode.ai/",
             "X-Title": "opencode",
+            "X-BILLING-INVOKE-ORIGIN": "OpenCode",
           },
         },
       }),
@@ -762,6 +767,7 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
           apiKey,
           headers: {
             "User-Agent": `opencode/${InstallationVersion} cloudflare-workers-ai (${os.platform()} ${os.release()}; ${os.arch()})`,
+            "X-BILLING-INVOKE-ORIGIN": "OpenCode",
           },
         },
         async getModel(sdk: any, modelID: string) {
@@ -832,6 +838,7 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
         collectLog: input.options?.collectLog,
         headers: {
           "User-Agent": `opencode/${InstallationVersion} cloudflare-ai-gateway (${os.platform()} ${os.release()}; ${os.arch()})`,
+          "X-BILLING-INVOKE-ORIGIN": "OpenCode",
         },
       }
 
@@ -888,6 +895,7 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
         options: {
           headers: {
             "X-Cerebras-3rd-Party-Integration": "opencode",
+            "X-BILLING-INVOKE-ORIGIN": "OpenCode",
           },
         },
       }),
@@ -898,6 +906,7 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
           headers: {
             "HTTP-Referer": "https://opencode.ai/",
             "X-Title": "opencode",
+            "X-BILLING-INVOKE-ORIGIN": "OpenCode",
           },
         },
       }),

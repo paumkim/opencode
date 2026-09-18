@@ -7,6 +7,12 @@ import { Commands } from "./commands/commands"
 import { Runtime } from "./framework/runtime"
 import { Daemon } from "./services/daemon"
 
+if (process.argv.length === 3 && process.argv[2] === "--internal-version") {
+  const { internalVersion } = await import("@opencode-ai/core/installation/internal-version")
+  console.log(internalVersion())
+  process.exit(0)
+}
+
 const Handlers = Runtime.handlers(Commands, {
   $: () => import("./commands/handlers/default"),
   api: () => import("./commands/handlers/api"),

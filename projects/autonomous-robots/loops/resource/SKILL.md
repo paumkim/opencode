@@ -1,16 +1,34 @@
 ---
 name: resource
 description: >
-  The resource loop handles resource arbitration and allocation. It assesses
-  available system capacity, ranks resource requests by priority, allocates
-  compute, power, and bandwidth to competing loops, monitors utilization in
-  real time, and rebalances allocations when demand shifts. Trigger keywords:
-  resource management, resource allocation, compute budget, bandwidth,
-  scheduling, priority queuing, resource arbitration, load balancing, capacity
-  planning, resource pooling.
+  Design specification for a proposed resource loop: resource arbitration and
+  allocation. It would assess available system capacity, rank resource requests
+  by priority, allocate compute, power, and bandwidth to competing loops,
+  monitor utilization, and rebalance allocations when demand shifts. Not a
+  runnable module. Trigger keywords: resource management, resource allocation,
+  compute budget, bandwidth, scheduling, priority queuing, resource arbitration,
+  load balancing, capacity planning, resource pooling.
 ---
 
 # Resource Loop
+
+## Current Status and Safety Boundary
+
+**Design specification, not a runnable module.** All robot loops currently have
+only `SKILL.md`; `src/` implements a generic software supervisory runtime, not
+resource allocation policies. The grants, preemption, forecasting, and adaptive
+scheduling below are proposed behavior, not implemented enforcement. Current
+scheduling executes a supplied sequence, not a DAG or a priority allocator.
+
+Rates and budgets are illustrative targets, **not latency, real-time, or minimum
+allocation guarantees**. There is no hardware safety certification, actuator
+enforcement, or persistence/resume. Physical operation would require independent,
+always-on physical monitoring and protective controls outside this sequential JS
+runtime; advisory resource decisions must not starve or disable those controls.
+Hardware limits are immutable to learning and task priority; adaptive advisory
+setpoints remain inside them. Learned allocation-policy deployment requires
+validation, explicit operator approval, and a rollback plan. None of those
+physical protections or deployment gates is implemented here.
 
 ## Purpose
 
@@ -78,7 +96,7 @@ Each resource cycle performs six stages:
 ## Outputs
 
 - **Resource grants** — allocation decisions sent to each loop, specifying the
-  CPU budget, memory limit, bandwidth cap, and latency guarantee it may use
+  CPU budget, memory limit, bandwidth cap, and latency target it may use
   until the next rebalance cycle.
 - **Scheduling decisions** — temporal ordering of loop execution when capacity is
   insufficient for simultaneous operation. Sent to meta-control for coordination.
@@ -133,8 +151,12 @@ The resource loop is a **cross-cutting layer** that connects to all other loops:
 - **Sensorimotor** (downstream): Receives CPU and bandwidth grants that determine
   its sampling rate and processing pipeline depth. Sensorimotor reports actual
   utilization and may request emergency preemption when a real-time deadline is
-  at risk. Resource guarantees sensorimotor's minimum viable allocation to
-  ensure safety-critical perception-action cycles are never starved.
+  at risk. A future implementation would be required to preserve
+  sensorimotor's minimum viable allocation for safety-critical
+  perception-action cycles when capacity permits. If capacity is insufficient,
+  it must deny or shed lower-priority work; if the minimum still cannot be met,
+  it must reject or defer affected work and escalate the shortfall to meta-control.
+  Physical protection must not depend on this allocator.
 - **Planning** (downstream): Receives compute budget that determines the
   planning horizon and algorithm complexity (e.g., A* vs. RL exploration).
   Planning reports resource usage and may request additional budget for
@@ -156,7 +178,11 @@ The resource loop is a **cross-cutting layer** that connects to all other loops:
 - **Error-correction** (downstream): Receives priority preemption rights — when
   error-correction detects a critical anomaly, it can request immediate
   resource preemption to ensure recovery actions have sufficient compute.
-  Resource guarantees error-correction's minimum allocation during recovery.
+  A future implementation would be required to prioritize error-correction's
+  minimum allocation during recovery, denying lower-priority requests first.
+  If capacity still cannot meet that minimum, it must defer affected recovery
+  work and escalate to meta-control; physical protection must remain independent
+  of this allocator. These are design requirements, not implemented guarantees.
 - **Social** (downstream): Receives bandwidth and CPU grants for human
   communication (speech synthesis, gesture generation). Social is preemptible
   during resource contention.
@@ -176,7 +202,7 @@ The resource loop is a **cross-cutting layer** that connects to all other loops:
 | `min_viable_threshold` | 0.3 | Fraction of desired allocation below which a loop is considered starved |
 | `forecast_horizon` | 10s | Time horizon for capacity demand predictions |
 
-## Example
+## Example (Conceptual)
 
 **Task**: A mobile robot is navigating through a maze using a planned waypoint
 sequence. It must simultaneously run sensorimotor (obstacle avoidance at 100 Hz),
@@ -187,7 +213,7 @@ experience).
    cores available, 4 GB memory, 50 W power budget. Battery is at 60% with an
    estimated 20 minutes of operation remaining.
 2. **rank**: Three resource requests arrive:
-   - Sensorimotor: 2 cores, 1 GB memory, 100 Hz latency guarantee (criticality:
+   - Sensorimotor: 2 cores, 1 GB memory, 100 Hz latency target (criticality:
      high, task priority: 0.9)
    - Planning: 1.5 cores, 1.5 GB memory, 10 Hz latency (criticality: medium,
      task priority: 0.7)
@@ -197,7 +223,7 @@ experience).
 3. **allocate**: The resource loop grants sensorimotor its full request (2 cores,
    1 GB). Planning receives 1.5 cores and 1.5 GB. Learning receives 0.5 cores
    and 1 GB — below its desired allocation but above its minimum viable
-   threshold. The remaining 0.5 core is reserved for overhead.
+   threshold. The four cores are now fully allocated (2 + 1.5 + 0.5).
 4. **monitor**: At 50 Hz, the resource loop tracks utilization. Sensorimotor is
    using 1.8 cores (within allocation). Planning is using 1.2 cores (under
    allocation — trajectory optimization finished early). Learning is using 0.5
@@ -213,7 +239,9 @@ experience).
    load). This forecast is sent to homeostasis, which confirms the robot can
    complete the maze within the power budget.
 
-Throughout, the resource loop continues its assess → rank → allocate → monitor →
-rebalance → forecast cycle, ensuring that sensorimotor always has sufficient
-compute for real-time obstacle avoidance while maximizing the utility of
-planning and learning within the available capacity.
+Throughout this conceptual example, the proposed resource loop would continue
+its assess → rank → allocate → monitor → rebalance → forecast cycle, aiming to
+give sensorimotor sufficient compute for real-time obstacle avoidance while
+maximizing the utility of planning and learning within the available capacity.
+The 50 Hz monitoring and per-loop grants are illustrative targets, not
+implemented behavior or latency guarantees.

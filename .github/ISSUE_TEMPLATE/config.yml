@@ -1,5 +1,8 @@
 blank_issues_enabled: false
 contact_links:
-  - name: 💬 Discord Community
-    url: https://discord.gg/opencode
-    about: For support, troubleshooting, how-to questions, and real-time discussion.
+  - name: 🛠️ Development
+    url: https://github.com/paumkim/opencode
+    about: Personal fork of OpenCode (paumkim/opencode). Issues filed here are for this fork.
+  - name: 📋 Original Project
+    url: https://github.com/charmbracelet/crush
+    about: Upstream OpenCode is now maintained as Crush at charmbracelet/crush.

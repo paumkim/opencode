@@ -1173,6 +1173,51 @@ describe("session.compaction.process", () => {
     }),
   )
 
+  for (const preflight of [undefined, false, true]) {
+    it.instance(
+      `preflight wiring keeps overflow:false ordinary unless preflight is ${preflight}`,
+      Effect.gen(function* () {
+        const ssn = yield* SessionNs.Service
+        const session = yield* ssn.create({})
+        yield* createUserMessage(session.id, "root")
+        const current = yield* createUserMessage(session.id, "current request")
+        yield* ssn.updatePart({
+          id: PartID.ascending(),
+          messageID: current.id,
+          sessionID: session.id,
+          type: "file",
+          mime: "image/png",
+          url: "data:image/png;base64,aGVsbG8=",
+        })
+        yield* SessionCompaction.use.create({
+          sessionID: session.id,
+          agent: "build",
+          model: ref,
+          auto: true,
+          overflow: false,
+          preflight,
+        })
+        const messages = yield* ssn.messages({ sessionID: session.id })
+        const marker = messages.at(-1)!
+        expect(marker.parts[0]).toMatchObject({ type: "compaction", overflow: false })
+        expect(marker.parts[0].type === "compaction" && marker.parts[0].preflight).toBe(preflight)
+        yield* SessionCompaction.use.process({
+          parentID: marker.info.id,
+          messages,
+          sessionID: session.id,
+          auto: true,
+          overflow: false,
+          preflight,
+        })
+        const last = (yield* ssn.messages({ sessionID: session.id })).at(-1)
+        expect(last?.info.role).toBe("user")
+        expect(last?.parts.some((p) => p.type === "file")).toBe(preflight === true)
+        expect(last?.parts.some((p) => p.type === "text" && p.text === "current request")).toBe(preflight === true)
+        expect(last?.parts.some((p) => p.type === "text" && p.synthetic === true)).toBe(preflight !== true)
+      }),
+    )
+  }
+
   it.instance(
     "falls back to overflow guidance when no replayable turn exists",
     Effect.gen(function* () {

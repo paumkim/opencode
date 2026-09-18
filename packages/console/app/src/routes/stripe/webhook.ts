@@ -1,8 +1,9 @@
 import type { Stripe } from "stripe"
 import { Billing } from "@opencode-ai/console-core/billing.js"
 import type { APIEvent } from "@solidjs/start/server"
-import { and, Database, eq, sql } from "@opencode-ai/console-core/drizzle/index.js"
-import { BillingTable, LiteTable, PaymentTable } from "@opencode-ai/console-core/schema/billing.sql.js"
+import { Database, eq, sql } from "@opencode-ai/console-core/drizzle/index.js"
+import { BillingTable, LiteTable } from "@opencode-ai/console-core/schema/billing.sql.js"
+import { StripeAccounting } from "@opencode-ai/console-core/stripe-accounting.js"
 import { Identifier } from "@opencode-ai/console-core/identifier.js"
 import { centsToMicroCents } from "@opencode-ai/console-core/util/price.js"
 import { Actor } from "@opencode-ai/console-core/actor.js"
@@ -76,33 +77,29 @@ export async function POST(input: APIEvent) {
         const paymentMethod = paymentIntent.payment_method
         if (!paymentMethod || typeof paymentMethod === "string") throw new Error("Payment method not expanded")
 
-        await Database.transaction(async (tx) => {
-          await tx
-            .update(BillingTable)
-            .set({
-              balance: sql`${BillingTable.balance} + ${centsToMicroCents(amountInCents)}`,
-              customerID,
-              paymentMethodID: paymentMethod.id,
-              paymentMethodLast4: paymentMethod.card?.last4 ?? null,
-              paymentMethodType: paymentMethod.type,
-              // enable reload if first time enabling billing
-              ...(customer?.customerID
-                ? {}
-                : {
-                    reloadError: null,
-                    timeReloadError: null,
-                  }),
-            })
-            .where(eq(BillingTable.workspaceID, workspaceID))
-          await tx.insert(PaymentTable).values({
+        await StripeAccounting.payment(
+          body.id,
+          {
             workspaceID,
-            id: Identifier.create("payment"),
             amount: centsToMicroCents(amountInCents),
             paymentID,
             invoiceID,
             customerID,
-          })
-        })
+          },
+          {
+            customerID,
+            paymentMethodID: paymentMethod.id,
+            paymentMethodLast4: paymentMethod.card?.last4 ?? null,
+            paymentMethodType: paymentMethod.type,
+            // enable reload if first time enabling billing
+            ...(customer?.customerID
+              ? {}
+              : {
+                  reloadError: null,
+                  timeReloadError: null,
+                }),
+          },
+        )
       })
     }
     if (body.type === "customer.subscription.created") {
@@ -141,39 +138,55 @@ export async function POST(input: APIEvent) {
             })
           }
 
-          await Database.transaction(async (tx) => {
-            await tx
-              .update(BillingTable)
-              .set({
-                customerID,
-                liteSubscriptionID: subscriptionID,
-                lite: {},
-                paymentMethodID: paymentMethod.id,
-                paymentMethodLast4: paymentMethod.card?.last4 ?? null,
-                paymentMethodType: paymentMethod.type,
+          await StripeAccounting.subscription(
+            body.id,
+            subscriptionID,
+            () => Billing.stripe().subscriptions.retrieve(subscriptionID),
+            async (tx) => {
+              // Existing subscriptions predate the operation ledger. Lock and check
+              // before inserting membership or redeeming a coupon again.
+              const current = await tx
+                .select({ subscriptionID: BillingTable.liteSubscriptionID })
+                .from(BillingTable)
+                .where(eq(BillingTable.workspaceID, workspaceID))
+                .for("update")
+                .then((rows) => rows[0])
+              if (!current) throw new Error("Billing record not found")
+              if (current.subscriptionID === subscriptionID) return
+              if (current.subscriptionID) throw new Error("Workspace already has a Lite subscription")
+              await tx
+                .update(BillingTable)
+                .set({
+                  customerID,
+                  liteSubscriptionID: subscriptionID,
+                  lite: {},
+                  paymentMethodID: paymentMethod.id,
+                  paymentMethodLast4: paymentMethod.card?.last4 ?? null,
+                  paymentMethodType: paymentMethod.type,
+                })
+                .where(eq(BillingTable.workspaceID, workspaceID))
+
+              await tx.insert(LiteTable).values({
+                workspaceID,
+                id: Identifier.create("lite"),
+                userID: userID,
               })
-              .where(eq(BillingTable.workspaceID, workspaceID))
 
-            await tx.insert(LiteTable).values({
-              workspaceID,
-              id: Identifier.create("lite"),
-              userID: userID,
-            })
-
-            if (userEmail) {
-              if (coupon === LiteData.firstMonth50Coupon) {
-                await Billing.redeemCoupon(userEmail, "GO1MONTH50")
-              } else if (coupon === LiteData.firstMonth100Coupon) {
-                await Billing.redeemCoupon(userEmail, "GOFREEMONTH")
-              } else if (coupon === LiteData.threeMonths100Coupon) {
-                await Billing.redeemCoupon(userEmail, "GO3MONTHS100")
-              } else if (coupon === LiteData.sixMonths100Coupon) {
-                await Billing.redeemCoupon(userEmail, "GO6MONTHS100")
-              } else if (coupon === LiteData.twelveMonths100Coupon) {
-                await Billing.redeemCoupon(userEmail, "GO12MONTHS100")
+              if (userEmail) {
+                if (coupon === LiteData.firstMonth50Coupon) {
+                  await Billing.redeemCoupon(userEmail, "GO1MONTH50", (apply) => apply(tx))
+                } else if (coupon === LiteData.firstMonth100Coupon) {
+                  await Billing.redeemCoupon(userEmail, "GOFREEMONTH", (apply) => apply(tx))
+                } else if (coupon === LiteData.threeMonths100Coupon) {
+                  await Billing.redeemCoupon(userEmail, "GO3MONTHS100", (apply) => apply(tx))
+                } else if (coupon === LiteData.sixMonths100Coupon) {
+                  await Billing.redeemCoupon(userEmail, "GO6MONTHS100", (apply) => apply(tx))
+                } else if (coupon === LiteData.twelveMonths100Coupon) {
+                  await Billing.redeemCoupon(userEmail, "GO12MONTHS100", (apply) => apply(tx))
+                }
               }
-            }
-          })
+            },
+          )
 
           await Referral.completeFromLiteSubscription({
             workspaceID,
@@ -248,21 +261,18 @@ export async function POST(input: APIEvent) {
         )
         if (!workspaceID) throw new Error("Workspace ID not found for customer")
 
-        await Database.use((tx) =>
-          tx.insert(PaymentTable).values({
-            workspaceID,
-            id: Identifier.create("payment"),
-            amount: centsToMicroCents(amountInCents),
-            paymentID,
-            invoiceID,
-            customerID,
-            enrichment: {
-              type: productID === LiteData.productID() ? "lite" : "subscription",
-              currency: body.data.object.currency === "inr" ? "inr" : undefined,
-              couponID,
-            },
-          }),
-        )
+        await StripeAccounting.payment(body.id, {
+          workspaceID,
+          amount: centsToMicroCents(amountInCents),
+          paymentID,
+          invoiceID,
+          customerID,
+          enrichment: {
+            type: productID === LiteData.productID() ? "lite" : "subscription",
+            currency: body.data.object.currency === "inr" ? "inr" : undefined,
+            couponID,
+          },
+        })
       } else if (body.data.object.billing_reason === "manual") {
         const workspaceID = body.data.object.metadata?.workspaceID
         const amountInCents = body.data.object.metadata?.amount && parseInt(body.data.object.metadata?.amount)
@@ -279,24 +289,17 @@ export async function POST(input: APIEvent) {
           const invoice = await Billing.stripe().invoices.retrieve(invoiceID, {
             expand: ["payments"],
           })
-          await Database.transaction(async (tx) => {
-            await tx
-              .update(BillingTable)
-              .set({
-                balance: sql`${BillingTable.balance} + ${centsToMicroCents(amountInCents)}`,
-                reloadError: null,
-                timeReloadError: null,
-              })
-              .where(eq(BillingTable.workspaceID, Actor.workspace()))
-            await tx.insert(PaymentTable).values({
+          await StripeAccounting.payment(
+            body.id,
+            {
               workspaceID: Actor.workspace(),
-              id: Identifier.create("payment"),
               amount: centsToMicroCents(amountInCents),
               invoiceID,
               paymentID: invoice.payments?.data[0].payment.payment_intent as string,
               customerID,
-            })
-          })
+            },
+            { reloadError: null, timeReloadError: null },
+          )
         })
       }
     }
@@ -308,12 +311,7 @@ export async function POST(input: APIEvent) {
         if (!workspaceID) throw new Error("Workspace ID not found")
         if (!invoiceID) throw new Error("Invoice ID not found")
 
-        const paymentIntent = await Billing.stripe().paymentIntents.retrieve(invoiceID)
-        console.log(JSON.stringify(paymentIntent))
-        const errorMessage =
-          typeof paymentIntent === "object" && paymentIntent !== null
-            ? paymentIntent.last_payment_error?.message
-            : undefined
+        const errorMessage = await Billing.invoicePaymentError(invoiceID)
 
         await Actor.provide("system", { workspaceID }, async () => {
           await Database.use((tx) =>
@@ -346,35 +344,12 @@ export async function POST(input: APIEvent) {
       )
       if (!workspaceID) throw new Error("Workspace ID not found")
 
-      const payment = await Database.use((tx) =>
-        tx
-          .select({
-            amount: PaymentTable.amount,
-            enrichment: PaymentTable.enrichment,
-          })
-          .from(PaymentTable)
-          .where(and(eq(PaymentTable.paymentID, paymentIntentID), eq(PaymentTable.workspaceID, workspaceID)))
-          .then((rows) => rows[0]),
-      )
-      if (!payment) throw new Error("Payment not found")
-
-      await Database.transaction(async (tx) => {
-        await tx
-          .update(PaymentTable)
-          .set({
-            timeRefunded: new Date(body.created * 1000),
-          })
-          .where(and(eq(PaymentTable.paymentID, paymentIntentID), eq(PaymentTable.workspaceID, workspaceID)))
-
-        // deduct balance only for top up
-        if (!payment.enrichment?.type) {
-          await tx
-            .update(BillingTable)
-            .set({
-              balance: sql`${BillingTable.balance} - ${payment.amount}`,
-            })
-            .where(eq(BillingTable.workspaceID, workspaceID))
-        }
+      await StripeAccounting.refund(body.id, {
+        workspaceID,
+        paymentID: paymentIntentID,
+        timeRefunded: new Date(body.created * 1000),
+        refundedCents: body.data.object.amount_refunded,
+        chargedCents: body.data.object.amount,
       })
     }
   })()

@@ -20,6 +20,29 @@ const SUPPORTED_IMAGE_MIMES = new Set(["image/jpeg", "image/png", "image/gif", "
 
 class ReadStop extends Schema.TaggedErrorClass<ReadStop>()("ReadStop", {}) {}
 
+const decodeNotebook = Schema.decodeUnknownOption(
+  Schema.fromJsonString(Schema.Struct({ cells: Schema.Array(Schema.Unknown) })),
+)
+const decodeCell = Schema.decodeUnknownOption(
+  Schema.Struct({
+    cell_type: Schema.Literals(["markdown", "code"]),
+    source: Schema.Union([Schema.String, Schema.Array(Schema.String)]),
+  }),
+)
+
+function notebookText(raw: string) {
+  const notebook = decodeNotebook(raw)
+  if (Option.isNone(notebook)) return raw
+  const cells = notebook.value.cells.flatMap((value) => {
+    const cell = decodeCell(value)
+    if (Option.isNone(cell)) return []
+    const { cell_type, source } = cell.value
+    const text = typeof source === "string" ? source : source.join("")
+    return [`<${cell_type}_cell>\n${text}${text.endsWith("\n") ? "" : "\n"}</${cell_type}_cell>`]
+  })
+  return cells.length ? cells.join("\n\n") : "(Notebook contains no markdown or code cell content.)"
+}
+
 // `offset` and `limit` were originally `z.coerce.number()` — the runtime
 // coercion was useful when the tool was called from a shell but serves no
 // purpose in the LLM tool-call path (the model emits typed JSON). The JSON
@@ -145,8 +168,13 @@ export const ReadTool = Tool.define<
       // line of the upstream splitLines pipeline) and use a tagged error to stop the
       // upstream file stream as soon as the byte cap is reached.
       const decoder = new TextDecoder("utf-8")
-      yield* fs.stream(filepath).pipe(
-        Stream.map((bytes) => decoder.decode(bytes, { stream: true })),
+      // Notebooks need the complete JSON document before paging the extracted text.
+      // Keep I/O in Effect so interruption still cancels the read; never execute cell code.
+      const text =
+        path.extname(filepath).toLowerCase() === ".ipynb"
+          ? Stream.fromEffect(fs.readFile(filepath).pipe(Effect.map((bytes) => notebookText(decoder.decode(bytes)))))
+          : fs.stream(filepath).pipe(Stream.map((bytes) => decoder.decode(bytes, { stream: true })))
+      yield* text.pipe(
         Stream.splitLines,
         Stream.runForEach((text) =>
           Effect.gen(function* () {
@@ -263,7 +291,7 @@ export const ReadTool = Tool.define<
 
       if (stat.type === "Directory") {
         const items = yield* list(filepath)
-        const limit = params.limit ?? DEFAULT_READ_LIMIT
+        const limit = Math.max(1, params.limit ?? DEFAULT_READ_LIMIT)
         const offset = params.offset || 1
         const start = offset - 1
         const sliced = items.slice(start, start + limit)
@@ -328,7 +356,10 @@ export const ReadTool = Tool.define<
         return yield* Effect.fail(new Error(`Cannot read binary file: ${filepath}`))
       }
 
-      const file = yield* lines(filepath, { limit: params.limit ?? DEFAULT_READ_LIMIT, offset: params.offset || 1 })
+      const file = yield* lines(filepath, {
+        limit: Math.max(1, params.limit ?? DEFAULT_READ_LIMIT),
+        offset: params.offset || 1,
+      })
       if (file.count < file.offset && !(file.count === 0 && file.offset === 1)) {
         return yield* Effect.fail(
           new Error(`Offset ${file.offset} is out of range for this file (${file.count} lines)`),

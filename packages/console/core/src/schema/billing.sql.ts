@@ -87,6 +87,19 @@ export const LiteTable = mysqlTable(
   (table) => [...workspaceIndexes(table), uniqueIndex("workspace_user_id").on(table.workspaceID, table.userID)],
 )
 
+export const StripeEventTable = mysqlTable("stripe_event", {
+  event_id: varchar({ length: 255 }).primaryKey(),
+  claim_id: varchar({ length: 36 }).notNull(),
+  time_created: utc("time_created").notNull().defaultNow(),
+})
+
+// Separate from event delivery claims: distinct Stripe events may describe one operation.
+export const StripeOperationTable = mysqlTable("stripe_operation", {
+  operation_id: varchar({ length: 255 }).primaryKey(),
+  claim_id: varchar({ length: 36 }).notNull(),
+  time_created: utc("time_created").notNull().defaultNow(),
+})
+
 export const PaymentTable = mysqlTable(
   "payment",
   {
@@ -97,6 +110,9 @@ export const PaymentTable = mysqlTable(
     paymentID: varchar("payment_id", { length: 255 }),
     amount: bigint("amount", { mode: "number" }).notNull(),
     timeRefunded: utc("time_refunded"),
+    // Cumulative refunded credit in microcents, excluding the processing fee.
+    // NULL on legacy rows: timeRefunded meant a full credit reversal.
+    refundedAmount: bigint("refunded_amount", { mode: "number" }),
     enrichment: json("enrichment").$type<
       | {
           type: "subscription" | "lite"

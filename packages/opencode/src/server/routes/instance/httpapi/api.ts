@@ -15,6 +15,7 @@ import { ExperimentalApi } from "./groups/experimental"
 import { FileApi } from "./groups/file"
 import { InstanceApi } from "./groups/instance"
 import { McpApi } from "./groups/mcp"
+import { NewsApi } from "./groups/news"
 import { PermissionApi } from "./groups/permission"
 import { ProjectApi } from "./groups/project"
 import { ProjectCopyApi } from "./groups/project-copy"
@@ -22,6 +23,7 @@ import { ProviderApi } from "./groups/provider"
 import { PtyApi, PtyConnectApi } from "./groups/pty"
 import { QuestionApi } from "./groups/question"
 import { SessionApi } from "./groups/session"
+import { SharedApi } from "./groups/shared"
 import { SyncApi } from "./groups/sync"
 import { TuiApi } from "./groups/tui"
 import { WorkspaceApi } from "./groups/workspace"
@@ -64,6 +66,7 @@ export const InstanceHttpApi = HttpApi.make("opencode-instance")
   .addHttpApi(FileApi)
   .addHttpApi(InstanceApi)
   .addHttpApi(McpApi)
+  .addHttpApi(NewsApi)
   .addHttpApi(ProjectApi)
   .addHttpApi(ProjectCopyApi)
   .addHttpApi(PtyApi)
@@ -71,6 +74,7 @@ export const InstanceHttpApi = HttpApi.make("opencode-instance")
   .addHttpApi(PermissionApi)
   .addHttpApi(ProviderApi)
   .addHttpApi(SessionApi)
+  .addHttpApi(SharedApi)
   .addHttpApi(SyncApi)
   .addHttpApi(TuiApi)
   .addHttpApi(WorkspaceApi)

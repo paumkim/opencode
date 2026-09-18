@@ -22,7 +22,7 @@ import { OpenApi } from "effect/unstable/httpapi"
 import { TestLLMServer } from "../../lib/llm-server"
 import path from "path"
 import { array, boolean, check, isRecord, message, object, stable } from "./assertions"
-import { controlledPtyInput, http, route } from "./dsl"
+import { controlledPtyInput, http, pending, route } from "./dsl"
 import {
   cleanupExercisePaths,
   exerciseConfigDirectory,
@@ -1740,6 +1740,7 @@ const scenarios: Scenario[] = [
     .probe({ path: "/global/upgrade", body: { target: 1 } })
     .at(() => ({ path: "/global/upgrade", body: { target: 1 } }))
     .status(400),
+  pending("GET", "/ws", "shared.ws", "WebSocket endpoint requires live upgrade test"),
 ]
 
 const llmScenarios = new Set([

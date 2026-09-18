@@ -757,6 +757,107 @@ describe("session.llm.stream", () => {
   const opencodeFixture = { providerID: "opencode-test", modelID: vivgridFixture.modelID }
 
   it.instance(
+    "repairs truncated tool-call JSON instead of routing to invalid",
+    () =>
+      Effect.gen(function* () {
+        const fixture = loadFixture(vivgridFixture.providerID, vivgridFixture.modelID)
+        const truncated = `{"filePath": "/home/pauk/Projects/opencode/models/spark-x2.5-4b/HANDOFF.md"`
+        const request = waitRequest(
+          "/chat/completions",
+          createEventResponse(
+            [
+              {
+                id: "chatcmpl-truncated",
+                object: "chat.completion.chunk",
+                choices: [{ index: 0, delta: { role: "assistant" } }],
+              },
+              {
+                id: "chatcmpl-truncated",
+                object: "chat.completion.chunk",
+                choices: [
+                  {
+                    index: 0,
+                    delta: {
+                      tool_calls: [
+                        {
+                          index: 0,
+                          id: "call-truncated",
+                          type: "function",
+                          function: { name: "write", arguments: truncated },
+                        },
+                      ],
+                    },
+                  },
+                ],
+              },
+              {
+                id: "chatcmpl-truncated",
+                object: "chat.completion.chunk",
+                choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }],
+              },
+            ],
+            true,
+          ),
+        )
+        let executed: unknown
+        const resolved = yield* Provider.use.getModel(
+          ProviderV2.ID.make(vivgridFixture.providerID),
+          ModelV2.ID.make(fixture.model.id),
+        )
+        const sessionID = SessionID.make("session-test-truncated-tool")
+        const agent = {
+          name: "test",
+          mode: "primary",
+          options: {},
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        } satisfies Agent.Info
+        const user = {
+          id: MessageID.make("msg_user-truncated-tool"),
+          sessionID,
+          role: "user",
+          time: { created: Date.now() },
+          agent: agent.name,
+          model: { providerID: ProviderV2.ID.make(vivgridFixture.providerID), modelID: resolved.id },
+        } satisfies SessionV1.User
+
+        yield* drain({
+          user,
+          sessionID,
+          model: resolved,
+          agent,
+          system: ["You are a helpful assistant."],
+          messages: [{ role: "user", content: "Write the handoff" }],
+          tools: {
+            write: tool({
+              description: "Write a file",
+              inputSchema: z.object({ filePath: z.string() }),
+              execute: async (args, options) => {
+                executed = { args, toolCallId: options.toolCallId }
+                return { output: "wrote" }
+              },
+            }),
+          },
+        })
+
+        yield* Effect.promise(() => request)
+        expect(executed).toEqual({
+          args: { filePath: "/home/pauk/Projects/opencode/models/spark-x2.5-4b/HANDOFF.md" },
+          toolCallId: "call-truncated",
+        })
+      }),
+    {
+      config: () => ({
+        enabled_providers: [vivgridFixture.providerID],
+        provider: {
+          [vivgridFixture.providerID]: {
+            options: { apiKey: "test-key", baseURL: `${state.server!.url.origin}/v1` },
+          },
+        },
+      }),
+    },
+  )
+
+  it.instance(
     "sends the parent session header for opencode providers",
     () =>
       Effect.gen(function* () {

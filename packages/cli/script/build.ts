@@ -7,6 +7,9 @@ import { Script } from "@opencode-ai/script"
 import { createSolidTransformPlugin } from "@opentui/solid/bun-plugin"
 import pkg from "../package.json"
 import { modelsData } from "./generate"
+import { readInternalVersion } from "../../core/src/installation/internal-version"
+
+const internalVersion = readInternalVersion()
 
 const dir = path.resolve(import.meta.dirname, "..")
 const binary = "lildax"
@@ -83,6 +86,7 @@ for (const item of targets) {
     },
     define: {
       OPENCODE_VERSION: `'${Script.version}'`,
+      OPENCODE_INTERNAL_VERSION: JSON.stringify(internalVersion),
       OPENCODE_CLI_NAME: `'${binary}'`,
       OPENCODE_MODELS_DEV: modelsData,
       OPENCODE_CHANNEL: `'${Script.channel}'`,

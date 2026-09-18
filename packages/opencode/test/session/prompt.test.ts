@@ -557,7 +557,7 @@ it.instance("loop calls LLM and returns assistant message", () =>
 )
 
 withMcpInstructions.instance(
-  "loop includes MCP instructions in model system context",
+  "loop excludes MCP instructions from model system context",
   () =>
     Effect.gen(function* () {
       const { llm } = yield* useServerConfig(providerCfg)
@@ -575,8 +575,8 @@ withMcpInstructions.instance(
 
       const hits = yield* llm.hits
       const body = JSON.stringify(hits[0]?.body)
-      expect(body).toContain('<server name=\\"guide-server\\">')
-      expect(body).toContain("Use lookup before mutate.")
+      expect(body).not.toContain('<server name=\\"guide-server\\">')
+      expect(body).not.toContain("Use lookup before mutate.")
       yield* Fiber.interrupt(fiber)
     }),
   15_000,
@@ -971,6 +971,330 @@ it.instance("static loop consumes queued replies across turns", () =>
 
     expect(yield* llm.hits).toHaveLength(2)
     expect(yield* llm.pending).toBe(0)
+  }),
+)
+
+it.instance("preflight wiring persists the marker and replays the current request with media", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig((url) => ({
+      ...providerCfg(url),
+      compaction: { threshold: 0.001 },
+    }))
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const chat = yield* sessions.create({})
+    yield* seed(chat.id, { finish: "stop" })
+    const current = yield* user(chat.id, "current request")
+    const file = {
+      type: "file" as const,
+      mime: "image/png",
+      filename: "current.png",
+      url: "data:image/png;base64,aGVsbG8=",
+    }
+    yield* sessions.updatePart({
+      ...file,
+      id: PartID.ascending(),
+      messageID: current.id,
+      sessionID: chat.id,
+    })
+    yield* llm.text("summary")
+    yield* llm.text("final answer")
+    yield* prompt.loop({ sessionID: chat.id })
+
+    const messages = yield* sessions.messages({ sessionID: chat.id })
+    const markers = messages.flatMap((m) => m.parts).filter((p) => p.type === "compaction")
+    expect(markers).toHaveLength(1)
+    expect(markers[0]).toMatchObject({ preflight: true, overflow: false })
+    const replay = messages.findLast((m) => m.info.role === "user")
+    expect(replay?.info.id).not.toBe(current.id)
+    expect(replay?.parts).toEqual(expect.arrayContaining([expect.objectContaining(file)]))
+    expect(replay?.parts).toEqual(expect.arrayContaining([expect.objectContaining({ text: "current request" })]))
+    expect(yield* llm.calls).toBe(2)
+  }),
+)
+
+it.instance("preflight wiring skips the first real turn despite synthetic history", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig((url) => ({
+      ...providerCfg(url),
+      compaction: { threshold: 0.001 },
+    }))
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const chat = yield* sessions.create({ title: "Preflight first turn" })
+    const synthetic = yield* user(chat.id, "internal reminder")
+    const parts = (yield* sessions.messages({ sessionID: chat.id })).find((m) => m.info.id === synthetic.id)!.parts
+    for (const part of parts) {
+      if (part.type === "text") yield* sessions.updatePart({ ...part, synthetic: true })
+    }
+    yield* user(chat.id, "first real request")
+    yield* llm.text("answer")
+    yield* prompt.loop({ sessionID: chat.id })
+    const messages = yield* sessions.messages({ sessionID: chat.id })
+    expect(messages.flatMap((m) => m.parts).some((p) => p.type === "compaction")).toBe(false)
+    expect(yield* llm.calls).toBe(1)
+  }),
+)
+
+for (const status of ["pending", "running", "error", "completed"] as const) {
+  it.instance(`preflight wiring guards persisted ${status} tools across synthetic users`, () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig((url) => ({
+        ...providerCfg(url),
+        compaction: { threshold: 0.001 },
+      }))
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({})
+      yield* seed(chat.id, { finish: "stop" })
+      const current = yield* seed(chat.id, { finish: "tool-calls" })
+      const state: SessionV1.ToolPart["state"] = status === "pending"
+        ? { status, input: {}, raw: "{}" }
+        : status === "running"
+          ? { status, input: {}, time: { start: 1 } }
+          : status === "error"
+            ? { status, input: {}, error: "interrupted", time: { start: 1, end: 2 } }
+            : {
+                status, input: {}, output: "done", title: "done", metadata: {},
+                time: { start: 1, end: 2 },
+                attachments: [{
+                  id: PartID.ascending(), messageID: current.assistant.id, sessionID: chat.id,
+                  type: "file", mime: "image/png", url: "data:image/png;base64,aGVsbG8=",
+                }],
+              }
+      yield* sessions.updatePart({
+        id: PartID.ascending(), messageID: current.assistant.id, sessionID: chat.id,
+        type: "tool", tool: "read", callID: "persisted-read", state,
+        ...(status === "error" ? { metadata: { providerExecuted: true } } : {}),
+      })
+      const synthetic = yield* user(chat.id, "internal continuation")
+      const parts = (yield* sessions.messages({ sessionID: chat.id })).find((m) => m.info.id === synthetic.id)!.parts
+      for (const part of parts) {
+        if (part.type === "text") yield* sessions.updatePart({ ...part, synthetic: true })
+      }
+      yield* llm.text("answer")
+      yield* prompt.loop({ sessionID: chat.id })
+      const messages = yield* sessions.messages({ sessionID: chat.id })
+      expect(messages.flatMap((m) => m.parts).some((p) => p.type === "compaction")).toBe(false)
+      expect(yield* llm.calls).toBe(1)
+    }),
+  )
+}
+
+for (const cycle of [false, true]) {
+  it.instance(`observable progress stops ${cycle ? "A/B cycle" : "repeated read"} across fresh processor handles`, () =>
+    Effect.gen(function* () {
+      const { dir, llm } = yield* useServerConfig(providerCfg)
+      const sessions = yield* Session.Service
+      const prompt = yield* SessionPrompt.Service
+      const chat = yield* sessions.create({ title: "Progress fixture", permission: [{ permission: "*", pattern: "*", action: "allow" }] })
+      yield* writeText(path.join(dir, "a.txt"), "stable evidence\n")
+      yield* writeText(path.join(dir, "b.txt"), "other evidence\n")
+      yield* user(chat.id, "Inspect the evidence")
+      const bound = cycle ? 7 : 6
+      for (let i = 0; i < bound; i++) {
+        yield* llm.tool("read", { filePath: path.join(dir, cycle && i % 2 ? "b.txt" : "a.txt") })
+      }
+      // A spare reply exposes any extra request instead of hanging the test.
+      yield* llm.text("unexpected extra request")
+      const result = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.timeout("15 seconds"))
+      expect(yield* llm.calls).toBe(bound)
+      expect(result.info.role).toBe("assistant")
+      expect(result.parts.some((p) => p.type === "text" && p.metadata?.observable_progress === "stop" && !p.synthetic && p.text.includes("OpenCode stopped"))).toBe(true)
+      const msgs = yield* sessions.messages({ sessionID: chat.id })
+      const turns = msgs.filter((m) => m.info.role === "assistant" && m.parts.some((p) => p.type === "tool"))
+      expect(new Set(turns.map((m) => m.info.id)).size).toBe(bound)
+      expect(turns.every((m) => m.parts.some((p) => p.type === "tool" && p.state.status === "completed"))).toBe(true)
+      const nudges = msgs.flatMap((m) => m.parts).filter((p) => p.type === "text" && p.metadata?.observable_progress === "nudge")
+      expect(nudges).toHaveLength(1)
+      expect(nudges[0]).toMatchObject({ synthetic: true })
+      expect(msgs.flatMap((m) => m.parts).some((p) => p.type === "compaction")).toBe(false)
+      expect((yield* (yield* SessionStatus.Service).get(chat.id)).type).toBe("idle")
+    }),
+  )
+}
+
+for (const mode of ["ranges", "queries", "results", "progress", "user", "synthetic", "cancel", "disabled"] as const) {
+  it.instance(`observable progress recovery fixture: ${mode}`, () =>
+    Effect.gen(function* () {
+      const { dir, llm } = yield* useServerConfig((url) => ({
+        ...providerCfg(url),
+        ...(mode === "disabled" ? { experimental: { observable_progress: { enabled: false } } } : {}),
+      }))
+      const sessions = yield* Session.Service
+      const prompt = yield* SessionPrompt.Service
+      const chat = yield* sessions.create({ title: "Progress recovery", permission: [{ permission: "*", pattern: "*", action: "allow" }] })
+      const file = path.join(dir, "evidence.txt")
+      yield* writeText(file, "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\n")
+      yield* user(chat.id, "Inspect evidence")
+      const read = { filePath: file, offset: 1, limit: 1 }
+      if (mode === "ranges" || mode === "queries" || mode === "disabled") {
+        for (let i = 0; i < 8; i++) {
+          if (mode === "queries") yield* llm.tool("glob", { pattern: `**/query-${i}*` })
+          else yield* llm.tool("read", { ...read, offset: mode === "ranges" ? i + 1 : 1 })
+        }
+        yield* llm.text("Research complete")
+        const result = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.timeout("15 seconds"))
+        expect(yield* llm.calls).toBe(9)
+        expect(result.parts.some((p) => p.type === "text" && p.text === "Research complete")).toBe(true)
+        expect((yield* sessions.messages({ sessionID: chat.id })).flatMap((m) => m.parts).some((p) => p.type === "text" && p.metadata?.observable_progress)).toBe(false)
+        return
+      }
+      // Four identical observations produce a nudge; the fifth request is held
+      // at the local server while we introduce evidence/input or cancel.
+      for (let i = 0; i < 4; i++) yield* llm.tool("read", read)
+      const release = defer<void>()
+      yield* llm.push(reply().wait(release.promise).tool("read", read))
+      const run = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
+      yield* awaitWithTimeout(llm.wait(5), "recovery request never arrived", "10 seconds")
+      const before = yield* sessions.messages({ sessionID: chat.id })
+      expect(before.flatMap((m) => m.parts).filter((p) => p.type === "text" && p.metadata?.observable_progress === "nudge")).toHaveLength(1)
+      if (mode === "cancel") {
+        yield* prompt.cancel(chat.id)
+        const result = yield* Fiber.join(run)
+        release.resolve()
+        expect(yield* llm.calls).toBe(5)
+        expect(result.info).toMatchObject({ error: { name: "MessageAbortedError" } })
+        expect(result.parts.some((p) => p.type === "text" && p.metadata?.observable_progress === "stop")).toBe(false)
+        return
+      }
+      if (mode === "user" || mode === "synthetic") {
+        const added = yield* user(chat.id, "Focus on this evidence")
+        if (mode === "synthetic") {
+          for (const part of yield* MessageV2.parts(added.id)) {
+            if (part.type === "text") yield* sessions.updatePart({ ...part, synthetic: true })
+          }
+        }
+      }
+      if (mode === "results") yield* writeText(file, "changed evidence\n")
+      if (mode === "progress") yield* llm.tool("read", { ...read, offset: 2 })
+      else yield* llm.tool("read", read)
+      yield* llm.text("Recovered")
+      release.resolve()
+      const result = yield* Fiber.join(run).pipe(Effect.timeout("15 seconds"))
+      expect(yield* llm.calls).toBe(mode === "synthetic" ? 6 : 7)
+      expect(result.parts.some((p) => p.type === "text" && p.metadata?.observable_progress === "stop")).toBe(mode === "synthetic")
+      if (mode !== "synthetic") expect(result.parts.some((p) => p.type === "text" && p.text === "Recovered")).toBe(true)
+    }),
+  )
+}
+
+for (const mode of ["loop", "final", "quiet-recovery"] as const) {
+  it.instance(`observable progress enforces real text alternation: ${mode}`, () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const sessions = yield* Session.Service
+      const prompt = yield* SessionPrompt.Service
+      const chat = yield* sessions.create({ title: "Text alternation" })
+      yield* user(chat.id, "Investigate")
+      for (let i = 0; i < 6; i++) {
+        const response = reply().text(mode === "quiet-recovery" && i >= 4 ? `different ${i}` : i % 2 ? "B" : "A")
+        yield* llm.push(mode === "final" && i === 3 ? response.stop() : response.toolCalls())
+      }
+      yield* llm.text("unexpected")
+      const result = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.timeout("15 seconds"))
+      expect(yield* llm.calls).toBe(mode === "final" ? 4 : 6)
+      const parts = (yield* sessions.messages({ sessionID: chat.id })).flatMap((m) => m.parts)
+      expect(parts.filter((p) => p.type === "text" && p.metadata?.observable_progress === "nudge")).toHaveLength(mode === "final" ? 0 : 1)
+      expect(result.parts.some((p) => p.type === "text" && p.metadata?.observable_progress === "stop")).toBe(mode !== "final")
+    }),
+  )
+}
+
+it.instance("observable progress counts real failed edits in the prompt pipeline", () =>
+  Effect.gen(function* () {
+    const { dir, llm } = yield* useServerConfig(providerCfg)
+    const sessions = yield* Session.Service
+    const prompt = yield* SessionPrompt.Service
+    const chat = yield* sessions.create({ title: "Failed edits", permission: [{ permission: "*", pattern: "*", action: "allow" }] })
+    yield* user(chat.id, "Fix the file")
+    const file = path.join(dir, "missing.txt")
+    for (let i = 0; i < 5; i++) yield* llm.tool("edit", { filePath: file, oldString: "absent", newString: String(i) })
+    yield* llm.text("unexpected")
+    const result = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.timeout("15 seconds"))
+    expect(yield* llm.calls).toBe(5)
+    const parts = (yield* sessions.messages({ sessionID: chat.id })).flatMap((m) => m.parts)
+    expect(parts.filter((p) => p.type === "tool" && p.state.status === "error")).toHaveLength(5)
+    expect(parts.filter((p) => p.type === "text" && p.metadata?.observable_progress === "nudge")).toHaveLength(1)
+    expect(result.parts.some((p) => p.type === "text" && p.metadata?.observable_progress === "stop")).toBe(true)
+    expect(yield* (yield* FSUtil.Service).exists(file)).toBe(false)
+  }),
+)
+
+for (const mode of ["permission", "structured"] as const) {
+  it.instance(`observable progress respects ${mode} during recovery`, () =>
+    Effect.gen(function* () {
+      const { dir, llm } = yield* useServerConfig(providerCfg)
+      const sessions = yield* Session.Service
+      const prompt = yield* SessionPrompt.Service
+      const permission = yield* Permission.Service
+      const chat = yield* sessions.create({ title: "Recovery priority", permission: [
+        { permission: "*", pattern: "*", action: "allow" },
+        { permission: "edit", pattern: "*", action: "ask" },
+      ] })
+      const current = yield* user(chat.id, "Inspect evidence")
+      if (mode === "structured") yield* sessions.updateMessage({ ...current, format: new SessionV1.OutputFormatJsonSchema({ type: "json_schema", schema: { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"] }, retryCount: 0 }) })
+      const file = path.join(dir, "evidence.txt")
+      yield* writeText(file, "stable\n")
+      for (let i = 0; i < 4; i++) yield* llm.tool("read", { filePath: file })
+      if (mode === "permission") yield* llm.tool("edit", { filePath: file, oldString: "stable", newString: "changed" })
+      else yield* llm.tool("StructuredOutput", { ok: true })
+      yield* llm.text("unexpected")
+      const run = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
+      if (mode === "permission") {
+        const request = yield* pollWithTimeout(permission.list().pipe(Effect.map((requests) => requests.find((r) => r.sessionID === chat.id))), "edit permission not requested", "10 seconds")
+        yield* permission.reply({ requestID: request.id, reply: "reject" })
+      }
+      const result = yield* Fiber.join(run).pipe(Effect.timeout("15 seconds"))
+      expect(yield* llm.calls).toBe(5)
+      const parts = (yield* sessions.messages({ sessionID: chat.id })).flatMap((m) => m.parts)
+      expect(parts.filter((p) => p.type === "text" && p.metadata?.observable_progress === "nudge")).toHaveLength(1)
+      expect(result.parts.some((p) => p.type === "text" && p.metadata?.observable_progress === "stop")).toBe(false)
+      if (mode === "permission") {
+        expect(errorTool(result.parts)?.state.error).toContain("rejected")
+        expect(yield* Effect.promise(() => Bun.file(file).text())).toBe("stable\n")
+      } else expect(result.info).toMatchObject({ structured: { ok: true } })
+    }),
+  )
+}
+
+it.instance("observable progress survives actual compaction and visible user replay", () =>
+  Effect.gen(function* () {
+    const { dir, llm } = yield* useServerConfig(providerCfg)
+    const sessions = yield* Session.Service
+    const prompt = yield* SessionPrompt.Service
+    const compaction = yield* SessionCompaction.Service
+    const chat = yield* sessions.create({ title: "Replay identity", permission: [{ permission: "*", pattern: "*", action: "allow" }] })
+    yield* seed(chat.id, { finish: "stop" })
+    const current = yield* user(chat.id, "Inspect current evidence")
+    yield* sessions.updateMessage({
+      ...current,
+      format: new SessionV1.OutputFormatJsonSchema({ type: "json_schema", schema: { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"] }, retryCount: 0 }),
+    })
+    const file = path.join(dir, "evidence.txt")
+    yield* writeText(file, "stable\n")
+    for (let i = 0; i < 2; i++) yield* llm.tool("read", { filePath: file })
+    const release = defer<void>()
+    yield* llm.push(reply().wait(release.promise).tool("read", { filePath: file }))
+    const run = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
+    yield* awaitWithTimeout(llm.wait(3), "third read never arrived", "10 seconds")
+    yield* compaction.create({ sessionID: chat.id, agent: "build", model: ref, auto: true, preflight: true })
+    yield* llm.text("summary")
+    for (let i = 0; i < 3; i++) yield* llm.tool("read", { filePath: file })
+    yield* llm.text("unexpected")
+    release.resolve()
+    const result = yield* Fiber.join(run).pipe(Effect.timeout("15 seconds"))
+    expect(yield* llm.calls).toBe(7)
+    const messages = yield* sessions.messages({ sessionID: chat.id })
+    const replay = messages.find((m) => m.info.role === "user" && m.info.replayOf === current.id)
+    expect(replay?.info.id).not.toBe(current.id)
+    expect(replay?.parts).toEqual(expect.arrayContaining([expect.objectContaining({ type: "text", text: "Inspect current evidence" })]))
+    expect(replay?.parts.some((p) => p.type === "text" && p.synthetic)).toBe(false)
+    const replayUser = replay?.info.role === "user" ? replay.info : undefined
+    expect(replayUser?.format).toMatchObject({ type: "json_schema" })
+    expect(messages.some((m) => m.info.role === "assistant" && m.info.summary)).toBe(true)
+    expect(messages.flatMap((m) => m.parts).filter((p) => p.type === "text" && p.metadata?.observable_progress === "nudge")).toHaveLength(1)
+    expect(result.parts.some((p) => p.type === "text" && p.metadata?.observable_progress === "stop")).toBe(true)
   }),
 )
 

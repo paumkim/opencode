@@ -118,9 +118,9 @@ describe("session.system", () => {
 
       expect(first).toBe(second)
 
-      const alpha = output.indexOf("<name>alpha-skill</name>")
-      const middle = output.indexOf("<name>middle-skill</name>")
-      const zeta = output.indexOf("<name>zeta-skill</name>")
+      const alpha = output.indexOf("**alpha-skill**")
+      const middle = output.indexOf("**middle-skill**")
+      const zeta = output.indexOf("**zeta-skill**")
 
       expect(alpha).toBeGreaterThan(-1)
       expect(middle).toBeGreaterThan(alpha)
@@ -129,40 +129,19 @@ describe("session.system", () => {
     }),
   )
 
-  it.effect("MCP output includes connected server instructions", () =>
+  it.effect("MCP output is deferred (returns undefined)", () =>
     Effect.gen(function* () {
       const prompt = yield* SystemPrompt.Service
       const output = yield* prompt.mcp(build)
-
-      expect(output).toBe(
-        [
-          "<mcp_instructions>",
-          '  <server name="guide-server">',
-          "    Use lookup before mutate.",
-          "  </server>",
-          '  <server name="tool-server">',
-          "    Prefer search before update.",
-          "  </server>",
-          "</mcp_instructions>",
-        ].join("\n"),
-      )
+      expect(output).toBeUndefined()
     }),
   )
 
-  it.effect("MCP output omits servers when all advertised tools are denied", () =>
+  it.effect("MCP output is deferred even when tools are denied", () =>
     Effect.gen(function* () {
       const prompt = yield* SystemPrompt.Service
       const output = yield* prompt.mcp(build, Permission.fromConfig({ "tool-server_*": "deny" }))
-
-      expect(output).toBe(
-        [
-          "<mcp_instructions>",
-          '  <server name="guide-server">',
-          "    Use lookup before mutate.",
-          "  </server>",
-          "</mcp_instructions>",
-        ].join("\n"),
-      )
+      expect(output).toBeUndefined()
     }),
   )
 })

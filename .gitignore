@@ -40,3 +40,14 @@ UPCOMING_CHANGELOG.md
 logs/
 *.bun-build
 tsconfig.tsbuildinfo
+
+# Survival: never commit huge local artifacts (rebuild-safe)
+# 11G local model weights - must stay out of git or add/commit hangs
+/models/
+packages/system-one-lite/models/
+packages/ghostty-terminal/zig/ghostty/
+INTERNAL_VERSION
+BUG-tool-invalid-write.md
+BUG-tui-long-thinking-lag.md
+HANDOFF-tui-display-lag.md
+HANDOFF-watcher.md

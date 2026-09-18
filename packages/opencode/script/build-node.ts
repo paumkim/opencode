@@ -1,8 +1,11 @@
 #!/usr/bin/env bun
 
 import { Script } from "@opencode-ai/script"
+import { readInternalVersion } from "../../core/src/installation/internal-version"
 import path from "path"
 import { fileURLToPath } from "url"
+
+const internalVersion = readInternalVersion()
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -22,6 +25,7 @@ await Bun.build({
   define: {
     OPENCODE_MODELS_DEV: generated.modelsData,
     OPENCODE_VERSION: `'${Script.version}'`,
+    OPENCODE_INTERNAL_VERSION: JSON.stringify(internalVersion),
     OPENCODE_CHANNEL: `'${Script.channel}'`,
   },
   files: {

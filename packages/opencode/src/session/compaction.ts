@@ -12,7 +12,7 @@ import { Plugin } from "@/plugin"
 import { Config } from "@/config/config"
 import { NotFoundError } from "@/storage/storage"
 
-import { Effect, Layer, Context } from "effect"
+import { Effect, Layer, Context, Schema } from "effect"
 import { InstanceState } from "@/effect/instance-state"
 import { isOverflow as overflow, usable } from "./overflow"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
@@ -174,6 +174,7 @@ export interface Interface {
     sessionID: SessionID
     auto: boolean
     overflow?: boolean
+    preflight?: boolean
   }) => Effect.Effect<"continue" | "stop">
   readonly create: (input: {
     sessionID: SessionID
@@ -181,6 +182,7 @@ export interface Interface {
     model?: { providerID: ProviderV2.ID; modelID: ModelV2.ID }
     auto: boolean
     overflow?: boolean
+    preflight?: boolean
   }) => Effect.Effect<void>
 }
 
@@ -322,6 +324,7 @@ const layer = Layer.effect(
       sessionID: SessionID
       auto: boolean
       overflow?: boolean
+      preflight?: boolean
     }) {
       const parent = input.messages.findLast((m) => m.info.id === input.parentID)
       if (!parent || parent.info.role !== "user") {
@@ -337,7 +340,10 @@ const layer = Layer.effect(
             parts: SessionV1.Part[]
           }
         | undefined
-      if (input.overflow) {
+      // Replay runs for provider overflow (legacy semantics, media stripped) and
+      // for the explicit preflight marker (media preserved). Ordinary compaction
+      // (both flags absent) never replays.
+      if (input.overflow === true || input.preflight === true) {
         const idx = input.messages.findIndex((m) => m.info.id === input.parentID)
         for (let i = idx - 1; i >= 0; i--) {
           const msg = input.messages[i]
@@ -471,18 +477,19 @@ const layer = Layer.effect(
           const replayMsg = yield* session.updateMessage({
             id: MessageID.ascending(),
             role: "user",
+            replayOf: original.replayOf ?? original.id,
             sessionID: input.sessionID,
             time: { created: Date.now() },
             agent: original.agent,
             model: original.model,
-            format: original.format,
+            format: original.format ? Schema.decodeUnknownSync(SessionV1.Format)(original.format) : undefined,
             tools: original.tools,
             system: original.system,
           })
           for (const part of replay.parts) {
             if (part.type === "compaction") continue
             const replayPart =
-              part.type === "file" && MessageV2.isMedia(part.mime)
+              input.preflight !== true && part.type === "file" && MessageV2.isMedia(part.mime)
                 ? { type: "text" as const, text: `[Attached ${part.mime}: ${part.filename ?? "file"}]` }
                 : part
             yield* session.updatePart({
@@ -562,6 +569,7 @@ const layer = Layer.effect(
       model?: { providerID: ProviderV2.ID; modelID: ModelV2.ID }
       auto: boolean
       overflow?: boolean
+      preflight?: boolean
     }) {
       let model = input.model
       if (!model) {
@@ -586,6 +594,7 @@ const layer = Layer.effect(
         type: "compaction",
         auto: input.auto,
         overflow: input.overflow,
+        preflight: input.preflight,
       })
     })
 

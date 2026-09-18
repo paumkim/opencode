@@ -179,6 +179,11 @@ export const Info = Schema.Struct({
       primary_tools: Schema.optional(Schema.mutable(Schema.Array(Schema.String))).annotate({
         description: "Tools that should only be available to primary agents.",
       }),
+      observable_progress: Schema.optional(Schema.Struct({
+        enabled: Schema.optional(Schema.Boolean).annotate({ description: "Enable V1 observable-progress recovery (default: true)." }),
+        repeat_turns: Schema.optional(PositiveInt).annotate({ description: "Repeat-only turns before a recovery nudge (default: 3)." }),
+        recovery_turns: Schema.optional(PositiveInt).annotate({ description: "Additional repeat-only turns before stopping (default: 2)." }),
+      })),
       continue_loop_on_deny: Schema.optional(Schema.Boolean).annotate({
         description: "Continue the agent loop when a tool call is denied",
       }),

@@ -113,7 +113,7 @@ export namespace User {
           const key = await tx
             .select()
             .from(KeyTable)
-            .where(and(eq(KeyTable.workspaceID, workspaceID), eq(KeyTable.userID, user.id)))
+            .where(and(eq(KeyTable.workspaceID, workspaceID), eq(KeyTable.userID, user.id), isNull(KeyTable.timeDeleted)))
             .then((rows) => rows[0])
 
           if (key) return
@@ -222,13 +222,32 @@ export namespace User {
     Actor.assertAdmin()
     assertNotSelf(id)
 
-    return await Database.use((tx) =>
-      tx
-        .update(UserTable)
-        .set({
-          timeDeleted: sql`now()`,
-        })
-        .where(and(eq(UserTable.id, id), eq(UserTable.workspaceID, Actor.workspace()))),
-    )
+    return revokeMembership(id)
   })
+
+  export async function revokeMembership(id: string, transaction = Database.transaction) {
+    Actor.assertAdmin()
+    assertNotSelf(id)
+    const workspaceID = Actor.workspace()
+    return transaction(async (tx) => {
+      await tx
+        .update(UserTable)
+        .set({ timeDeleted: sql`now()` })
+        .where(and(eq(UserTable.id, id), eq(UserTable.workspaceID, workspaceID)))
+      await tx
+        .update(KeyTable)
+        .set({ timeDeleted: sql`now()` })
+        .where(and(eq(KeyTable.userID, id), eq(KeyTable.workspaceID, workspaceID), isNull(KeyTable.timeDeleted)))
+    })
+  }
+
+  // Also rejects keys issued before member/workspace soft deletion was enforced.
+  export function activeKey(key: string) {
+    return and(
+      eq(KeyTable.key, key),
+      isNull(KeyTable.timeDeleted),
+      isNull(UserTable.timeDeleted),
+      isNull(WorkspaceTable.timeDeleted),
+    )
+  }
 }
