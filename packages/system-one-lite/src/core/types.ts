@@ -5,6 +5,126 @@
 
 import { z } from "zod";
 
+// --- Pools ---
+
+export interface Candidate {
+  value: string;
+  start: number;
+  end: number;
+  source: string;
+}
+
+export interface Pools {
+  text: string;
+  spans: string[];
+  numbers: Candidate[];
+  dates: Candidate[];
+  places: Candidate[];
+  people: Candidate[];
+  recentResults: string[];
+  message: string;
+}
+
+// --- Preprocess ---
+
+export interface PreprocessResult {
+  text: string;
+  fixes: Array<{ from: string; to: string }>;
+  suggestions: Array<{ word: string; suggestions: string[] }>;
+}
+
+export interface PendingQuestion {
+  key: string;
+  type: "date" | "number" | "place" | "choice" | "candidate" | "noul";
+  currentValue: string;
+}
+
+// --- Trace ---
+
+export type ArgSource = "jev" | "code" | "user" | "default";
+
+export interface ArgTrace {
+  key: string;
+  value: unknown;
+  source: ArgSource;
+  fromPool?: string;
+}
+
+export interface QuestionTrace {
+  key: string;
+  question: string;
+  options: Record<string, string>;
+  answer: unknown;
+  probabilities?: Record<string, number>;
+}
+
+export interface ToolCallTrace {
+  serverId: string;
+  toolName: string;
+  args: ArgTrace[];
+  result: unknown;
+}
+
+export interface TurnTrace {
+  id: string;
+  originalMessage: string;
+  preprocessedMessage: string;
+  pools: Pools;
+  jevCalls: QuestionTrace[][];
+  chosenTool?: string;
+  arguments?: ArgTrace[];
+  toolCall?: ToolCallTrace;
+  reply?: string;
+  error?: string;
+  latencyMs: number;
+  confidence?: number;
+}
+
+// --- Tool Adapters ---
+
+export interface ToolResult {
+  content: unknown;
+  isError?: boolean;
+}
+
+export interface ToolCard {
+  title?: string;
+  body?: string;
+  fields?: Record<string, unknown>;
+}
+
+export interface QuestionDefinition {
+  key: string;
+  question: string;
+  type: "choice" | "candidate" | "noul";
+  options?: Record<string, string>;
+  poolKey?: string;
+}
+
+export interface SingleStepAdapter {
+  id: string;
+  server: string;
+  mcpName: string;
+  label: string;
+  description: string;
+  examples: string[];
+  questions: (pools: Pools) => Record<string, QuestionDefinition>;
+  build: (
+    answers: Record<string, any>,
+    pools: Pools
+  ) => { args: Record<string, any>; traces: ArgTrace[] } | { missing: string; question: string };
+  present: (result: ToolResult) => { text: string; card: ToolCard };
+}
+
+export interface MultiStepAdapter extends SingleStepAdapter {
+  run: (
+    pools: Pools,
+    askJev: (questions: QuestionDefinition[]) => Promise<Record<string, any>>
+  ) => Promise<ToolResult>;
+}
+
+// --- Existing types ---
+
 /**
  * Result of a structured decision
  */

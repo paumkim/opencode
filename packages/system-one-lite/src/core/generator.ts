@@ -92,6 +92,7 @@ export class LlamaCppGenerator {
         value: parsed,
         latencyMs,
         tokensUsed: this.estimateTokens(output),
+        confidence: this.estimateConfidence(schema, parsed),
       };
     } finally {
       await cleanupGbnfFile(grammarFile);
@@ -195,6 +196,39 @@ export class LlamaCppGenerator {
    */
   private estimateTokens(text: string): number {
     return Math.ceil(text.length / 4);
+  }
+
+  /**
+   * Estimate confidence based on schema type completeness and parsed output.
+   */
+  private estimateConfidence(schema: z.ZodSchema, parsed: unknown): number {
+    try {
+      const shape = (schema as any).shape || {};
+      const entries = Object.entries(shape);
+      if (entries.length === 0) return 0.9;
+
+      let present = 0;
+      let total = 0;
+      const obj = parsed as Record<string, unknown>;
+
+      for (const [, fieldSchema] of entries) {
+        const def = (fieldSchema as any)._def;
+        const typeName = def?.typeName;
+        if (typeName === "ZodOptional" || typeName === "ZodDefault") continue;
+        total++;
+        const key = Object.keys(shape).find((k) => shape[k] === fieldSchema);
+        if (key !== undefined && obj[key] !== undefined && obj[key] !== null && obj[key] !== "") {
+          present++;
+        }
+      }
+
+      if (total === 0) return 0.9;
+      if (present === total) return 0.9;
+      if (present >= total * 0.7) return 0.7;
+      return 0.0;
+    } catch {
+      return 0.0;
+    }
   }
 
 /**

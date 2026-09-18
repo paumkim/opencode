@@ -15,7 +15,11 @@
     "commander": "15.0.0",
     "yaml": "^2.3.0",
     "zod": "^3.22.0",
-    "dotenv": "^16.4.0"
+    "dotenv": "^16.4.0",
+    "chrono-node": "^2.7.0",
+    "compromise": "^14.10.0",
+    "cspell-lib": "^8.0.0",
+    "@modelcontextprotocol/sdk": "^1.0.0"
   },
   "devDependencies": {
     "typescript": "^5.3.0",

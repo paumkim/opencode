@@ -8,6 +8,42 @@ import type { Question, ParallelPrompt } from "./types.js";
 import { buildParallelGbnf, zodToGbnf } from "./gbnf.js";
 
 /**
+ * Confidence estimate for a parallel schema based on complexity.
+ */
+export function estimateParallelConfidence(prompt: ParallelPrompt): number {
+  let score = 0;
+  for (const q of prompt.questions) {
+    const def = (q.schema as any)._def;
+    const typeName = def?.typeName;
+    if (typeName === "ZodEnum") {
+      score += 1;
+    } else if (typeName === "ZodBoolean") {
+      score += 2;
+    } else if (typeName === "ZodNumber") {
+      score += 3;
+    } else if (typeName === "ZodObject") {
+      const shape = def?.shape || {};
+      const requiredKeys = Object.entries(shape).filter(([, s]: [string, any]) => {
+        const sdef = s?._def;
+        return !sdef?.isOptional;
+      });
+      if (requiredKeys.length === Object.keys(shape).length) {
+        score += 4;
+      } else {
+        score += 5;
+      }
+    } else {
+      score += 5;
+    }
+  }
+
+  if (score <= prompt.questions.length) return 0.9;
+  if (score <= prompt.questions.length * 2) return 0.8;
+  if (score <= prompt.questions.length * 3) return 0.7;
+  return 0.6;
+}
+
+/**
  * Create a parallel prompt from question definitions
  */
 export function createParallelPrompt(

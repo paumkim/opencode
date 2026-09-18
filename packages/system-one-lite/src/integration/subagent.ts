@@ -12,6 +12,7 @@ import {
   buildParallelPromptText,
   buildParallelSchema,
   parseParallelOutput,
+  estimateParallelConfidence,
   ISSUE_TRIAGE_PROMPT,
   CODE_REVIEW_PROMPT,
   RELEASE_READINESS_PROMPT,
@@ -22,7 +23,18 @@ import {
   CODE_REVIEW_WORKFLOW,
   RELEASE_READINESS_WORKFLOW,
 } from "../eval/workflow.js";
+import { buildPools, type Pools } from "../core/pools.js";
+import { correctSpelling, resolveFollowUp, type PreprocessResult, type PendingQuestion } from "../core/preprocess.js";
+import { generateTraceId, type TurnTrace, type ArgTrace, type QuestionTrace } from "../core/trace.js";
+import { toolRegistry, type SingleStepAdapter, type MultiStepAdapter, type ToolResult, type QuestionDefinition } from "../tools/index.js";
 import type { GeneratorConfig, Workflow, WorkflowResult } from "../core/types.js";
+
+/**
+ * Pending action from a previous turn.
+ */
+export interface PendingAction {
+  question?: PendingQuestion;
+}
 
 /**
   * Model capability descriptor
@@ -345,6 +357,120 @@ export class SystemOneSubagent {
 
     const result = await this.generator.generate(finalPrompt, schema);
     return parseParallelOutput(prompt, JSON.stringify(result.value));
+  }
+
+  /**
+   * Execute a full turn: preprocess, build pools, run parallel prompt or workflow.
+   */
+  async executeTurn(
+    message: string,
+    pendingAction?: PendingAction
+  ): Promise<{ result: WorkflowResult; trace: TurnTrace }> {
+    const start = performance.now();
+    const traceId = generateTraceId();
+    const pools = buildPools(message);
+    const preprocessed = await correctSpelling(message, pools);
+    const resolved = resolveFollowUp(preprocessed.text, pools, pendingAction?.question);
+    const finalMessage = resolved.text;
+
+    const prompt = this.parallelPrompts.get("issue_triage") ?? ISSUE_TRIAGE_PROMPT;
+    const fullPrompt = buildParallelPromptText(prompt);
+    const schema = buildParallelSchema(prompt);
+    const finalPrompt = `Context:\n${finalMessage}\n\n${fullPrompt}`;
+
+    let jevCalls: QuestionTrace[][] = [];
+    let chosenTool: string | undefined;
+    let arguments_: ArgTrace[] | undefined;
+    let toolCall: TurnTrace["toolCall"];
+    let reply: string | undefined;
+    let error: string | undefined;
+    let confidence: number | undefined;
+    let result: WorkflowResult;
+
+    try {
+      const genResult = await this.generator.generate(finalPrompt, schema);
+      const parsed = parseParallelOutput(prompt, JSON.stringify(genResult.value));
+      confidence = genResult.confidence ?? estimateParallelConfidence(prompt);
+
+      result = {
+        workflowName: "issue_triage",
+        stepResults: parsed,
+        totalLatencyMs: performance.now() - start,
+        totalTokens: genResult.tokensUsed ?? 0,
+        success: true,
+      };
+
+      if (confidence < 0.7) {
+        reply = JSON.stringify({ topOptions: parsed, probabilities: { primary: confidence } });
+      } else {
+        reply = JSON.stringify(parsed);
+      }
+    } catch (err) {
+      error = err instanceof Error ? err.message : String(err);
+      result = {
+        workflowName: "issue_triage",
+        stepResults: {},
+        totalLatencyMs: performance.now() - start,
+        totalTokens: 0,
+        success: false,
+        error,
+      };
+    }
+
+    const trace: TurnTrace = {
+      id: traceId,
+      originalMessage: message,
+      preprocessedMessage: finalMessage,
+      pools,
+      jevCalls,
+      chosenTool,
+      arguments: arguments_,
+      toolCall,
+      reply,
+      error,
+      latencyMs: performance.now() - start,
+      confidence,
+    };
+
+    return { result, trace };
+  }
+
+  /**
+   * Run a tool by server and name.
+   */
+  async runTool(serverId: string, toolName: string, args: Record<string, any>): Promise<ToolResult> {
+    const adapters = toolRegistry.getByServer(serverId);
+    const adapter = adapters.find((a) => a.mcpName === toolName);
+    if (!adapter) {
+      return { content: `No adapter found for ${serverId}/${toolName}`, isError: true };
+    }
+    // In a real implementation, this would call the MCP client.
+    // For now, return a placeholder.
+    return { content: { tool: toolName, args }, isError: false };
+  }
+
+  /**
+   * Run a multi-step adapter.
+   */
+  async runMultiStep(adapter: MultiStepAdapter, pools: Pools): Promise<ToolResult> {
+    return adapter.run(pools, async (questions: QuestionDefinition[]) => {
+      // Placeholder: in real use, this would prompt the user/model
+      const answers: Record<string, any> = {};
+      for (const q of questions) {
+        answers[q.key] = q.options?.[Object.keys(q.options)[0]] ?? "";
+      }
+      return answers;
+    });
+  }
+
+  /**
+   * Confidence-gated routing: if confidence < 0.7, return multiple top options.
+   */
+  confidenceGate<T>(value: T, confidence: number): { value: T; confidence: number } | { options: T[]; probabilities: Record<string, number> } {
+    if (confidence < 0.7) {
+      return { options: [value], probabilities: { primary: confidence } };
+    }
+    return { value, confidence };
   }
 
   /**
