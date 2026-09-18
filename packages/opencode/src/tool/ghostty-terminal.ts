@@ -23,7 +23,7 @@ export const Parameters = Schema.Struct({
   cols: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1), Schema.isLessThanOrEqualTo(500))),
   rows: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1), Schema.isLessThanOrEqualTo(200))),
   data: Schema.optional(Schema.String.check(Schema.isMaxLength(65536))).annotate({
-    description: "Write only: literal text/keys, including control characters. JSON \"\\r\" presses Enter, \"\\u0003\" is Ctrl+C; arrow Up is \"\\u001b[A\". Nothing is appended automatically.",
+    description: "Write only: literal text/keys, including control characters. To press Enter, include a carriage return in the data string — use \"\\r\" (which JSON decodes to a single 0x0D byte), NOT \"\\\\r\" (which would send literal backslash-r). \"\\u0003\" is Ctrl+C. Arrow Up is \"\\u001b[A\". Nothing is appended automatically.",
   }),
   format: Schema.optional(Schema.Literals(["plain", "html"])),
   signal: Schema.optional(Schema.Literals(["SIGTERM", "SIGKILL", "SIGINT"])),
