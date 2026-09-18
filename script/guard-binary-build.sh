@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Guard-only preflight for forward-only binary rebuilds. Never builds; exits non-zero on danger.
 set -euo pipefail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 fail() { echo "GUARD FAIL: $1" >&2; exit 1; }
@@ -28,10 +28,10 @@ done
 grep -q "invoicePaymentError" packages/console/core/src/billing.ts || fail "billing hardening missing (invoicePaymentError)"
 grep -q "readPackageVersion" packages/core/src/installation/version.ts || fail "version fallback missing (readPackageVersion)"
 
-# 4. Working tree must be clean or explicitly stashed (no silent overwrite)
-if ! git diff --quiet || ! git diff --cached --quiet; then
-  echo "GUARD WARN: dirty tree - commit with --no-verify or stash before rebuild"
-  git status --short | head -n 20
+# 4. Tracked tree must be clean (untracked ghostty/.gitmodules ignored on purpose)
+if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+  echo "GUARD WARN: dirty tracked tree - commit with --no-verify or stash before rebuild"
+  git status --short --untracked-files=no | head -n 20
   exit 2
 fi
 
