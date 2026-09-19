@@ -20,23 +20,53 @@ import type { Calibrator } from "./calibrator.js";
 import { createCalibrator, TemperatureScaler } from "./calibrator.js";
 
 /**
+ * Best-effort JSON parse with simple repair for truncated/malformed model output.
+ */
+function safeParseJson(raw: string): unknown {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    const trimmed = raw.trim();
+    let depth = 0;
+    let lastValid = -1;
+    for (let i = 0; i < trimmed.length; i++) {
+      if (trimmed[i] === "{") depth++;
+      else if (trimmed[i] === "}") depth--;
+      if (depth === 0 && i > 0) lastValid = i;
+    }
+    if (lastValid > 0) {
+      const repaired = trimmed.slice(0, lastValid + 1);
+      try {
+        return JSON.parse(repaired);
+      } catch {
+        const wrapped = `{${repaired}}`;
+        try {
+          return JSON.parse(wrapped);
+        } catch {
+          return raw;
+        }
+      }
+    }
+    return raw;
+  }
+}
+
+/**
  * Normalize model output before Zod validation:
  * - Convert boolean-like numbers (1/0) to true/false
  * - Convert boolean-like strings ("yes"/"no") to true/false
  */
 function normalizeOutput(value: unknown): unknown {
   if (typeof value === "boolean") return value;
-  if (typeof value === "number") {
-    // Convert 1/0 to booleans
-    if (value === 1) return true;
-    if (value === 0) return false;
-    return value;
-  }
+  if (typeof value === "number") return value;
   if (typeof value === "string") {
     // Convert boolean-like strings
     const lower = value.toLowerCase();
     if (lower === "true" || lower === "yes" || lower === "1") return true;
     if (lower === "false" || lower === "no" || lower === "0") return false;
+    // Convert numeric strings
+    const num = Number(value);
+    if (!Number.isNaN(num) && Number.isFinite(num)) return num;
     return value;
   }
   if (Array.isArray(value)) return value.map(normalizeOutput);
@@ -105,7 +135,23 @@ export class LlamaCppGenerator {
   ): Promise<DecisionResult<z.infer<T>>> {
     const start = performance.now();
 
-    // Get or create GBNF grammar for this schema
+    if (this.config.backend === "llama-server" && this.config.serverUrl) {
+      // Server path: HTTP POST to persistent llama-server
+      const output = await this.runLlamaServer(prompt, schema, options);
+      const latencyMs = performance.now() - start;
+      const raw = safeParseJson(output);
+      const normalized = normalizeOutput(raw);
+      const parsed = schema.parse(normalized);
+
+      return {
+        value: parsed,
+        latencyMs,
+        tokensUsed: this.estimateTokens(output),
+        confidence: applyCalibration(this.estimateConfidence(schema, parsed), this.config.calibrator),
+      };
+    }
+
+    // CLI path: spawn llama-completion with GBNF grammar
     const grammar = this.getGrammar(schema);
     const grammarFile = await writeGbnfFile(grammar);
 
@@ -196,6 +242,51 @@ export class LlamaCppGenerator {
         reject(new Error("llama.cpp timeout"));
       }, 120000);
     });
+  }
+
+  /**
+   * Run llama-server HTTP backend (OpenAI-compatible /v1/chat/completions)
+   * Eliminates spawn overhead — uses persistent server for ~150ms latency.
+   */
+  private async runLlamaServer(
+    prompt: string,
+    schema: z.ZodSchema,
+    options?: { temperature?: number; maxTokens?: number }
+  ): Promise<string> {
+    const baseURL = this.config.serverUrl!.replace(/\/$/, "");
+    const endpoint = `${baseURL}/v1/chat/completions`;
+
+    const systemInstruction =
+      "You output only valid JSON matching the provided schema. No markdown, no explanations, no code fences.";
+
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: this.config.modelPath,
+        messages: [
+          { role: "system", content: systemInstruction },
+          { role: "user", content: prompt },
+        ],
+        temperature: options?.temperature ?? this.config.temperature,
+        max_tokens: options?.maxTokens ?? this.config.maxTokens,
+        stream: false,
+      }),
+      signal: AbortSignal.timeout(this.config.timeoutMs ?? 60000),
+    });
+
+    if (!response.ok) {
+      const body = await response.text().catch(() => "");
+      throw new Error(`llama-server error ${response.status}: ${body.slice(0, 200)}`);
+    }
+
+    const data = (await response.json()) as {
+      choices?: Array<{ message?: { content?: string } }>;
+    };
+    const content = data.choices?.[0]?.message?.content;
+    if (!content) throw new Error("Empty response from llama-server");
+
+    return content;
   }
 
   /**

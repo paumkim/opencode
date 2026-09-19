@@ -7,6 +7,7 @@ import { z } from "zod";
 import { LlamaCppGenerator, createGenerator } from "../core/generator.js";
 import { ApiGenerator, createZenGenerator, createZenGeneratorFromAuth, resolveEnv } from "../core/api-generator.js";
 import { CliGenerator, createCliGenerator } from "../core/cli-generator.js";
+import { KiloGenerator, createKiloGenerator, resolveKiloApiKey } from "../core/kilo-generator.js";
 import {
   createParallelPrompt,
   buildParallelPromptText,
@@ -68,6 +69,9 @@ export interface SystemOneConfig {
   apiModel?: string;
   apiBaseURL?: string;
   cliModel?: string;
+  kiloModel?: string;
+  kiloApiKey?: string;
+  timeoutMs?: number;
 }
 
 /**
@@ -178,7 +182,7 @@ export interface SystemOneConfig {
  /**
   * System One Subagent - Main entry point for opencode integration
   */
-  type Generator = LlamaCppGenerator | ApiGenerator | CliGenerator;
+  type Generator = LlamaCppGenerator | ApiGenerator | CliGenerator | KiloGenerator;
 
 export class SystemOneSubagent {
   private generator: Generator;
@@ -194,6 +198,21 @@ export class SystemOneSubagent {
       this.generator = new CliGenerator({
         model: config.cliModel ?? "opencode/muse-spark-1.3-contributor-free",
         timeoutMs: 60000,
+      });
+    } else if (backend === "kilo") {
+      // Kilo API backend — direct HTTP to api.kilo.ai
+      const kiloApiKey = resolveKiloApiKey(config.kiloApiKey);
+      if (!kiloApiKey) {
+        throw new Error(
+          "KILO_API_KEY required for Kilo models. Set KILO_API_KEY env var or pass config.kiloApiKey."
+        );
+      }
+      this.generator = new KiloGenerator({
+        apiKey: kiloApiKey,
+        model: config.kiloModel ?? "kilo-auto/free",
+        temperature: config.temperature ?? 0.0,
+        maxTokens: config.maxTokens ?? 512,
+        timeoutMs: config.timeoutMs ?? 60000,
       });
     } else if (backend === "api") {
       // API backend — use frontier model for structured decisions
@@ -529,13 +548,20 @@ export function createSystemOneAgent(config: SystemOneConfig): SystemOneSubagent
  */
 export function createSystemOneAgentFromModel(
   model: string,
-  overrides: Omit<SystemOneConfig, "backend" | "modelPath" | "cliModel"> = {}
+  overrides: Omit<SystemOneConfig, "backend" | "modelPath" | "cliModel" | "kiloModel" | "kiloApiKey"> = {}
 ): SystemOneSubagent {
   if (model.startsWith("kilo/")) {
+    const apiKey = resolveKiloApiKey(overrides.apiKey);
+    if (!apiKey) {
+      throw new Error(
+        "KILO_API_KEY required for Kilo models. Set KILO_API_KEY env var or pass config.apiKey."
+      );
+    }
     return new SystemOneSubagent({
       ...overrides,
-      backend: "cli",
-      cliModel: model,
+      backend: "kilo",
+      kiloModel: model,
+      kiloApiKey: apiKey,
     });
   }
 
@@ -591,7 +617,7 @@ export const OPENCODE_AGENT_MANIFEST = {
   type: "subagent" as const,
   configSchema: z.object({
     modelPath: z.string().describe("Path to GGUF model (optional if autoSelectModel is true)").optional(),
-    backend: z.enum(["llama.cpp", "llama-server", "api", "cli"]).default("llama.cpp"),
+    backend: z.enum(["llama.cpp", "llama-server", "api", "cli", "kilo"]).default("llama.cpp"),
     ctxSize: z.number().default(4096),
     ngl: z.number().default(999),
     temperature: z.number().default(0.0),
@@ -603,6 +629,8 @@ export const OPENCODE_AGENT_MANIFEST = {
     apiKey: z.string().optional().describe("API key (required when backend is 'api')"),
     apiModel: z.string().optional().describe("Model name for API backend (e.g. gpt-5.4-mini)"),
     apiBaseURL: z.string().optional().describe("API base URL (defaults to OpenCode Zen)"),
+    kiloModel: z.string().optional().describe("Model name for Kilo API backend (e.g. kilo-auto/free)"),
+    kiloApiKey: z.string().optional().describe("Kilo API key (required when backend is 'kilo')"),
   }),
   tools: [
     "decide",

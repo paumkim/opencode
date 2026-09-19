@@ -179,17 +179,16 @@ interface SystemOneConfig {
 
 ## Models
 
-### Recommended models for 6GB VRAM
+### Recommended models
 
-The package ships with a curated registry (`RECOMMENDED_MODELS`):
+| Model | Cost | Context | Notes |
+|-------|------|---------|-------|
+| `kilo-auto/free` | **free** | 204K | No credits needed. Basic intelligence, may need relaxed enums. |
+| `kilo-auto/small` | $0.05/$0.40 per MTok | 400K | Cheap paid tier. Better schema compliance. |
+| `kilo-auto/balanced` | $0.60/$3.00 per MTok | 204K | Mid-tier paid. |
+| `kilo-auto/frontier` | $5.00/$25.00 per MTok | 1M | Highest quality, highest cost. |
 
-| Model | Quant | File Size | Best For |
-|-------|-------|-----------|----------|
-| Qwen2.5 7B | Q3_K_M | ~4.1 GB | Complex reasoning, high accuracy |
-| Meta-Llama-3.1-8B | Q3_K_M | ~4.7 GB | Nuanced decisions, multi-step |
-| Qwen2.5 3B | Q4_K_M | ~2.4 GB | Fast decisions, structured outputs |
-| Phi-3.5-mini | Q4_K_M | ~2.8 GB | Balanced speed/quality |
-| CodeQwen 1.5B | Q4_K_M | ~1.3 GB | Code tasks, very fast |
+**Note:** Only `kilo-auto/free` requires no credits. All others need a funded Kilo account.
 
 ### Downloading models
 

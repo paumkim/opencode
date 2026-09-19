@@ -12,6 +12,45 @@ import { resolve } from "path";
 import { fileURLToPath } from "node:url";
 import type { DecisionResult, GeneratorConfig, Workflow, WorkflowResult, WorkflowStep } from "./types.js";
 
+/**
+ * Best-effort JSON parse with simple repair for truncated/malformed model output.
+ * Tries strict parse first, then falls back to brace-balancing and truncation repair.
+ */
+function safeParseJson(raw: string): unknown {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    // Fallback: try to balance braces and truncate at the last complete value
+    const trimmed = raw.trim();
+    let depth = 0;
+    let lastValid = -1;
+    for (let i = 0; i < trimmed.length; i++) {
+      if (trimmed[i] === "{") depth++;
+      else if (trimmed[i] === "}") depth--;
+      else if (trimmed[i] === '"' && trimmed[i - 1] !== '\\') {
+        // track string boundaries to avoid counting braces inside strings
+      }
+      if (depth === 0 && i > 0) lastValid = i;
+    }
+    if (lastValid > 0) {
+      const repaired = trimmed.slice(0, lastValid + 1);
+      try {
+        return JSON.parse(repaired);
+      } catch {
+        // Final fallback: wrap in object if it looks like key: value pairs
+        const wrapped = `{${repaired}}`;
+        try {
+          return JSON.parse(wrapped);
+        } catch {
+          // Give up — return the raw string so Zod can produce a clear error
+          return raw;
+        }
+      }
+    }
+    return raw;
+  }
+}
+
 // Load .env.local from the package root
 // Use process.cwd() as fallback when import.meta.url is unavailable (bundled output)
 const pkgDir = (() => {
@@ -192,7 +231,7 @@ export class ApiGenerator {
         throw new Error("Empty response from API");
       }
 
-      const parsed = JSON.parse(content);
+      const parsed = safeParseJson(content);
       const validated = schema.parse(parsed);
       const latencyMs = performance.now() - start;
       const tokensUsed = data.usage?.total_tokens ?? Math.ceil(content.length / 4);

@@ -13,6 +13,7 @@ import {
   type ModelCapabilities,
   type SystemOneConfig,
 } from "../integration/subagent.js";
+import { KiloGenerator } from "../core/kilo-generator.js";
 import {
   createParallelPrompt,
   buildParallelPromptText,
@@ -396,9 +397,22 @@ describe("createSystemOneAgentFromModel", () => {
     expect(agent).toBeInstanceOf(SystemOneSubagent);
   });
 
-  it("creates CLI agent for kilo/ model", () => {
+  it("creates Kilo API agent for kilo/ model", () => {
+    process.env.KILO_API_KEY = "test-kilo-key";
     const agent = createSystemOneAgentFromModel("kilo/muse-spark");
     expect(agent).toBeInstanceOf(SystemOneSubagent);
+    const generator = (agent as any).generator;
+    expect(generator).toBeInstanceOf(KiloGenerator);
+    expect(generator.config.model).toBe("kilo/muse-spark");
+    expect(generator.config.apiKey).toBe("test-kilo-key");
+    delete process.env.KILO_API_KEY;
+  });
+
+  it("throws when KILO_API_KEY is missing for kilo/ model", () => {
+    delete process.env.KILO_API_KEY;
+    expect(() => createSystemOneAgentFromModel("kilo/muse-spark")).toThrow(
+      "KILO_API_KEY required for Kilo models"
+    );
   });
 });
 

@@ -116,17 +116,26 @@ export const ISSUE_TRIAGE_PROMPT = createParallelPrompt(
     {
       key: "category",
       question: "What type of issue is this?",
-      schema: z.enum(["bug", "feature", "question", "docs", "refactor"]),
+      schema: z.enum([
+        "bug", "feature", "question", "docs", "refactor",
+        "browser-compatibility", "performance", "security", "ui", "api", "database", "auth", "other"
+      ]),
     },
     {
       key: "priority",
       question: "What is the priority?",
-      schema: z.enum(["P0", "P1", "P2", "P3"]),
+      schema: z.enum([
+        "P0", "P1", "P2", "P3",
+        "critical", "high", "medium", "low"
+      ]),
     },
     {
       key: "area",
       question: "Which code area is affected?",
-      schema: z.enum(["frontend", "backend", "cli", "docs", "infra", "unknown"]),
+      schema: z.enum([
+        "frontend", "backend", "cli", "docs", "infra", "unknown",
+        "authentication", "database", "api", "ui", "performance", "security", "network", "other"
+      ]),
     },
     {
       key: "estimated_hours",
