@@ -403,14 +403,16 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
 
   const tools = Object.fromEntries(Array.from(toolNames).map((toolName) => [toolName, { toModelOutput }]))
 
+  const filtered = result.filter((msg) => msg.parts.some((part) => part.type !== "step-start"))
   return yield* Effect.promise(() =>
-    convertToModelMessages(
-      result.filter((msg) => msg.parts.some((part) => part.type !== "step-start")),
-      {
-        //@ts-expect-error (convertToModelMessages expects a ToolSet but only actually needs tools[name]?.toModelOutput)
-        tools,
-      },
-    ),
+    convertToModelMessages(filtered, {
+      //@ts-expect-error (convertToModelMessages expects a ToolSet but only actually needs tools[name]?.toModelOutput)
+      tools,
+    }).catch((error) => {
+      console.error("[message-v2] convertToModelMessages failed:", error)
+      console.error("[message-v2] failing messages:", JSON.stringify(filtered, null, 2))
+      throw error
+    })
   )
 })
 
