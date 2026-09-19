@@ -244,6 +244,8 @@ export interface GeneratorConfig {
   binaryPath?: string;
   /** llama-server URL if using server backend */
   serverUrl?: string;
+  /** Optional calibrator for confidence scoring */
+  calibrator?: Calibrator;
 }
 
 /**
@@ -262,6 +264,11 @@ export interface CalibrationPoint {
   /** Model's raw confidence */
   confidence: number;
 }
+
+/**
+ * Unified Calibrator Interface
+ */
+export type Calibrator = import("./calibrator.js").Calibrator;
 
 /**
  * Model specification for 6GB VRAM

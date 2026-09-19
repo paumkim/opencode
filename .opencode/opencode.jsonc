@@ -20,7 +20,20 @@
       }
     }
   },
-  "agents": {},
+  "agents": {
+    "system-one": {
+      "description": "Structured decision making via System One Lite. Uses Zod schemas for zero-parse-error typed outputs. Workflows: issue_triage, code_review, release_readiness.",
+      "mode": "subagent",
+      "type": "system-one",
+      "steps": 3,
+      "permission": {
+        "bash": "allow",
+        "read": "allow",
+        "edit": "deny",
+        "question": "deny"
+      }
+    }
+  },
   "permission": {
     "bash": "allow"
   },

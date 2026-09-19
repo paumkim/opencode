@@ -92,7 +92,7 @@ export class TemperatureScaler {
     return this.temperature;
   }
 
-  toJSON(): object {
+  toJSON(): { method: string; temperature: number } {
     return { method: "temperature", temperature: this.temperature };
   }
 
@@ -157,7 +157,7 @@ export class PlattScaler {
     });
   }
 
-  toJSON(): object {
+  toJSON(): { method: string; weight: number; bias: number } {
     return { method: "platt", weight: this.weight, bias: this.bias };
   }
 
@@ -229,7 +229,7 @@ export class IsotonicCalibrator {
     });
   }
 
-  toJSON(): object {
+  toJSON(): { method: string; boundaries: number[]; values: number[] } {
     return { method: "isotonic", boundaries: this.boundaries, values: this.values };
   }
 

@@ -16,6 +16,8 @@ import type {
   WorkflowResult,
 } from "./types.js";
 import { zodToGbnf, writeGbnfFile, cleanupGbnfFile, GBNF } from "./gbnf.js";
+import type { Calibrator } from "./calibrator.js";
+import { createCalibrator, TemperatureScaler } from "./calibrator.js";
 
 /**
  * Normalize model output before Zod validation:
@@ -24,32 +26,52 @@ import { zodToGbnf, writeGbnfFile, cleanupGbnfFile, GBNF } from "./gbnf.js";
  */
 function normalizeOutput(value: unknown): unknown {
   if (typeof value === "boolean") return value;
-  if (typeof value === "number" || typeof value === "string") return value;
+  if (typeof value === "number") {
+    // Convert 1/0 to booleans
+    if (value === 1) return true;
+    if (value === 0) return false;
+    return value;
+  }
+  if (typeof value === "string") {
+    // Convert boolean-like strings
+    const lower = value.toLowerCase();
+    if (lower === "true" || lower === "yes" || lower === "1") return true;
+    if (lower === "false" || lower === "no" || lower === "0") return false;
+    return value;
+  }
   if (Array.isArray(value)) return value.map(normalizeOutput);
   if (value && typeof value === "object") {
     const result: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(value)) {
-      const normalized = normalizeOutput(v);
-      // Only normalize string representations of booleans, not numbers
-      // (numbers like 1/0 for booleans are handled by the GBNF grammar accepting them)
-      if (normalized === "1" || normalized === "yes" || normalized === "true") {
-        result[k] = true;
-      } else if (normalized === "0" || normalized === "no" || normalized === "false") {
-        result[k] = false;
-      } else {
-        result[k] = normalized;
-      }
+      result[k] = normalizeOutput(v);
     }
     return result;
   }
   return value;
 }
 
+
+/**
+ * Apply calibration to a raw confidence score.
+ * If no calibrator is provided, returns the raw confidence unchanged.
+ */
+export function applyCalibration(confidence: number, calibrator: Calibrator | undefined): number {
+  if (!calibrator) return confidence;
+  
+  // TemperatureScaler expects 2D input, Platt/Isotonic expect 1D
+  if (calibrator instanceof TemperatureScaler) {
+    const raw = calibrator.calibrate([[confidence]]);
+    return raw[0][0];
+  }
+  
+  const raw = calibrator.calibrate([confidence]);
+  return raw[0];
+}
 /**
  * Generator using llama.cpp CLI with GBNF constrained generation
  */
 export class LlamaCppGenerator {
-  private config: Required<GeneratorConfig>;
+  private config: Omit<Required<GeneratorConfig>, "calibrator"> & { calibrator?: Calibrator };
   private grammarCache: Map<string, string> = new Map();
 
   constructor(config: GeneratorConfig) {
@@ -62,7 +84,15 @@ export class LlamaCppGenerator {
       maxTokens: config.maxTokens ?? 512,
       binaryPath: config.binaryPath ?? "llama-completion",
       serverUrl: config.serverUrl ?? "",
+      calibrator: config.calibrator,
     };
+  }
+
+  /**
+   * Set or replace the calibrator used for confidence scoring.
+   */
+  setCalibrator(calibrator: Calibrator): void {
+    this.config.calibrator = calibrator;
   }
 
   /**
@@ -92,7 +122,7 @@ export class LlamaCppGenerator {
         value: parsed,
         latencyMs,
         tokensUsed: this.estimateTokens(output),
-        confidence: this.estimateConfidence(schema, parsed),
+        confidence: applyCalibration(this.estimateConfidence(schema, parsed), this.config.calibrator),
       };
     } finally {
       await cleanupGbnfFile(grammarFile);
@@ -200,44 +230,53 @@ export class LlamaCppGenerator {
 
   /**
    * Estimate confidence based on schema type completeness and parsed output.
+   * If a raw confidence is provided, it is used directly instead of computing the heuristic.
    */
-  private estimateConfidence(schema: z.ZodSchema, parsed: unknown): number {
+  private estimateConfidence(schema: z.ZodSchema, parsed: unknown, rawConfidence?: number): number {
     try {
-      const shape = (schema as any).shape || {};
-      const entries = Object.entries(shape);
-      if (entries.length === 0) return 0.9;
+      const confidence = rawConfidence ?? (() => {
+        const shape = (schema as any).shape || {};
+        const entries = Object.entries(shape);
+        if (entries.length === 0) return 0.9;
 
-      let present = 0;
-      let total = 0;
-      const obj = parsed as Record<string, unknown>;
+        let present = 0;
+        let total = 0;
+        const obj = parsed as Record<string, unknown>;
 
-      for (const [, fieldSchema] of entries) {
-        const def = (fieldSchema as any)._def;
-        const typeName = def?.typeName;
-        if (typeName === "ZodOptional" || typeName === "ZodDefault") continue;
-        total++;
-        const key = Object.keys(shape).find((k) => shape[k] === fieldSchema);
-        if (key !== undefined && obj[key] !== undefined && obj[key] !== null && obj[key] !== "") {
-          present++;
+        for (const [, fieldSchema] of entries) {
+          const def = (fieldSchema as any)._def;
+          const typeName = def?.typeName;
+          if (typeName === "ZodOptional" || typeName === "ZodDefault") continue;
+          total++;
+          const key = Object.keys(shape).find((k) => shape[k] === fieldSchema);
+          if (key !== undefined && obj[key] !== undefined && obj[key] !== null && obj[key] !== "") {
+            present++;
+          }
         }
-      }
 
-      if (total === 0) return 0.9;
-      if (present === total) return 0.9;
-      if (present >= total * 0.7) return 0.7;
-      return 0.0;
+        if (total === 0) return 0.9;
+        if (present === total) return 0.9;
+        if (present >= total * 0.7) return 0.7;
+        return 0.0;
+      })();
+
+      return applyCalibration(confidence, this.config.calibrator);
     } catch {
       return 0.0;
     }
   }
 
 /**
-  * Check if a step depends on any of the given step names
-  */
- private stepDependsOn(step: WorkflowStep, stepNames: string[]): boolean {
-    const template = step.promptTemplate;
-    return stepNames.some(name => template.includes(`{${name}}`));
-  }
+ * Check if a step depends on any of the given step names.
+ * Uses word-boundary matching to avoid false positives (e.g. step "test" matching "{test_results}").
+ */
+private stepDependsOn(step: WorkflowStep, stepNames: string[]): boolean {
+  const template = step.promptTemplate;
+  return stepNames.some(name => {
+    const regex = new RegExp(`\\{${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\}`);
+    return regex.test(template);
+  });
+}
 
   /**
   * Run a workflow (multiple steps) with parallel execution for independent steps
