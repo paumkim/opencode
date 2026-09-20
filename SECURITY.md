@@ -1,7 +1,14 @@
 # Security
 
-This is a personal fork of OpenCode, kept private for my own use. There is no
-public security team, issue triage, or advisory process here.
+This is a public mod of [OpenCode](https://github.com/anomalyco/opencode), maintained by [paumkim](https://github.com/paumkim).
+
+## Reporting a Vulnerability
+
+Please report security vulnerabilities by opening an issue at:
+https://github.com/paumkim/opencode/issues
+
+Do not include sensitive details in public issues. We will work with you to
+understand and address the report.
 
 ## Threat Model
 

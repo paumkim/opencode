@@ -1,8 +1,6 @@
 # Contributing
 
-This is a personal fork of OpenCode, kept private for my own use. There is no
-public contribution process here — issues, pull requests, and external
-contributors are not expected or managed.
+This is a public mod of [OpenCode](https://github.com/anomalyco/opencode), maintained by [paumkim](https://github.com/paumkim). We welcome contributions, issues, and feature requests from the community.
 
 ## Development
 
