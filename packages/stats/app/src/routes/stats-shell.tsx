@@ -8,8 +8,8 @@ import { route, type Locale } from "../lib/language"
 export type HeaderLink = { href: string; label: string }
 
 export const githubLink = {
-  href: "https://github.com/anomalyco/opencode",
-  apiHref: "https://api.github.com/repos/anomalyco/opencode",
+  href: "https://github.com/paumkim/opencode",
+  apiHref: "https://api.github.com/repos/paumkim/opencode",
   fallbackStars: "195K",
 }
 export const themePreferences = ["dark", "light", "system"] as const
@@ -241,7 +241,7 @@ export function Footer(props: {
     { href: "https://opencode.ai/discord", label: i18n.t("footer.community") },
     { href: "https://x.com/opencode", label: "X" },
     { href: githubLink.href, label: i18n.t("header.github") },
-    { href: "https://www.youtube.com/@anomalyco", label: i18n.t("footer.youtube") },
+    { href: "https://www.youtube.com/@paumkim", label: i18n.t("footer.youtube") },
   ]
   const bridge = () =>
     props.bridge === undefined
