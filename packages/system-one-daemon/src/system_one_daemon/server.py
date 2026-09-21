@@ -22,7 +22,8 @@ MODEL_ID = os.environ.get("LAYER_MODEL_ID", "convaiinnovations/laya")
 
 # Local model directory inside this package so the daemon can be moved/shared
 _HERE = os.path.dirname(os.path.abspath(__file__))
-LOCAL_MODEL_DIR = os.environ.get("SYSTEM_ONE_MODEL_DIR", os.path.join(_HERE, "..", "models"))
+_PACKAGE_ROOT = os.path.abspath(os.path.join(_HERE, "..", ".."))
+LOCAL_MODEL_DIR = os.environ.get("SYSTEM_ONE_MODEL_DIR", os.path.join(_PACKAGE_ROOT, "models"))
 os.environ.setdefault("HF_HOME", LOCAL_MODEL_DIR)
 
 # ---------------------------------------------------------------------------

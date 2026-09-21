@@ -10,6 +10,9 @@ build/
 daemon.pid
 daemon.log
 
+# Model cache (downloaded on first run)
+models/
+
 # Environment
 .env
 .env.local
