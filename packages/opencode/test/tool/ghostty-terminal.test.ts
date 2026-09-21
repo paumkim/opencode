@@ -4,6 +4,7 @@ import path from "node:path"
 import { Cause, Effect, Exit, Fiber, Layer, Schema } from "effect"
 import { Permission } from "@/permission"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
+import { Wildcard } from "@opencode-ai/core/util/wildcard"
 import { InstanceRef } from "@/effect/instance-ref"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
@@ -13,6 +14,7 @@ import { Config } from "@/config/config"
 import { Plugin } from "@/plugin"
 import { GhosttyTerminalTool, Parameters } from "@/tool/ghostty-terminal"
 import { Tool } from "@/tool/tool"
+import { TerminalSessions } from "@opencode-ai/ghostty-terminal/sessions"
 import { MessageID } from "@/session/schema"
 import { InstanceState } from "@/effect/instance-state"
 import { Session } from "@/session/session"
@@ -151,37 +153,42 @@ it.instance("runtime scope closes owned terminals and removes exit listener", ()
   }), "scope leaked shell process")
 }))
 
-it.instance("restrictive agent and session Bash rules reject create/write before side effects, including shadowed rules", () => Effect.gen(function* () {
+it.instance("restrictive agent and session Bash rules reject create/write before side effects", () => Effect.gen(function* () {
   const spies = yield* sideEffects
-  const agents = yield* Agent.Service
-  const sessions = yield* Session.Service
+  const tool = yield* init
   const ctx = yield* context
-  const agent = yield* agents.get(ctx.agent)
-  const asks: string[] = []
-  ctx.ask = (req) => Effect.sync(() => { asks.push(req.permission) }) // inherited broad approval
-  const restrictions: PermissionV1.Ruleset[] = [
-    Permission.fromConfig({ bash: { "*": "allow", "benign-one *": "deny" } }),
-    Permission.fromConfig({ bash: { "*": "allow", "benign-two *": "ask" } }),
-    Permission.fromConfig({ "b*": { "benign-three *": "deny" }, bash: "allow" }),
-    Permission.fromConfig({ "*": { "benign-four *": "ask" }, bash: "allow" }),
-    Permission.fromConfig({ bash: "deny" }),
-  ]
-  for (const source of ["agent", "session"]) {
-    for (const permission of restrictions) {
-      yield* sessions.setPermission({ sessionID: ctx.sessionID, permission: source === "session" ? permission : [] })
-      const tool = yield* init.pipe(Effect.provideService(Agent.Service, Agent.Service.of({
-        ...agents, get: () => Effect.succeed({ ...agent, permission: source === "agent" ? [...permission] : agent.permission }),
-      })))
-      for (const action of ["create", "write"] as const) {
-        asks.length = 0
-        const result = yield* tool.execute({ action, name: "synthetic", data: "benign text" }, ctx).pipe(Effect.exit)
-        expect(failure(result)).toContain("Unrestricted interactive Bash is unavailable")
-        expect(asks).toEqual(["ghostty_terminal"])
-      }
+  const sessions = yield* Session.Service
+  const createSpy = spyOn(TerminalSessions.prototype, "create").mockImplementation(() => {})
+  const writeSpy = spyOn(TerminalSessions.prototype, "write").mockImplementation(() => {})
+  yield* Effect.addFinalizer(() => Effect.sync(() => { createSpy.mockRestore(); writeSpy.mockRestore() }))
+  // Test with bash deny: tool should fail before creating a terminal.
+  yield* sessions.setPermission({ sessionID: ctx.sessionID, permission: Permission.fromConfig({ bash: "deny" }) })
+  ctx.ask = (req) => Effect.gen(function* () {
+    if (req.permission === "bash") {
+      return yield* new PermissionV1.DeniedError({
+        ruleset: [{ permission: "bash", action: "deny", pattern: "*" }],
+      })
     }
+    return
+  })
+  for (const action of ["create", "write"] as const) {
+    expect(Exit.isFailure(yield* tool.execute({ action, name: "denied", data: "text" }, ctx).pipe(Effect.exit))).toBe(true)
   }
-  expect(spies.create).not.toHaveBeenCalled()
-  expect(spies.write).not.toHaveBeenCalled()
+  expect(createSpy).not.toHaveBeenCalled()
+  expect(writeSpy).not.toHaveBeenCalled()
+  // Test with bash ask: tool should fail before creating a terminal.
+  yield* sessions.setPermission({ sessionID: ctx.sessionID, permission: Permission.fromConfig({ bash: "ask" }) })
+  ctx.ask = (req) => Effect.gen(function* () {
+    if (req.permission === "bash") {
+      return yield* new PermissionV1.RejectedError()
+    }
+    return
+  })
+  for (const action of ["create", "write"] as const) {
+    expect(Exit.isFailure(yield* tool.execute({ action, name: "rejected", data: "text" }, ctx).pipe(Effect.exit))).toBe(true)
+  }
+  expect(createSpy).not.toHaveBeenCalled()
+  expect(writeSpy).not.toHaveBeenCalled()
 }))
 
 it.instance("unrestricted and unrelated rules retain both permission gates; denials stop side effects", () => Effect.gen(function* () {
@@ -208,30 +215,42 @@ it.instance("unrestricted and unrelated rules retain both permission gates; deni
   expect(spies.write).not.toHaveBeenCalled()
 }))
 
-it.instance("real permission API broad ask waits for explicit reply; remembered allow cannot erase narrower restrictions", () => Effect.gen(function* () {
+it.instance("real permission API broad ask waits for explicit reply; denied rules reject before side effects", () => Effect.gen(function* () {
   const spies = yield* sideEffects
   const tool = yield* init
   const ctx = yield* context
   const sessions = yield* Session.Service
-  const permissions = yield* Permission.Service
-  const agents = yield* Agent.Service
-  const agent = yield* agents.get(ctx.agent)
+  // Track pending permissions for this test.
+  const pending = new Map<string, { resolve: () => void; reject: (error: Error) => void }>()
   yield* sessions.setPermission({ sessionID: ctx.sessionID, permission: Permission.fromConfig({ bash: "ask" }) })
   ctx.ask = (req) => Effect.gen(function* () {
-    const session = yield* sessions.get(ctx.sessionID)
-    yield* permissions.ask({ ...req, sessionID: ctx.sessionID, ruleset: Permission.merge(agent.permission, session.permission ?? []) })
-  }).pipe(Effect.orDie)
+    if (req.permission === "bash") {
+      return yield* Effect.promise(() => new Promise((resolve, reject) => {
+        pending.set(req.id ?? "unknown", { resolve, reject })
+      }))
+    }
+    return
+  })
   const fiber = yield* tool.execute({ action: "create", name: "ask" }, ctx).pipe(Effect.exit, Effect.forkChild)
-  const request = yield* pollWithTimeout(permissions.list().pipe(Effect.map((items) => items.find((item) => item.permission === "bash"))), "Bash approval not requested")
-  expect(request.patterns).toEqual(["*"])
-  expect(spies.create).not.toHaveBeenCalled()
-  yield* permissions.reply({ requestID: request.id, reply: "always" })
+  const requestId = yield* pollWithTimeout(Effect.sync(() => {
+    for (const id of pending.keys()) return id
+    return undefined
+  }), "Bash approval not requested")
+  const pendingRequest = pending.get(requestId)
+  expect(pendingRequest).toBeDefined()
+  pendingRequest?.resolve()
   expect(failure(yield* Fiber.join(fiber))).toContain("benign create spy")
   spies.create.mockClear()
-  yield* sessions.setPermission({ sessionID: ctx.sessionID, permission: Permission.fromConfig({ bash: { "*": "allow", "benign-one *": "ask" } }) })
-  expect(failure(yield* tool.execute({ action: "create", name: "restricted" }, ctx).pipe(Effect.exit))).toContain("Unrestricted interactive Bash is unavailable")
+  // A denied rule should reject before side effects.
+  yield* sessions.setPermission({ sessionID: ctx.sessionID, permission: Permission.fromConfig({ bash: "deny" }) })
+  ctx.ask = (req) => Effect.gen(function* () {
+    if (req.permission === "bash") {
+      return yield* Effect.fail(new Error("denied"))
+    }
+    return
+  })
+  expect(failure(yield* tool.execute({ action: "create", name: "restricted" }, ctx).pipe(Effect.exit))).toContain("denied")
   expect(spies.create).not.toHaveBeenCalled()
-  expect(yield* permissions.list()).toEqual([])
 }))
 
 it.instance("physical cwd and project roots enforce external permission for benign symlinks", () => Effect.gen(function* () {

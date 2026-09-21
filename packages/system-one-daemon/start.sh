@@ -26,6 +26,11 @@ if ! python3 -c "import laya" 2>/dev/null; then
     pip install -e "$SCRIPT_DIR"
 fi
 
+# Use local model directory within the package for portability
+export HF_HOME="$SCRIPT_DIR/models"
+export TRANSFORMERS_CACHE="$SCRIPT_DIR/models"
+export LAYER_MODEL_ID="${LAYER_MODEL_ID:-convaiinnovations/laya}"
+
 cd "$SCRIPT_DIR"
 nohup python3 -m system_one_daemon.server > "$LOG_FILE" 2>&1 &
 DAEMON_PID=$!
@@ -33,6 +38,7 @@ DAEMON_PID=$!
 echo $DAEMON_PID > "$PID_FILE"
 echo "Daemon started with PID $DAEMON_PID"
 echo "Logs: $LOG_FILE"
+echo "Model cache: $HF_HOME"
 
 sleep 2
 

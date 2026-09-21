@@ -12,8 +12,7 @@ Restore: `git bundle verify /tmp/...bundle && git fetch /tmp/...bundle HEAD:rest
    on dev branch, baked as `OPENCODE_VERSION`. Looks like a revert, isn't.
    Improvement kept: `packages/core/src/installation/version.ts:readPackageVersion()` falls back
    to `package.json` (1.18.30) instead of hardcoded `local`.
-3. **`git add -A` hangs** — 11G `models/`, 9.8G `packages/system-one-lite/models/`,
-   447M ghostty checkout. Fixed via `.gitignore`. Never `add -A` without ignores.
+3. **`git add -A` hangs** — 11G `models/`, 447M ghostty checkout. Fixed via `.gitignore`. Never `add -A` without ignores.
 4. **Console confusion** — console is `packages/console/*` (SST/vite), not in opencode binary.
    Rebuilding opencode binary never updates console deploy. Deploy console separately:
    `bun run --cwd packages/console/app build` / `sst deploy`.
@@ -40,4 +39,4 @@ at root without `--cwd`, or `submodule update --init` (fetches 447M ghostty).
 ## Left untracked on purpose
 
 - `.gitmodules` + `packages/ghostty-terminal/zig/ghostty/` (447M) — init only when needed
-- `models/`, `system-one-lite/models/`, `INTERNAL_VERSION` — local weights/state
+- `models/`, `INTERNAL_VERSION` — local weights/state

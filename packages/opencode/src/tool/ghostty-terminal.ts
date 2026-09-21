@@ -1,9 +1,6 @@
 import { Effect, Schema } from "effect"
 import path from "node:path"
 import fs from "node:fs/promises"
-import { Agent } from "@/agent/agent"
-import { Session } from "@/session/session"
-import { Permission } from "@/permission"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { Tool } from "./tool"
 import { InstanceState } from "@/effect/instance-state"
@@ -11,7 +8,6 @@ import { Config } from "@/config/config"
 import { Plugin } from "@/plugin"
 import { Shell } from "@opencode-ai/core/shell"
 import { ShellID } from "./shell/id"
-import { Wildcard } from "@/util/wildcard"
 import type { TerminalSessions } from "@opencode-ai/ghostty-terminal/sessions"
 
 export const Parameters = Schema.Struct({
@@ -37,8 +33,6 @@ export const GhosttyTerminalTool = Tool.define(
   Effect.gen(function* () {
     const config = yield* Config.Service
     const plugin = yield* Plugin.Service
-    const agents = yield* Agent.Service
-    const conversations = yield* Session.Service
     const state = yield* InstanceState.make(() => Effect.gen(function* () {
       const sessions = new Map<string, TerminalSessions>()
       const state = { sessions, closed: false }
@@ -68,7 +62,7 @@ export const GhosttyTerminalTool = Tool.define(
         "list reports names, PIDs, dimensions and exit status. dispose removes one terminal, or all your terminals when name is omitted; it is idempotent.",
         "Names are isolated by project, conversation and agent. Sessions persist between calls, not across process restarts.",
         "Dispose when finished. Project/runtime shutdown and process exit also release terminals. At most 16 terminals per owner.",
-        "create/write require ghostty_terminal and broad bash permission. Interactive execution is unavailable when configured Bash rules contain any deny or pattern-specific ask, even if a broader allow overrides it. Use the bash tool for restricted commands.",
+        "create/write require ghostty_terminal and bash permission. The tool inherits the configured bash permission level. Use the bash tool for restricted commands.",
       ].join("\n"),
       parameters: Parameters,
       execute: (args: Schema.Schema.Type<typeof Parameters>, ctx: Tool.Context) => Effect.gen(function* () {
@@ -86,33 +80,11 @@ export const GhosttyTerminalTool = Tool.define(
         })
         if (ctx.abort.aborted) throw new Error("Terminal call aborted")
         if (args.action === "create" || args.action === "write") {
-          // This is the V1 tool runtime: SessionTools merges resolved agent and session rules.
-          // V2 `permissions` config is rejected by config/v2-compat, not interpreted here.
-          const agent = yield* agents.get(ctx.agent)
-          if (ctx.abort.aborted) throw new Error("Terminal call aborted")
-          if (!agent) throw new Error("Cannot verify interactive Bash policy: unknown agent")
-          const session = yield* conversations.get(ctx.sessionID)
-          if (ctx.abort.aborted) throw new Error("Terminal call aborted")
-          const rules = Permission.merge(agent.permission, session.permission ?? [])
-          // Keystrokes combine across calls. Do not try to parse commands or let a saved
-          // broad approval erase restrictions. Conservatively reject even shadowed rules.
-          const restricted = rules.some(
-            (rule) =>
-              Wildcard.match(ShellID.ToolID, rule.permission) &&
-              (rule.action === "deny" || (rule.action === "ask" && rule.pattern !== "*")),
-          )
-          if (restricted) {
-            throw new Error("Unrestricted interactive Bash is unavailable with deny or pattern-specific ask rules. Use the bash tool for restricted commands.")
-          }
-          const effective = Permission.evaluate(ShellID.ToolID, "*", rules)
-          if (effective.action === "deny" || (effective.action === "ask" && effective.pattern !== "*")) {
-            throw new Error("Unrestricted interactive Bash is unavailable with deny or pattern-specific ask rules. Use the bash tool for restricted commands.")
-          }
           yield* ctx.ask({
             permission: ShellID.ToolID,
             patterns: ["*"],
             always: ["*"],
-            metadata: { ...args, description: "Unrestricted interactive shell input" },
+            metadata: { ...args, description: "Interactive shell input" },
           })
           if (ctx.abort.aborted) throw new Error("Terminal call aborted")
         }

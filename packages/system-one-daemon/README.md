@@ -1,78 +1,56 @@
 # System One Daemon
 
-Isolated Python/FastAPI daemon that judges every user message before it reaches the Orchestrator. Uses [Laya](https://github.com/convaiinnovations/laya) for structured intent classification.
+Auto-starts with opencode. No manual steps needed.
 
-## Why a daemon?
+## What this is
 
-System One must run **outside** the Orchestrator process so that:
-1. It cannot be influenced by the Orchestrator's reasoning
-2. It can be updated/restarted independently
-3. It provides a clean HTTP boundary (`POST /judge`) that any client can call
+A tiny background service that judges every message you type before it reaches the Orchestrator. It decides whether your message needs quick, standard, or deep reasoning. You never interact with it directly — it just runs silently and makes opencode smarter.
 
-## Architecture
+## Requirements
 
-```
-User Input ──► System One Daemon (127.0.0.1:9999)
-                    │
-                    ▼
-           [System One: effort=X, category=Y]
-                    │
-                    ▼
-           Orchestrator (never sees raw input)
-```
+- Python 3.9+
+- Internet connection (for first-time model download only)
 
-## Setup
+## First-time setup
+
+Just run opencode once. The CLI will automatically:
+1. Install the Python dependencies
+2. Download the Laya model (~1GB, cached locally)
+3. Start the daemon in the background
+
+After that, it starts automatically every time you run opencode. No further action needed.
+
+## Verify it's running
 
 ```bash
 cd packages/system-one-daemon
-pip install -e .
+./test.sh
 ```
 
-## Run
+Expected output:
+```json
+{"status":"ok","model_loaded":true}
+```
 
+## How to use
+
+Nothing to do. Just type in opencode normally. System One runs silently before every message.
+
+If you ever want to restart it:
 ```bash
-# Start daemon
-python -m system_one_daemon.server
-
-# Or via uvicorn directly
-uvicorn system_one_daemon.server:app --host 127.0.0.1 --port 9999
+cd packages/system-one-daemon
+./stop.sh
+./start.sh
 ```
 
-## Endpoints
+## Troubleshooting
 
-- `GET /health` — health check
-- `POST /judge` — classify a message
+**Daemon didn't start?**
+- Run `./test.sh` to check
+- Run `./start.sh` manually to see error logs
 
-### Request
+**Model download stuck?**
+- Delete `models/` folder and restart — it will re-download
 
-```json
-{ "message": "fix the login bug" }
-```
-
-### Response
-
-```json
-{
-  "effort": "full",
-  "category": "bug",
-  "reason": "Bug requires investigation and fix"
-}
-```
-
-## Effort levels
-
-| Effort | Use case |
-|--------|----------|
-| `quick` | Greetings, trivial questions |
-| `standard` | Questions, simple tasks |
-| `full` | Bugs, features, complex work |
-
-## Category mapping
-
-| Category | Effort |
-|----------|--------|
-| `greeting` | quick |
-| `question` | quick/standard (depends on complexity) |
-| `task` | standard |
-| `bug` | full |
-| `feature` | full |
+**Port 9999 already in use?**
+- Run `./stop.sh` then `./start.sh`
