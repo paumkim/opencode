@@ -1080,17 +1080,63 @@ const layer = Layer.effect(
           text: lines.join("\n"),
         })
       }
+      // System One: mandatory silent pre-filter — judges every user message before it reaches the Orchestrator.
+      // If the daemon is down, the pipeline stops and no message is created.
+      const userText = input.parts
+        .filter((p): p is SessionV1.TextPartInput => p.type === "text")
+        .map((p) => p.text)
+        .join("\n")
+
+      if (userText && !input.noReply) {
+        const systemOneUrl = process.env.SYSTEM_ONE_URL ?? "http://127.0.0.1:9999"
+        const decision = yield* Effect.promise(async () => {
+          const controller = new AbortController()
+          const timeoutId = setTimeout(() => controller.abort(), 2000)
+          try {
+            const res = await fetch(`${systemOneUrl}/judge`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ message: userText.split("\n")[0] }),
+              signal: controller.signal as any,
+            })
+            return await res.json()
+          } finally {
+            clearTimeout(timeoutId)
+          }
+        })
+
+        if (!decision?.effort) {
+          yield* Effect.logError("system-one-down", { "session.id": input.sessionID })
+          throw new Error("System One pre-filter is unavailable. Message not sent.")
+        }
+
+        const systemOneDecision = decision
+
+        // Replace original text parts with a wrapped version that includes
+        // the System One judgment. This is still the user's message; it must
+        // remain visible in the UI, so do NOT mark it synthetic.
+        const repackagedParts = input.parts.map((part) => {
+          if (part.type === "text") {
+            return {
+              type: "text" as const,
+              text: `[System One: effort=${systemOneDecision.effort}, category=${systemOneDecision.category}, reason=${systemOneDecision.reason}]\n\nOriginal user message: ${part.text}`,
+            } as SessionV1.TextPartInput
+          }
+          return part
+        })
+
+        const message = yield* createUserMessage({
+          ...input,
+          parts: repackagedParts,
+        })
+        yield* sessions.touch(input.sessionID)
+
+        return yield* loop({ sessionID: input.sessionID, systemOneDecision })
+      }
+
+      // No text content or noReply — create message without System One judgment
       const message = yield* createUserMessage(input)
       yield* sessions.touch(input.sessionID)
-
-      const permissions: PermissionV1.Rule[] = []
-      for (const [t, enabled] of Object.entries(input.tools ?? {})) {
-        permissions.push({ permission: t, action: enabled ? "allow" : "deny", pattern: "*" })
-      }
-      if (permissions.length > 0) {
-        session.permission = permissions
-        yield* sessions.setPermission({ sessionID: session.id, permission: permissions })
-      }
 
       if (input.noReply === true) return message
       return yield* loop({ sessionID: input.sessionID })
@@ -1104,8 +1150,8 @@ const layer = Layer.effect(
       throw new Error("Impossible")
     })
 
-    const runLoop: (sessionID: SessionID) => Effect.Effect<SessionV1.WithParts> = Effect.fn("SessionPrompt.run")(
-      function* (sessionID: SessionID) {
+    const runLoop: (sessionID: SessionID, systemOneDecision?: { effort: string; category: string; reason: string }) => Effect.Effect<SessionV1.WithParts> = Effect.fn("SessionPrompt.run")(
+      function* (sessionID: SessionID, systemOneDecision?: { effort: string; category: string; reason: string }) {
         const ctx = yield* InstanceState.context
         let structured: unknown
         let step = 0
@@ -1316,11 +1362,20 @@ const layer = Layer.effect(
               MessageV2.toModelMessagesEffect(msgs, model),
             ])
             const instructions = session.parentID || minimalContext ? [] : (yield* instruction.system().pipe(Effect.orDie))
+            
+            // System One: inject effort level into system prompt from the mandatory pre-filter
+            let systemOnePrompt = ""
+            if (systemOneDecision) {
+              const { effort, category, reason } = systemOneDecision
+              systemOnePrompt = `\n\n[System One: effort=${effort}, category=${category}, reason=${reason}]\nAdjust your reasoning depth accordingly. In your thought, start with 'System One: effort=${effort}, category=${category}' and then explain how you are adjusting reasoning depth for this turn.`
+            }
+            
             const system = [
               env,
               instructions.length ? instructions : undefined,
               mcpInstructions,
               skills,
+              systemOnePrompt || undefined,
             ].filter((part): part is string => typeof part === "string")
             const format = lastUser.format ?? { type: "text" as const }
             if (format.type === "json_schema") system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
@@ -1505,7 +1560,7 @@ const layer = Layer.effect(
     const loop: (input: LoopInput) => Effect.Effect<SessionV1.WithParts> = Effect.fn("SessionPrompt.loop")(function* (
       input: LoopInput,
     ) {
-      return yield* state.ensureRunning(input.sessionID, lastAssistant(input.sessionID), runLoop(input.sessionID))
+      return yield* state.ensureRunning(input.sessionID, lastAssistant(input.sessionID), runLoop(input.sessionID, input.systemOneDecision))
     })
 
     const shell: (input: ShellInput) => Effect.Effect<SessionV1.WithParts, Session.BusyError> = Effect.fn(
@@ -1684,6 +1739,13 @@ export type PromptInput = Schema.Schema.Type<typeof PromptInput>
 
 export class LoopInput extends Schema.Class<LoopInput>("SessionPrompt.LoopInput")({
   sessionID: SessionID,
+  systemOneDecision: Schema.optional(
+    Schema.Struct({
+      effort: Schema.String,
+      category: Schema.String,
+      reason: Schema.String,
+    }),
+  ),
 }) {}
 
 export const ShellInput = Schema.Struct({

@@ -93,6 +93,29 @@ const cli = yargs(args)
     process.env.AGENT = "1"
     process.env.OPENCODE = "1"
     process.env.OPENCODE_PID = String(process.pid)
+
+    // Start System One daemon if not already running
+    try {
+      const { spawn } = await import("node:child_process")
+      const { existsSync } = await import("node:fs")
+      const daemonDir = require("path").join(require("os").homedir(), "Projects", "opencode", "packages", "system-one-daemon")
+      const pidFile = require("path").join(daemonDir, "daemon.pid")
+      
+      if (existsSync(pidFile)) {
+        const pid = parseInt((await require("node:fs").promises.readFile(pidFile, "utf-8")).trim())
+        try {
+          process.kill(pid, 0)
+          // Daemon is already running
+        } catch {
+          // Stale PID file, start daemon
+          await startDaemon(daemonDir)
+        }
+      } else {
+        await startDaemon(daemonDir)
+      }
+    } catch {
+      // Silently ignore daemon startup failures - the prompt.ts code will handle it
+    }
   })
   .usage("")
   .completion("completion", "generate shell completion script")
@@ -132,6 +155,33 @@ const cli = yargs(args)
     process.exit(1)
   })
   .strict()
+
+async function startDaemon(daemonDir: string) {
+  const { spawn } = await import("node:child_process")
+  const logFile = require("path").join(daemonDir, "daemon.log")
+  
+  return new Promise<void>((resolve) => {
+    const child = spawn("python3", ["-m", "system_one_daemon.server"], {
+      cwd: daemonDir,
+      detached: true,
+      stdio: "ignore",
+    })
+    child.unref()
+    
+    // Wait a moment for the daemon to start
+    setTimeout(() => {
+      (async () => {
+        try {
+          const response = await fetch("http://127.0.0.1:9999/health")
+          if (response.ok) resolve()
+          else resolve()
+        } catch {
+          resolve()
+        }
+      })()
+    }, 3000)
+  })
+}
 
 try {
   if (args.includes("-h") || args.includes("--help")) {

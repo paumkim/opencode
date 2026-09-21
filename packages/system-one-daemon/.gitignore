@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Daemon runtime
+daemon.pid
+daemon.log
+
+# Environment
+.env
+.env.local
+.venv/
+venv/
