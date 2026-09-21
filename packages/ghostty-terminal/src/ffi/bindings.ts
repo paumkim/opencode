@@ -1,6 +1,7 @@
 import { cc, CString, dlopen, FFIType, JSCallback, ptr, read, toArrayBuffer, type Pointer } from "bun:ffi"
-import { dirname } from "node:path"
+import { dirname, join, sep } from "node:path"
 import { fileURLToPath } from "node:url"
+import { existsSync } from "node:fs"
 import { FfiError } from "../error/errors.js"
 
 const symbols = {
@@ -48,11 +49,11 @@ export function getNativePath(): string {
   
   // 1. Explicit override for bundled/portable deployments.
   const envPath = process.env.GHOSTTY_NATIVE_PATH
-  if (envPath && Bun.file(envPath).exists()) return envPath
+  if (envPath && existsSync(envPath)) return envPath
   
   // 2. Source-relative path (works in dev/test from the package directory).
   const sourceRelative = fileURLToPath(new URL(`../../native/${filename}`, import.meta.url))
-  if (Bun.file(sourceRelative).exists()) return sourceRelative
+  if (existsSync(sourceRelative)) return sourceRelative
   
   // 2a. Bundled-virtual-path guard: if import.meta.url resolved to a virtual
   //     location (e.g. file:///src/ffi/bindings.ts), the source-relative path
@@ -60,7 +61,7 @@ export function getNativePath(): string {
   //     back to the well-known package-relative location.
   if (sourceRelative.startsWith("/native/") || sourceRelative.startsWith("/src/")) {
     const known = fileURLToPath(new URL(`../../native/${filename}`, new URL("file:///home/pauk/Projects/opencode/packages/ghostty-terminal/src/ffi/bindings.ts")))
-    if (Bun.file(known).exists()) return known
+    if (existsSync(known)) return known
   }
   
   // 3. Binary-relative fallback: from the running executable, walk up to the
@@ -68,14 +69,14 @@ export function getNativePath(): string {
   try {
     const execPath = process.execPath
     const binDir = dirname(execPath)
-    const parts = binDir.split(path.SEPARATOR)
+    const parts = binDir.split(sep)
     const distIdx = parts.lastIndexOf("dist")
     if (distIdx >= 0 && parts[distIdx + 1]?.includes("opencode") && parts[distIdx + 2] === "bin") {
       // The binary lives at <repoRoot>/packages/opencode/dist/<platform>/bin/opencode.
       // Walk up from bin/ to the repo root: bin -> platform -> dist -> opencode -> packages -> repoRoot
-      const repoRoot = path.join(binDir, "..", "..", "..", "..", "..")
-      const binaryRelative = path.join(repoRoot, "packages", "ghostty-terminal", "native", filename)
-      if (Bun.file(binaryRelative).exists()) return binaryRelative
+      const repoRoot = join(binDir, "..", "..", "..", "..", "..")
+      const binaryRelative = join(repoRoot, "packages", "ghostty-terminal", "native", filename)
+      if (existsSync(binaryRelative)) return binaryRelative
     }
   } catch {
     // ignore path-walk failures and fall through
