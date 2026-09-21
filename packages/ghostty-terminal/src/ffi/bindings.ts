@@ -45,7 +45,44 @@ export function isSupported(): boolean {
 export function getNativePath(): string {
   const filename = process.platform === "darwin" ? "libghostty-vt.dylib"
     : process.platform === "win32" ? "ghostty-vt.dll" : "libghostty-vt.so"
-  return fileURLToPath(new URL(`../../native/${filename}`, import.meta.url))
+  
+  // 1. Explicit override for bundled/portable deployments.
+  const envPath = process.env.GHOSTTY_NATIVE_PATH
+  if (envPath && Bun.file(envPath).exists()) return envPath
+  
+  // 2. Source-relative path (works in dev/test from the package directory).
+  const sourceRelative = fileURLToPath(new URL(`../../native/${filename}`, import.meta.url))
+  if (Bun.file(sourceRelative).exists()) return sourceRelative
+  
+  // 2a. Bundled-virtual-path guard: if import.meta.url resolved to a virtual
+  //     location (e.g. file:///src/ffi/bindings.ts), the source-relative path
+  //     will be nonsense like /native/libghostty-vt.so. Detect that and fall
+  //     back to the well-known package-relative location.
+  if (sourceRelative.startsWith("/native/") || sourceRelative.startsWith("/src/")) {
+    const known = fileURLToPath(new URL(`../../native/${filename}`, new URL("file:///home/pauk/Projects/opencode/packages/ghostty-terminal/src/ffi/bindings.ts")))
+    if (Bun.file(known).exists()) return known
+  }
+  
+  // 3. Binary-relative fallback: from the running executable, walk up to the
+  //    repo root then into packages/ghostty-terminal/native/.
+  try {
+    const execPath = process.execPath
+    const binDir = dirname(execPath)
+    const parts = binDir.split(path.SEPARATOR)
+    const distIdx = parts.lastIndexOf("dist")
+    if (distIdx >= 0 && parts[distIdx + 1]?.includes("opencode") && parts[distIdx + 2] === "bin") {
+      // The binary lives at <repoRoot>/packages/opencode/dist/<platform>/bin/opencode.
+      // Walk up from bin/ to the repo root: bin -> platform -> dist -> opencode -> packages -> repoRoot
+      const repoRoot = path.join(binDir, "..", "..", "..", "..", "..")
+      const binaryRelative = path.join(repoRoot, "packages", "ghostty-terminal", "native", filename)
+      if (Bun.file(binaryRelative).exists()) return binaryRelative
+    }
+  } catch {
+    // ignore path-walk failures and fall through
+  }
+  
+  // 4. Last resort: return the source-relative path and let dlopen fail with a clear error.
+  return sourceRelative
 }
 
 export function loadLibrary() {
