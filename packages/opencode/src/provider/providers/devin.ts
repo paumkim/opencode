@@ -33,6 +33,61 @@ function findDevinCli(): string | null {
   return null
 }
 
+// The Devin CLI can echo its system prompt back into the output when used
+// in a multi-turn conversation. Strip obvious system-preamble text so it
+// doesn't get fed back into the conversation and cause a feedback loop.
+const SYSTEM_PROMPT_MARKERS = [
+  "Ready to orchestrate",
+  "I'll analyze your requests",
+  "delegate to appropriate subagents",
+  "What would you like me to help you with",
+  "System One:",
+  "I'm keeping this response brief",
+  "Hello! I'm ready to help you with your software engineering tasks",
+  "I understand the orchestrator workflow",
+  "I'll analyze and decompose your requests",
+  "Always check memory for prior context",
+  "Save learnings after completing notable work",
+  "I understand the orchestrator role",
+  "3-agent workflow",
+  "User → Orchestrator → Subagent",
+  "Analyze, decompose, delegate",
+  "clean summaries",
+  "subagent isolation",
+  "effort=full, category=bug",
+  "effort=quick, category=greeting",
+  "effort=standard, category=task",
+]
+
+function filterSystemPrompt(text: string): string {
+  const lines = text.split("\n")
+  const filtered: string[] = []
+  let skipping = false
+
+  for (const line of lines) {
+    const trimmed = line.trim()
+    const isMarker = SYSTEM_PROMPT_MARKERS.some((marker) => trimmed.includes(marker))
+
+    if (isMarker) {
+      skipping = true
+      continue
+    }
+
+    if (skipping) {
+      // Stop skipping once we hit a normal-looking line
+      if (trimmed && !trimmed.startsWith("│") && !trimmed.startsWith("◆") && !trimmed.startsWith("●") && !trimmed.startsWith("▲")) {
+        skipping = false
+        filtered.push(line)
+      }
+      continue
+    }
+
+    filtered.push(line)
+  }
+
+  return filtered.join("\n").trim()
+}
+
 async function runDevinCli(cliPath: string, prompt: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const args = ["-p", prompt, "--respect-workspace-trust", "false"]
@@ -64,7 +119,8 @@ async function runDevinCli(cliPath: string, prompt: string): Promise<string> {
           ),
         )
       } else {
-        resolve(stdout.trim())
+        const filtered = filterSystemPrompt(stdout.trim())
+        resolve(filtered)
       }
     })
   })
