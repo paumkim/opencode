@@ -1765,10 +1765,18 @@ const layer = Layer.effect(
           const providerID = ProviderV2.ID.make(id)
           if (disabled.has(providerID)) continue
           const data = database[providerID]
-          if (!data) {
+          const hasCredentials = providers[providerID]
+          if (!data && !hasCredentials) {
             continue
           }
-          const result = yield* fn(data)
+          const result = yield* fn(data ?? {
+            id: providerID,
+            name: id,
+            source: "custom",
+            env: [],
+            options: {},
+            models: {},
+          } as Info)
           if (result && (result.autoload || providers[providerID])) {
             if (result.getModel) modelLoaders[providerID] = result.getModel
             if (result.vars) varsLoaders[providerID] = result.vars
