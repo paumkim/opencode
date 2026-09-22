@@ -60,7 +60,21 @@ class JudgeResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # Classification helpers
 # ---------------------------------------------------------------------------
-CATEGORIES = ["greeting", "question", "task", "bug", "feature"]
+CATEGORIES = [
+    "greeting",
+    "question",
+    "task",
+    "bug",
+    "feature",
+    "optimization",
+    "security",
+    "refactor",
+    "documentation",
+    "test",
+    "review",
+    "cleanup",
+    "investigation",
+]
 
 QUESTIONS: Dict[str, Dict[str, Any]] = {
     "category": {
@@ -68,10 +82,18 @@ QUESTIONS: Dict[str, Dict[str, Any]] = {
         "instructions": "What is the user doing?",
         "criteria": {
             "greeting": "Saying hello or hi",
-            "question": "Asking a question",
+            "question": "Asking a question or seeking information",
             "task": "Giving a command like run, list, show, create, delete",
-            "bug": "Something is broken or not working",
-            "feature": "Asking to add something new",
+            "bug": "Something is broken or not working as expected",
+            "feature": "Asking to add something new that does not exist yet",
+            "optimization": "Improving performance, speed, memory usage, or efficiency of existing code",
+            "security": "Addressing vulnerabilities, access control, encryption, or security hardening",
+            "refactor": "Restructuring or rewriting existing code without changing behavior",
+            "documentation": "Writing or updating docs, comments, READMEs, or guides",
+            "test": "Writing, updating, or running tests and test suites",
+            "review": "Reviewing, auditing, or evaluating code, design, or requirements",
+            "cleanup": "Removing dead code, unused imports, or tidying up formatting",
+            "investigation": "Researching root causes, debugging, or analyzing system behavior",
         },
     }
 }
@@ -80,8 +102,16 @@ REASON_MAP = {
     "greeting": "Simple greeting requires minimal effort",
     "question": "Question requires research and response",
     "task": "Task requires execution and completion",
-    "bug": "Bug requires investigation and fix",
+    "bug": "Bug requires root cause analysis and remediation",
     "feature": "Feature requires design and implementation",
+    "optimization": "Optimization requires profiling, bottleneck identification, and targeted improvements",
+    "security": "Security requires vulnerability assessment and hardening",
+    "refactor": "Refactor requires structural redesign while preserving existing behavior",
+    "documentation": "Documentation requires content authoring and clarity review",
+    "test": "Test requires case design, coverage analysis, and validation",
+    "review": "Review requires thorough evaluation and feedback",
+    "cleanup": "Cleanup requires identifying and removing obsolete artifacts",
+    "investigation": "Investigation requires evidence gathering and root cause analysis",
 }
 
 
@@ -117,8 +147,22 @@ def _map_effort(category: str, message: str, confidence: float) -> str:
         return "standard"
     elif category == "task":
         return "standard"
-    elif category in ("bug", "feature"):
+    elif category in (
+        "bug",
+        "feature",
+        "optimization",
+        "security",
+        "refactor",
+    ):
         return "full"
+    elif category in (
+        "documentation",
+        "test",
+        "review",
+        "cleanup",
+        "investigation",
+    ):
+        return "standard"
     return "standard"
 
 

@@ -1493,6 +1493,19 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
   const childShortcut = useCommandShortcut("session.child.first")
   const backgroundShortcut = useCommandShortcut("session.background")
 
+  const hasTaskTool = createMemo(() => props.parts.some((x) => x.type === "tool" && x.tool === "task"))
+  const hasRunningBackgroundTask = createMemo(
+    () =>
+      sync.data.capabilities.experimentalBackgroundSubagents &&
+      props.parts.some(
+        (x) =>
+          x.type === "tool" &&
+          x.tool === "task" &&
+          x.state.status === "running" &&
+          x.state.metadata?.background !== true,
+      ),
+  )
+
   return (
     <>
       <For each={props.parts}>
@@ -1510,7 +1523,7 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
           )
         }}
       </For>
-      <Show when={props.parts.some((x) => x.type === "tool" && x.tool === "task")}>
+      <Show when={hasTaskTool()}>
         <box
           paddingTop={1}
           paddingLeft={3}
@@ -1520,16 +1533,7 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
             {childShortcut()}
             <span style={{ fg: theme.textMuted }}> view subagents</span>
             <Show
-              when={
-                sync.data.capabilities.experimentalBackgroundSubagents &&
-                props.parts.some(
-                  (x) =>
-                    x.type === "tool" &&
-                    x.tool === "task" &&
-                    x.state.status === "running" &&
-                    x.state.metadata?.background !== true,
-                )
-              }
+              when={hasRunningBackgroundTask()}
             >
               <span style={{ fg: theme.textMuted }}> · </span>
               {backgroundShortcut()}

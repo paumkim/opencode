@@ -1,4 +1,4 @@
-Compact the current session's conversation history.
+Compact or prune the current session's conversation history. Use this tool when the user says "prune session", "compact session", "run a session compaction", or anything similar.
 
 Use this tool when the context is bloated, stale, or full of old information that
 is no longer needed. It summarizes the conversation and clears the older context

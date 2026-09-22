@@ -168,6 +168,79 @@ let customThemes: Record<string, ThemeJson> = {}
 let systemTheme: ThemeJson | undefined
 const listeners = new Set<(themes: Record<string, ThemeJson>) => void>()
 
+const _resolveThemeCache = new WeakMap<ThemeJson, Map<string, Theme>>()
+
+export function resolveTheme(theme: ThemeJson, mode: "dark" | "light") {
+  let modeCache = _resolveThemeCache.get(theme)
+  const cached = modeCache?.get(mode)
+  if (cached) return cached
+
+  const defs = theme.defs ?? {}
+  function resolveColor(c: ColorValue, chain: string[] = []): RGBA {
+    if (c instanceof RGBA) return c
+    if (typeof c === "string") {
+      if (c === "transparent" || c === "none") return RGBA.fromInts(0, 0, 0, 0)
+
+      if (c.startsWith("#")) return RGBA.fromHex(c)
+
+      if (chain.includes(c)) {
+        throw new Error(`Circular color reference: ${[...chain, c].join(" -> ")}`)
+      }
+
+      const next = defs[c] ?? theme.theme[c as ThemeColor]
+      if (next === undefined) {
+        throw new Error(`Color reference "${c}" not found in defs or theme`)
+      }
+      return resolveColor(next as ColorValue, [...chain, c])
+    }
+    if (typeof c === "number") {
+      return ansiToRgba(c)
+    }
+    return resolveColor(c[mode] as ColorValue, chain)
+  }
+
+  const resolved = Object.fromEntries(
+    Object.entries(theme.theme)
+      .filter(([key]) => key !== "selectedListItemText" && key !== "backgroundMenu" && key !== "thinkingOpacity")
+      .map(([key, value]) => {
+        return [key, resolveColor(value as ColorValue)]
+      }),
+  ) as Partial<Record<ThemeColor, RGBA>>
+
+  // Handle selectedListItemText separately since it's optional
+  const hasSelectedListItemText = theme.theme.selectedListItemText !== undefined
+  if (hasSelectedListItemText) {
+    resolved.selectedListItemText = resolveColor(theme.theme.selectedListItemText!)
+  } else {
+    // Backward compatibility: if selectedListItemText is not defined, use background color
+    // This preserves the current behavior for all existing themes
+    resolved.selectedListItemText = resolved.background
+  }
+
+  // Handle backgroundMenu - optional with fallback to backgroundElement
+  if (theme.theme.backgroundMenu !== undefined) {
+    resolved.backgroundMenu = resolveColor(theme.theme.backgroundMenu)
+  } else {
+    resolved.backgroundMenu = resolved.backgroundElement
+  }
+
+  // Handle thinkingOpacity - optional with default of 0.6
+  const thinkingOpacity = theme.theme.thinkingOpacity ?? 0.6
+
+  const result = {
+    ...resolved,
+    _hasSelectedListItemText: hasSelectedListItemText,
+    thinkingOpacity,
+  } as Theme
+
+  if (!modeCache) {
+    modeCache = new Map()
+    _resolveThemeCache.set(theme, modeCache)
+  }
+  modeCache.set(mode, result)
+  return result
+}
+
 function listThemes() {
   // Priority: defaults < plugin installs < custom files < generated system.
   const themes = {
@@ -236,66 +309,6 @@ export function upsertTheme(name: string, theme: unknown) {
   }
   syncThemes()
   return true
-}
-
-export function resolveTheme(theme: ThemeJson, mode: "dark" | "light") {
-  const defs = theme.defs ?? {}
-  function resolveColor(c: ColorValue, chain: string[] = []): RGBA {
-    if (c instanceof RGBA) return c
-    if (typeof c === "string") {
-      if (c === "transparent" || c === "none") return RGBA.fromInts(0, 0, 0, 0)
-
-      if (c.startsWith("#")) return RGBA.fromHex(c)
-
-      if (chain.includes(c)) {
-        throw new Error(`Circular color reference: ${[...chain, c].join(" -> ")}`)
-      }
-
-      const next = defs[c] ?? theme.theme[c as ThemeColor]
-      if (next === undefined) {
-        throw new Error(`Color reference "${c}" not found in defs or theme`)
-      }
-      return resolveColor(next as ColorValue, [...chain, c])
-    }
-    if (typeof c === "number") {
-      return ansiToRgba(c)
-    }
-    return resolveColor(c[mode] as ColorValue, chain)
-  }
-
-  const resolved = Object.fromEntries(
-    Object.entries(theme.theme)
-      .filter(([key]) => key !== "selectedListItemText" && key !== "backgroundMenu" && key !== "thinkingOpacity")
-      .map(([key, value]) => {
-        return [key, resolveColor(value as ColorValue)]
-      }),
-  ) as Partial<Record<ThemeColor, RGBA>>
-
-  // Handle selectedListItemText separately since it's optional
-  const hasSelectedListItemText = theme.theme.selectedListItemText !== undefined
-  if (hasSelectedListItemText) {
-    resolved.selectedListItemText = resolveColor(theme.theme.selectedListItemText!)
-  } else {
-    // Backward compatibility: if selectedListItemText is not defined, use background color
-    // This preserves the current behavior for all existing themes
-    resolved.selectedListItemText = resolved.background
-  }
-
-  // Handle backgroundMenu - optional with fallback to backgroundElement
-  if (theme.theme.backgroundMenu !== undefined) {
-    resolved.backgroundMenu = resolveColor(theme.theme.backgroundMenu)
-  } else {
-    resolved.backgroundMenu = resolved.backgroundElement
-  }
-
-  // Handle thinkingOpacity - optional with default of 0.6
-  const thinkingOpacity = theme.theme.thinkingOpacity ?? 0.6
-
-  return {
-    ...resolved,
-    _hasSelectedListItemText: hasSelectedListItemText,
-    thinkingOpacity,
-  } as Theme
 }
 
 function ansiToRgba(code: number): RGBA {

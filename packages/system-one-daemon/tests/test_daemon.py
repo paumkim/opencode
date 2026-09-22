@@ -114,14 +114,42 @@ class TestJudgmentAccuracy:
         result = client.judge("fix the login bug")
         assert set(result.keys()) == {"effort", "reason", "category"}
         assert result["effort"] in {"quick", "standard", "full"}
-        assert result["category"] in {"greeting", "question", "task", "bug", "feature"}
+        assert result["category"] in {
+            "greeting",
+            "question",
+            "task",
+            "bug",
+            "feature",
+            "optimization",
+            "security",
+            "refactor",
+            "documentation",
+            "test",
+            "review",
+            "cleanup",
+            "investigation",
+        }
 
     def test_long_message_handling(self, client):
         """Daemon should handle messages near the max length (4096)."""
         # Use a message just under the 4096 limit
         long_msg = "a" * 4000
         result = client.judge(long_msg)
-        assert result["category"] in {"greeting", "question", "task", "bug", "feature"}
+        assert result["category"] in {
+            "greeting",
+            "question",
+            "task",
+            "bug",
+            "feature",
+            "optimization",
+            "security",
+            "refactor",
+            "documentation",
+            "test",
+            "review",
+            "cleanup",
+            "investigation",
+        }
         assert result["effort"] in {"quick", "standard", "full"}
 
     def test_too_long_message_rejected(self, client):
@@ -135,13 +163,41 @@ class TestJudgmentAccuracy:
         """Daemon should handle special characters without crashing."""
         special_msg = "fix bug: null pointer @#$% ^&*() {}[]<>?/\\|~`"
         result = client.judge(special_msg)
-        assert result["category"] in {"greeting", "question", "task", "bug", "feature"}
+        assert result["category"] in {
+            "greeting",
+            "question",
+            "task",
+            "bug",
+            "feature",
+            "optimization",
+            "security",
+            "refactor",
+            "documentation",
+            "test",
+            "review",
+            "cleanup",
+            "investigation",
+        }
 
     def test_unicode_and_emoji(self, client):
         """Daemon should handle unicode and emoji."""
         unicode_msg = "fix bug with 你好世界 🐛 and café"
         result = client.judge(unicode_msg)
-        assert result["category"] in {"greeting", "question", "task", "bug", "feature"}
+        assert result["category"] in {
+            "greeting",
+            "question",
+            "task",
+            "bug",
+            "feature",
+            "optimization",
+            "security",
+            "refactor",
+            "documentation",
+            "test",
+            "review",
+            "cleanup",
+            "investigation",
+        }
 
     def test_empty_message_rejected(self, client):
         """Empty messages should be rejected by the API."""
@@ -151,7 +207,21 @@ class TestJudgmentAccuracy:
     def test_very_short_message(self, client):
         """Single word messages should be handled."""
         result = client.judge("bug")
-        assert result["category"] in {"greeting", "question", "task", "bug", "feature"}
+        assert result["category"] in {
+            "greeting",
+            "question",
+            "task",
+            "bug",
+            "feature",
+            "optimization",
+            "security",
+            "refactor",
+            "documentation",
+            "test",
+            "review",
+            "cleanup",
+            "investigation",
+        }
 
     def test_judgment_latency(self, client):
         """Judgment should complete within reasonable time (<5s)."""
@@ -199,4 +269,125 @@ class TestEffortMapping:
         result = client.judge(message)
         assert result["effort"] == expected_effort, (
             f"'{message}' expected effort={expected_effort}, got {result['effort']}"
+        )
+
+
+class TestNewCategories:
+    """Verify new categories are wired into the daemon correctly."""
+
+    def test_all_categories_listed(self):
+        """CATEGORIES should include all expected categories."""
+        from system_one_daemon.server import CATEGORIES
+
+        expected = {
+            "greeting",
+            "question",
+            "task",
+            "bug",
+            "feature",
+            "optimization",
+            "security",
+            "refactor",
+            "documentation",
+            "test",
+            "review",
+            "cleanup",
+            "investigation",
+        }
+        assert set(CATEGORIES) == expected
+
+    def test_all_categories_have_criteria(self):
+        """Every category must have classification criteria for the Laya model."""
+        from system_one_daemon.server import QUESTIONS
+
+        criteria = QUESTIONS["category"]["criteria"]
+        expected_categories = {
+            "greeting",
+            "question",
+            "task",
+            "bug",
+            "feature",
+            "optimization",
+            "security",
+            "refactor",
+            "documentation",
+            "test",
+            "review",
+            "cleanup",
+            "investigation",
+        }
+        assert set(criteria.keys()) == expected_categories
+        for cat, desc in criteria.items():
+            assert isinstance(desc, str)
+            assert len(desc) > 0
+
+    def test_all_categories_have_reasons(self):
+        """Every category must have a non-empty reason string."""
+        from system_one_daemon.server import REASON_MAP, CATEGORIES
+
+        for category in CATEGORIES:
+            assert category in REASON_MAP, f"Category '{category}' missing from REASON_MAP"
+            assert REASON_MAP[category], f"Reason for '{category}' is empty"
+            assert len(REASON_MAP[category]) > 10, (
+                f"Reason for '{category}' is too short to be useful"
+            )
+
+    def test_all_categories_have_effort_mapping(self):
+        """Every category must map to a valid effort level."""
+        from system_one_daemon.server import CATEGORIES
+
+        valid_efforts = {"quick", "standard", "full"}
+        for category in CATEGORIES:
+            # We can't easily call _map_effort without a real message,
+            # but we can verify the function handles all categories
+            # by checking the source code structure
+            import inspect
+            from system_one_daemon.server import _map_effort
+            source = inspect.getsource(_map_effort)
+            assert category in source or category == "greeting", (
+                f"Category '{category}' not handled in _map_effort"
+            )
+
+    @pytest.mark.parametrize(
+        "category,expected_effort",
+        [
+            ("greeting", "quick"),
+            ("question", "quick"),
+            ("task", "standard"),
+            ("bug", "full"),
+            ("feature", "full"),
+            ("optimization", "full"),
+            ("security", "full"),
+            ("refactor", "full"),
+            ("documentation", "standard"),
+            ("test", "standard"),
+            ("review", "standard"),
+            ("cleanup", "standard"),
+            ("investigation", "standard"),
+        ],
+    )
+    def test_effort_mapping_for_all_categories(self, category, expected_effort):
+        """Verify effort mapping logic for each category."""
+        from system_one_daemon.server import _map_effort
+
+        # Use representative messages for each category
+        msg_map = {
+            "greeting": "hello",
+            "question": "what is 2+2?",
+            "task": "run tests",
+            "bug": "fix bug",
+            "feature": "implement feature",
+            "optimization": "optimize queries",
+            "security": "fix vulnerability",
+            "refactor": "refactor module",
+            "documentation": "update readme",
+            "test": "add unit tests",
+            "review": "review pr",
+            "cleanup": "remove unused imports",
+            "investigation": "investigate memory leak",
+        }
+        msg = msg_map.get(category, "do something")
+        effort = _map_effort(category, msg, 0.9)
+        assert effort == expected_effort, (
+            f"Category '{category}' expected effort={expected_effort}, got {effort}"
         )

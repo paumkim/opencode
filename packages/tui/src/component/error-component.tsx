@@ -1,6 +1,6 @@
 import { TextAttributes, type ScrollBoxRenderable } from "@opentui/core"
 import { useKeyboard, useTerminalDimensions } from "@opentui/solid"
-import { createSignal, For, Show } from "solid-js"
+import { createSignal, For, Show, createMemo } from "solid-js"
 import { getScrollAcceleration } from "../util/scroll"
 import { useClipboard } from "../context/clipboard"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
@@ -12,6 +12,7 @@ export function ErrorComponent(props: { error: Error; reset: () => void; mode?: 
   const exit = useExit()
   const clipboard = useClipboard()
   const [copied, setCopied] = createSignal(false)
+  const scrollAcceleration = createMemo(() => getScrollAcceleration())
 
   // Safe fallback palette per mode (mirrors theme/assets/opencode.json) since the
   // theme context may be the thing that crashed.
@@ -178,7 +179,7 @@ export function ErrorComponent(props: { error: Error; reset: () => void; mode?: 
           <scrollbox
             ref={(element: ScrollBoxRenderable) => (scroll = element)}
             flexGrow={1}
-            scrollAcceleration={getScrollAcceleration()}
+            scrollAcceleration={scrollAcceleration()}
           >
             <text fg={colors.muted}>{stack}</text>
           </scrollbox>
