@@ -56,32 +56,42 @@ export function devin(dep: CustomDep): CustomLoader {
         return { DEVIN_API_KEY: apiKey }
       },
       async discoverModels(): Promise<Record<string, Model>> {
-        if (!apiKey) {
-          return {
-            "devin-1": {
-              id: ModelV2.ID.make("devin-1"),
-              providerID: ProviderV2.ID.make("devin"),
-              name: "Devin",
-              family: "devin",
-              api: { id: "devin-1", url: apiBase, npm: "@ai-sdk/openai" },
-              status: "active",
-              headers: {},
-              options: {},
-              cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
-              limit: { context: 0, output: 0 },
-              capabilities: {
-                temperature: false,
-                reasoning: false,
-                attachment: true,
-                toolcall: true,
-                input: { text: true, audio: false, image: true, video: false, pdf: true },
-                output: { text: true, audio: false, image: false, video: false, pdf: false },
-                interleaved: false,
-              },
-              release_date: "",
-              variants: {},
+        // Always expose at least a static fallback model so the provider
+        // appears in the model picker even when we can't reach the API.
+        const makeStatic = (): Record<string, Model> => ({
+          "devin-1": {
+            id: ModelV2.ID.make("devin-1"),
+            providerID: ProviderV2.ID.make("devin"),
+            name: "Devin",
+            family: "devin",
+            api: { id: "devin-1", url: apiBase, npm: "@ai-sdk/openai" },
+            status: "active",
+            headers: {},
+            options: {},
+            cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
+            limit: { context: 0, output: 0 },
+            capabilities: {
+              temperature: false,
+              reasoning: false,
+              attachment: true,
+              toolcall: true,
+              input: { text: true, audio: false, image: true, video: false, pdf: true },
+              output: { text: true, audio: false, image: false, video: false, pdf: false },
+              interleaved: false,
             },
-          }
+            release_date: "",
+            variants: {},
+          },
+        })
+
+        if (!apiKey) {
+          return makeStatic()
+        }
+
+        // Without an org ID we can't query the models endpoint, so fall back
+        // to the static model instead of hitting a guaranteed 404.
+        if (!orgId) {
+          return makeStatic()
         }
 
         try {
@@ -92,7 +102,7 @@ export function devin(dep: CustomDep): CustomLoader {
               "X-Client-Info": clientInfo,
             },
           })
-          if (!res.ok) return {}
+          if (!res.ok) return makeStatic()
           const data = (await res.json()) as { models?: Array<{ id: string; name?: string }> }
           const models: Record<string, Model> = {}
           for (const m of data.models ?? []) {
@@ -120,9 +130,9 @@ export function devin(dep: CustomDep): CustomLoader {
               variants: {},
             }
           }
-          return models
+          return Object.keys(models).length > 0 ? models : makeStatic()
         } catch {
-          return {}
+          return makeStatic()
         }
       },
     }
