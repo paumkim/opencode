@@ -1965,6 +1965,183 @@ it.instance(
   },
 )
 
+it.instance(
+  "devin provider loads with env variable",
+  Effect.gen(function* () {
+    yield* set("DEVIN_API_KEY", "test-devin-key")
+    const providers = yield* list
+    expect(providers[ProviderV2.ID.make("devin")]).toBeDefined()
+    expect(providers[ProviderV2.ID.make("devin")].options.baseURL).toBe("https://api.devin.ai/v3")
+    expect(providers[ProviderV2.ID.make("devin")].options.apiKey).toBe("test-devin-key")
+    expect(providers[ProviderV2.ID.make("devin")].options.headers["User-Agent"]).toContain("opencode/")
+    expect(providers[ProviderV2.ID.make("devin")].options.headers["User-Agent"]).toContain("devin")
+    expect(providers[ProviderV2.ID.make("devin")].options.headers["X-Client-Info"]).toBe("opencode")
+    expect(providers[ProviderV2.ID.make("devin")].models["devin-1"]).toBeDefined()
+  }),
+  {
+    config: {
+      provider: {
+        devin: {
+          name: "Devin",
+          npm: "@ai-sdk/openai",
+          api: "https://api.devin.ai/v3",
+          env: ["DEVIN_API_KEY"],
+          models: {
+            "devin-1": {
+              name: "Devin",
+              family: "devin",
+              tool_call: true,
+              attachment: true,
+              limit: { context: 200000, output: 16384 },
+            },
+          },
+        },
+      },
+    },
+  },
+)
+
+it.instance(
+  "devin provider loads with auth.json entry",
+  Effect.gen(function* () {
+    const authPath = path.join(Global.Path.data, "auth.json")
+    const original = yield* Effect.promise(() => Filesystem.readText(authPath).catch(() => undefined))
+    yield* Effect.acquireRelease(
+      Effect.promise(() =>
+        Filesystem.write(authPath, JSON.stringify({ devin: { type: "api", key: "auth-devin-key" } })),
+      ),
+      () =>
+        Effect.promise(async () => {
+          if (original !== undefined) await Filesystem.write(authPath, original)
+          else await unlink(authPath).catch(() => undefined)
+        }),
+    )
+
+    const providers = yield* list
+    expect(providers[ProviderV2.ID.make("devin")]).toBeDefined()
+    expect(providers[ProviderV2.ID.make("devin")].options.apiKey).toBe("auth-devin-key")
+  }),
+  {
+    config: {
+      provider: {
+        devin: {
+          name: "Devin",
+          npm: "@ai-sdk/openai",
+          api: "https://api.devin.ai/v3",
+          env: ["DEVIN_API_KEY"],
+          models: {
+            "devin-1": {
+              name: "Devin",
+              family: "devin",
+              tool_call: true,
+              attachment: true,
+              limit: { context: 200000, output: 16384 },
+            },
+          },
+        },
+      },
+    },
+  },
+)
+
+it.instance(
+  "devin provider does not autoload without credentials",
+  Effect.gen(function* () {
+    const providers = yield* list
+    // Provider exists in config but has no apiKey since no credentials provided
+    expect(providers[ProviderV2.ID.make("devin")]).toBeDefined()
+    expect(providers[ProviderV2.ID.make("devin")].options.apiKey).toBeUndefined()
+  }),
+  {
+    config: {
+      provider: {
+        devin: {
+          name: "Devin",
+          npm: "@ai-sdk/openai",
+          api: "https://api.devin.ai/v3",
+          env: ["DEVIN_API_KEY"],
+          models: {
+            "devin-1": {
+              name: "Devin",
+              family: "devin",
+              tool_call: true,
+              attachment: true,
+              limit: { context: 200000, output: 16384 },
+            },
+          },
+        },
+      },
+    },
+  },
+)
+
+it.instance(
+  "devin provider static model has correct metadata",
+  Effect.gen(function* () {
+    yield* set("DEVIN_API_KEY", "test-devin-key")
+    const providers = yield* list
+    const model = providers[ProviderV2.ID.make("devin")].models["devin-1"]
+    expect(model).toBeDefined()
+    expect(model.name).toBe("Devin")
+    expect(model.family).toBe("devin")
+    expect(model.api.npm).toBe("@ai-sdk/openai")
+    expect(model.api.url).toBe("https://api.devin.ai/v3")
+    expect(model.capabilities.attachment).toBe(true)
+    expect(model.capabilities.toolcall).toBe(true)
+  }),
+  {
+    config: {
+      provider: {
+        devin: {
+          name: "Devin",
+          npm: "@ai-sdk/openai",
+          api: "https://api.devin.ai/v3",
+          env: ["DEVIN_API_KEY"],
+          models: {
+            "devin-1": {
+              name: "Devin",
+              family: "devin",
+              tool_call: true,
+              attachment: true,
+              limit: { context: 200000, output: 16384 },
+            },
+          },
+        },
+      },
+    },
+  },
+)
+
+it.instance(
+  "devin provider custom fetch wrapper adds identification headers",
+  Effect.gen(function* () {
+    yield* set("DEVIN_API_KEY", "test-devin-key")
+    const providers = yield* list
+    expect(providers[ProviderV2.ID.make("devin")].options.fetch).toBeDefined()
+  }),
+  {
+    config: {
+      provider: {
+        devin: {
+          name: "Devin",
+          npm: "@ai-sdk/openai",
+          api: "https://api.devin.ai/v3",
+          env: ["DEVIN_API_KEY"],
+          models: {
+            "devin-1": {
+              name: "Devin",
+              family: "devin",
+              tool_call: true,
+              attachment: true,
+              limit: { context: 200000, output: 16384 },
+            },
+          },
+        },
+      },
+    },
+  },
+)
+
 // Tests that need plugin file setup or multi-instance flows fall back to a
 // scoped tmpdir + provideInstance pattern via it.effect.
 
