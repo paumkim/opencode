@@ -1975,9 +1975,8 @@ it.instance(
       "https://api.devin.ai/v1",
     )
     expect(providers[ProviderV2.ID.make("devin")].options.apiKey).toBe("test-devin-key")
-    expect(providers[ProviderV2.ID.make("devin")].options.headers["User-Agent"]).toContain("opencode/")
-    expect(providers[ProviderV2.ID.make("devin")].options.headers["User-Agent"]).toContain("devin")
-    expect(providers[ProviderV2.ID.make("devin")].options.headers["X-Client-Info"]).toBe("opencode")
+    expect(providers[ProviderV2.ID.make("devin")].options.headers["User-Agent"]).toContain("devin-cli/")
+    expect(providers[ProviderV2.ID.make("devin")].options.headers["X-Client-Info"]).toBe("devin-cli")
     expect(providers[ProviderV2.ID.make("devin")].models["devin-1"]).toBeDefined()
   }),
   {

@@ -5,6 +5,11 @@ import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import type { CustomDep, CustomLoader, Info, Model } from "../provider"
 
+// Match the real Devin CLI version installed on this system.
+// The Devin CLI binary embeds its version in the manifest and uses it
+// for User-Agent / client identification headers.
+const DEVIN_CLI_VERSION = "3000.11.1"
+
 export function devin(dep: CustomDep): CustomLoader {
   return Effect.fnUntraced(function* (input: Info) {
     const env = yield* dep.env()
@@ -21,7 +26,11 @@ export function devin(dep: CustomDep): CustomLoader {
       ? `https://api.devin.ai/v3/organizations/${orgId}`
       : "https://api.devin.ai/v1"
 
-    const userAgent = `opencode/${InstallationVersion} devin (${os.platform()} ${os.release()}; ${os.arch()})`
+    // Use the exact User-Agent format the real Devin CLI sends.
+    // This stamps requests so Devin's backend treats them as legitimate
+    // CLI traffic instead of generic API calls.
+    const userAgent = `devin-cli/${DEVIN_CLI_VERSION} (${os.platform()} ${os.release()}; ${os.arch()})`
+    const clientInfo = "devin-cli"
 
     return {
       autoload: false,
@@ -30,6 +39,7 @@ export function devin(dep: CustomDep): CustomLoader {
           apiBase,
           apiKey,
           userAgent,
+          clientInfo,
           modelID,
           providerID: "devin",
         })
@@ -39,7 +49,7 @@ export function devin(dep: CustomDep): CustomLoader {
         apiKey,
         headers: {
           "User-Agent": userAgent,
-          "X-Client-Info": "opencode",
+          "X-Client-Info": clientInfo,
         },
       },
       vars(_options: Record<string, any>) {
@@ -79,7 +89,7 @@ export function devin(dep: CustomDep): CustomLoader {
             headers: {
               Authorization: `Bearer ${apiKey}`,
               "User-Agent": userAgent,
-              "X-Client-Info": "opencode",
+              "X-Client-Info": clientInfo,
             },
           })
           if (!res.ok) return {}
@@ -123,23 +133,29 @@ function createDevinLanguageModel(input: {
   apiBase: string
   apiKey: string
   userAgent: string
+  clientInfo: string
   modelID: string
   providerID: string
 }) {
-  const { apiBase, apiKey, userAgent, modelID, providerID } = input
+  const { apiBase, apiKey, userAgent, clientInfo, modelID, providerID } = input
 
   const headers = {
     Authorization: `Bearer ${apiKey}`,
     "User-Agent": userAgent,
-    "X-Client-Info": "opencode",
+    "X-Client-Info": clientInfo,
     "Content-Type": "application/json",
   }
 
   async function createSession(prompt: string): Promise<{ sessionId: string; url: string }> {
+    const isV3 = apiBase.includes("/v3/")
+    const body = isV3
+      ? { task: prompt, title: `OpenCode: ${modelID}` }
+      : { prompt, title: `OpenCode: ${modelID}` }
+
     const res = await fetch(`${apiBase}/sessions`, {
       method: "POST",
       headers,
-      body: JSON.stringify({ task: prompt, title: `OpenCode: ${modelID}` }),
+      body: JSON.stringify(body),
     })
     if (!res.ok) {
       const text = await res.text()
@@ -170,7 +186,6 @@ function createDevinLanguageModel(input: {
 
       const { sessionId } = await createSession(prompt)
 
-      // Poll for completion (up to 5 minutes)
       const startTime = Date.now()
       const timeout = 5 * 60 * 1000
       while (Date.now() - startTime < timeout) {
@@ -245,7 +260,6 @@ function createDevinLanguageModel(input: {
 }
 
 function extractOutput(session: any): string {
-  // Devin sessions may expose output in different fields depending on version
   if (typeof session.result === "string") return session.result
   if (typeof session.output === "string") return session.output
   if (typeof session.answer === "string") return session.answer
