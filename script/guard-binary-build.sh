@@ -27,6 +27,14 @@ for f in \
 done
 grep -q "invoicePaymentError" packages/console/core/src/billing.ts || fail "billing hardening missing (invoicePaymentError)"
 grep -q "readPackageVersion" packages/core/src/installation/version.ts || fail "version fallback missing (readPackageVersion)"
+grep -q "PINNED_VERSION" packages/core/src/installation/version.ts || fail "version pin missing (PINNED 1.18.32)"
+[[ -f packages/tui/src/util/version-stamp.ts ]] || fail "version stamp missing (version-stamp.ts reverted?)"
+grep -q "formatVersionStamp" packages/tui/src/util/version-stamp.ts || fail "version stamp logic missing (formatVersionStamp)"
+grep -q "formatVersionStamp" packages/tui/src/plugin/adapters.tsx || fail "provider-aware app.version missing (adapters.tsx reverted?)"
+[[ -f packages/tui/src/util/provider-versions.ts ]] || fail "provider versions missing (provider-versions.ts reverted?)"
+grep -q "ensureProviderVersionsFresh" packages/tui/src/util/provider-versions.ts || fail "daily refresh missing (ensureProviderVersionsFresh)"
+grep -q "ensureProviderVersionsFresh" packages/tui/src/app.tsx || fail "boot refresh hook missing (app.tsx reverted?)"
+grep -q "isKiloProvider" packages/tui/src/util/version-stamp.ts || fail "kilo support missing (isKiloProvider)"
 
 # 4. Tracked tree must be clean (untracked ghostty/.gitmodules ignored on purpose)
 if [ -n "$(git status --porcelain --untracked-files=no)" ]; then

@@ -9,13 +9,22 @@ declare global {
   const OPENCODE_CHANNEL: string
 }
 
+export const PINNED_VERSION = "1.18.32"
+
 function readPackageVersion(): string {
-  try {
-    const pkg = JSON.parse(readFileSync(join(__dirname, "..", "..", "package.json"), "utf8"))
-    return pkg.version
-  } catch {
-    return "1.17.0"
+  // Pinned release — single source survives rebuilds without OPENCODE_VERSION.
+  // Tries packages/opencode/package.json (1.18.32), never stale "local".
+  const candidates = [
+    join(__dirname, "..", "..", "..", "opencode", "package.json"),
+    join(__dirname, "..", "..", "package.json"),
+  ]
+  for (const p of candidates) {
+    try {
+      const pkg = JSON.parse(readFileSync(p, "utf8"))
+      if (typeof pkg.version === "string" && !pkg.version.startsWith("0.0.0-")) return pkg.version
+    } catch {}
   }
+  return PINNED_VERSION
 }
 
 export const InstallationVersion = typeof OPENCODE_VERSION === "string" ? OPENCODE_VERSION : readPackageVersion()

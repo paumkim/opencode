@@ -63,6 +63,7 @@ import { ToastProvider, useToast } from "./ui/toast"
 import { TerminalTitle } from "./terminal-title"
 import { KVProvider, useKV } from "./context/kv"
 import * as Model from "./util/model"
+import { ensureProviderVersionsFresh } from "./util/provider-versions"
 import { ArgsProvider, useArgs, type Args } from "./context/args"
 import open from "open"
 import { PromptRefProvider, usePromptRef } from "./context/prompt"
@@ -434,6 +435,8 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
   const api = createTuiApi(
     createTuiApiAdapters({
       version: InstallationVersion,
+      local,
+      consoleManagedProviders: sync.data.console_state.consoleManagedProviders,
       tuiConfig,
       dialog,
       keymap,
@@ -526,6 +529,9 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
 
   const args = useArgs()
   onMount(() => {
+    // First boot (and at most once/day per family): refresh live versions in
+    // background. First paint already used KV cache -> pinned, so never blocks.
+    void ensureProviderVersionsFresh({ kv }).catch(() => undefined)
     batch(() => {
       if (args.agent) local.agent.set(args.agent)
       if (args.model) {

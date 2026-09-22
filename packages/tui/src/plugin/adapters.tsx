@@ -17,11 +17,15 @@ import type { useToast } from "../ui/toast"
 import * as Keymap from "../keymap"
 import { createCommandShim } from "./command-shim"
 import type { PluginRoutes } from "./api"
+import { formatVersionStamp } from "../util/version-stamp"
+import { familyForProvider, resolveCachedVersionSync } from "../util/provider-versions"
 export type { RouteMap } from "./api"
 export { createPluginRoutes, createTuiApi } from "./api"
 
 type Input = {
   version: string
+  local?: { model?: { current?: () => { providerID: string; modelID: string } | undefined } }
+  consoleManagedProviders?: readonly string[] | ReadonlySet<string>
   tuiConfig: TuiConfig.Resolved
   dialog: ReturnType<typeof useDialog>
   keymap: ReturnType<typeof useOpencodeKeymap>
@@ -162,17 +166,37 @@ function stateApi(sync: ReturnType<typeof useSync>): TuiPluginApi["state"] {
   }
 }
 
-function appApi(version: string): TuiPluginApi["app"] {
+function appApi(
+  version: string,
+  opts?: Pick<Input, "local" | "sync" | "consoleManagedProviders" | "kv">,
+): TuiPluginApi["app"] {
   return {
     get version() {
-      return version
+      // Instant sync read (KV cache -> pinned). No fetch here; background
+      // refresh runs once per boot/day in app.tsx. Provider check before sending.
+      try {
+        const providerID = opts?.local?.model?.current?.()?.providerID
+        const managed = opts?.sync?.data.console_state.consoleManagedProviders ?? opts?.consoleManagedProviders
+        const family = familyForProvider(providerID, managed)
+        const kvGet = (k: string, f?: unknown) => {
+          try {
+            return opts?.kv?.get(k, f)
+          } catch {
+            return f
+          }
+        }
+        const resolved = resolveCachedVersionSync(kvGet, family, version)
+        return formatVersionStamp({ version: resolved, providerID, consoleManagedProviders: managed })
+      } catch {
+        return formatVersionStamp({ version })
+      }
     },
   }
 }
 
 export function createTuiApiAdapters(input: Input): Omit<TuiPluginApi, "lifecycle"> {
   return {
-    app: appApi(input.version),
+    app: appApi(input.version, input),
     attention: input.attention,
     // Keep deprecated `api.command` working for v1 plugins; remove in v2.
     command: createCommandShim(input.keymap, input.dialog, input.tuiConfig.keybinds),
