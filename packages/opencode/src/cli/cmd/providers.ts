@@ -415,9 +415,11 @@ export const ProvidersLoginCommand = effectCmd({
       const byName = options.find((x) => x.label.toLowerCase() === input.toLowerCase())
       const match = byID ?? byName
       if (!match) {
-        return yield* fail(`Unknown provider "${input}"`)
+        // Allow custom providers not in the catalog (e.g. devin)
+        provider = input.replace(/^@ai-sdk\//, "")
+      } else {
+        provider = match.value
       }
-      provider = match.value
     } else {
       provider = yield* promptValue(
         yield* Prompt.autocomplete({
@@ -450,6 +452,15 @@ export const ProvidersLoginCommand = effectCmd({
 
       yield* Prompt.log.warn(
         `This only stores a credential for ${provider} - you will need configure it in opencode.json, check the docs for examples.`,
+      )
+    }
+
+    if (provider === "devin") {
+      yield* Prompt.log.info(
+        "Devin authentication:\n" +
+          "  1. Get your API key from https://app.devin.ai/settings/api-keys\n" +
+          "  2. Or set DEVIN_API_KEY environment variable\n\n" +
+          "Optional: set DEVIN_ORG_ID for dynamic model discovery.",
       )
     }
 
