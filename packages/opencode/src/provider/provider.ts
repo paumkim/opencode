@@ -1567,7 +1567,19 @@ const layer = Layer.effect(
             return
           }
           const match = database[providerID]
-          if (!match) return
+          if (!match) {
+            // Create minimal entry for non-catalog providers (e.g. custom providers with auth)
+            providers[providerID] = {
+              id: providerID,
+              name: providerID as unknown as string,
+              source: provider.source ?? "api",
+              env: [],
+              options: provider.options ?? {},
+              models: {},
+              ...provider,
+            } as Info
+            return
+          }
           // @ts-expect-error
           providers[providerID] = mergeDeep(match, provider)
         }
