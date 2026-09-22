@@ -2142,6 +2142,170 @@ it.instance(
   },
 )
 
+it.instance(
+  "codeium provider loads with env variable",
+  Effect.gen(function* () {
+    yield* set("WINDSURF_API_KEY", "test-codeium-key")
+    const providers = yield* list
+    expect(providers[ProviderV2.ID.make("codeium")]).toBeDefined()
+    expect(providers[ProviderV2.ID.make("codeium")].options.baseURL).toBe("https://server.codeium.com")
+    expect(providers[ProviderV2.ID.make("codeium")].options.apiKey).toBe("test-codeium-key")
+    expect(providers[ProviderV2.ID.make("codeium")].options.headers["User-Agent"]).toContain("opencode/")
+    expect(providers[ProviderV2.ID.make("codeium")].options.headers["User-Agent"]).toContain("codeium")
+    expect(providers[ProviderV2.ID.make("codeium")].options.headers["X-Client-Info"]).toBe("opencode")
+    expect(providers[ProviderV2.ID.make("codeium")].models["claude-opus-5"]).toBeDefined()
+  }),
+  {
+    config: {
+      provider: {
+        codeium: {
+          name: "Codeium",
+          npm: "@ai-sdk/openai",
+          api: "https://server.codeium.com",
+          env: ["WINDSURF_API_KEY"],
+          models: {
+            "claude-opus-5": {
+              name: "Claude Opus 5",
+              family: "codeium",
+              tool_call: true,
+              attachment: true,
+              limit: { context: 128000, output: 16384 },
+            },
+          },
+        },
+      },
+    },
+  },
+)
+
+it.instance(
+  "codeium provider autoloads with credentials",
+  Effect.gen(function* () {
+    yield* set("WINDSURF_API_KEY", "test-codeium-key")
+    const providers = yield* list
+    expect(providers[ProviderV2.ID.make("codeium")]).toBeDefined()
+    expect(providers[ProviderV2.ID.make("codeium")].options.apiKey).toBe("test-codeium-key")
+  }),
+  {
+    config: {
+      provider: {
+        codeium: {
+          name: "Codeium",
+          npm: "@ai-sdk/openai",
+          api: "https://server.codeium.com",
+          env: ["WINDSURF_API_KEY"],
+          models: {
+            "claude-opus-5": {
+              name: "Claude Opus 5",
+              family: "codeium",
+              tool_call: true,
+              attachment: true,
+              limit: { context: 128000, output: 16384 },
+            },
+          },
+        },
+      },
+    },
+  },
+)
+
+it.instance(
+  "codeium provider does not autoload without credentials",
+  Effect.gen(function* () {
+    const providers = yield* list
+    // Provider exists in config but has no apiKey since no credentials provided
+    expect(providers[ProviderV2.ID.make("codeium")]).toBeDefined()
+    expect(providers[ProviderV2.ID.make("codeium")].options.apiKey).toBeUndefined()
+  }),
+  {
+    config: {
+      provider: {
+        codeium: {
+          name: "Codeium",
+          npm: "@ai-sdk/openai",
+          api: "https://server.codeium.com",
+          env: ["WINDSURF_API_KEY"],
+          models: {
+            "claude-opus-5": {
+              name: "Claude Opus 5",
+              family: "codeium",
+              tool_call: true,
+              attachment: true,
+              limit: { context: 128000, output: 16384 },
+            },
+          },
+        },
+      },
+    },
+  },
+)
+
+it.instance(
+  "codeium provider discovers multiple models",
+  Effect.gen(function* () {
+    yield* set("WINDSURF_API_KEY", "test-codeium-key")
+    const providers = yield* list
+    const models = providers[ProviderV2.ID.make("codeium")].models
+    expect(models["claude-opus-5"]).toBeDefined()
+    expect(models["claude-opus-5-low"]).toBeDefined()
+    expect(models["gpt-5-4"]).toBeDefined()
+    expect(models["gemini-3-flash"]).toBeDefined()
+    expect(models["deepseek-v4-pro"]).toBeDefined()
+    expect(models["swe-1-6"]).toBeDefined()
+  }),
+  {
+    config: {
+      provider: {
+        codeium: {
+          name: "Codeium",
+          npm: "@ai-sdk/openai",
+          api: "https://server.codeium.com",
+          env: ["WINDSURF_API_KEY"],
+          models: {
+            "claude-opus-5": {
+              name: "Claude Opus 5",
+              family: "codeium",
+              tool_call: true,
+              attachment: true,
+              limit: { context: 128000, output: 16384 },
+            },
+          },
+        },
+      },
+    },
+  },
+)
+
+it.instance(
+  "codeium provider custom fetch wrapper adds identification headers",
+  Effect.gen(function* () {
+    yield* set("WINDSURF_API_KEY", "test-codeium-key")
+    const providers = yield* list
+    expect(providers[ProviderV2.ID.make("codeium")].options.fetch).toBeDefined()
+  }),
+  {
+    config: {
+      provider: {
+        codeium: {
+          name: "Codeium",
+          npm: "@ai-sdk/openai",
+          api: "https://server.codeium.com",
+          env: ["WINDSURF_API_KEY"],
+          models: {
+            "claude-opus-5": {
+              name: "Claude Opus 5",
+              family: "codeium",
+              tool_call: true,
+              attachment: true,
+              limit: { context: 128000, output: 16384 },
+            },
+          },
+        },
+      },
+    },
+  },
+)
+
 // Tests that need plugin file setup or multi-instance flows fall back to a
 // scoped tmpdir + provideInstance pattern via it.effect.
 

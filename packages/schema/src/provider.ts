@@ -20,6 +20,7 @@ export const ID = Schema.String.pipe(
     mistral: schema.make("mistral"),
     gitlab: schema.make("gitlab"),
     devin: schema.make("devin"),
+    codeium: schema.make("codeium"),
   })),
 )
 export type ID = typeof ID.Type

@@ -464,6 +464,15 @@ export const ProvidersLoginCommand = effectCmd({
       )
     }
 
+    if (provider === "codeium") {
+      yield* Prompt.log.info(
+        "Codeium authentication:\n" +
+          "  1. Set WINDSURF_API_KEY environment variable\n" +
+          "  2. Or paste your Windsurf/Devin session token here\n\n" +
+          "This uses the same backend as the Devin CLI (server.codeium.com).",
+      )
+    }
+
     if (provider === "amazon-bedrock") {
       yield* Prompt.log.info(
         "Amazon Bedrock authentication priority:\n" +
