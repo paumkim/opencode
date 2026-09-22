@@ -2158,9 +2158,8 @@ it.instance(
     expect(providers[ProviderV2.ID.make("codeium")]).toBeDefined()
     expect(providers[ProviderV2.ID.make("codeium")].options.baseURL).toBe("https://server.codeium.com")
     expect(providers[ProviderV2.ID.make("codeium")].options.apiKey).toBe("test-codeium-key")
-    expect(providers[ProviderV2.ID.make("codeium")].options.headers["User-Agent"]).toContain("opencode/")
-    expect(providers[ProviderV2.ID.make("codeium")].options.headers["User-Agent"]).toContain("codeium")
-    expect(providers[ProviderV2.ID.make("codeium")].options.headers["X-Client-Info"]).toBe("opencode")
+    expect(providers[ProviderV2.ID.make("codeium")].options.headers["User-Agent"]).toContain("devin-cli/")
+    expect(providers[ProviderV2.ID.make("codeium")].options.headers["X-Client-Info"]).toBe("devin-cli")
     expect(providers[ProviderV2.ID.make("codeium")].models["claude-opus-5"]).toBeDefined()
   }),
   {
@@ -2285,29 +2284,33 @@ it.instance(
 )
 
 it.instance(
-  "codeium provider custom fetch wrapper adds identification headers",
+  "devin and codeium share the same devin-cli user agent stamp",
   Effect.gen(function* () {
+    yield* set("DEVIN_API_KEY", "test-devin-key")
     yield* set("WINDSURF_API_KEY", "test-codeium-key")
     const providers = yield* list
-    expect(providers[ProviderV2.ID.make("codeium")].options.fetch).toBeDefined()
+    const devinUA = providers[ProviderV2.ID.make("devin")].options.headers["User-Agent"]
+    const codeiumUA = providers[ProviderV2.ID.make("codeium")].options.headers["User-Agent"]
+    expect(devinUA).toContain("devin-cli/")
+    expect(codeiumUA).toContain("devin-cli/")
+    expect(devinUA).toBe(codeiumUA)
   }),
   {
     config: {
       provider: {
+        devin: {
+          name: "Devin",
+          npm: "@ai-sdk/openai",
+          api: "https://api.devin.ai/v1",
+          env: ["DEVIN_API_KEY"],
+          models: { "devin-1": { name: "Devin", family: "devin", tool_call: true, attachment: true, limit: { context: 200000, output: 16384 } } },
+        },
         codeium: {
           name: "Codeium",
           npm: "@ai-sdk/openai",
           api: "https://server.codeium.com",
           env: ["WINDSURF_API_KEY"],
-          models: {
-            "claude-opus-5": {
-              name: "Claude Opus 5",
-              family: "codeium",
-              tool_call: true,
-              attachment: true,
-              limit: { context: 128000, output: 16384 },
-            },
-          },
+          models: { "claude-opus-5": { name: "Claude Opus 5", family: "codeium", tool_call: true, attachment: true, limit: { context: 128000, output: 16384 } } },
         },
       },
     },

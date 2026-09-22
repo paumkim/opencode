@@ -5,6 +5,10 @@ import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import type { CustomDep, CustomLoader, Info, Model } from "../provider"
 
+// The Devin CLI version installed on this system. Codeium's backend expects
+// the same client stamp because the Devin CLI uses Codeium's gateway.
+const DEVIN_CLI_VERSION = "3000.11.1"
+
 // Known models available through Codeium's gateway (from Devin CLI `models list`)
 const KNOWN_CODECIUM_MODELS: readonly string[] = [
   "claude-opus-5",
@@ -71,7 +75,9 @@ export function codeium(dep: CustomDep): CustomLoader {
       return { autoload: false }
     }
 
-    const userAgent = `opencode/${InstallationVersion} codeium (${os.platform()} ${os.release()}; ${os.arch()})`
+    // Stamp requests as the real Devin CLI so Codeium's gateway accepts them.
+    const userAgent = `devin-cli/${DEVIN_CLI_VERSION} (${os.platform()} ${os.release()}; ${os.arch()})`
+    const clientInfo = "devin-cli"
 
     return {
       autoload: true,
@@ -80,12 +86,12 @@ export function codeium(dep: CustomDep): CustomLoader {
         apiKey,
         headers: {
           "User-Agent": userAgent,
-          "X-Client-Info": "opencode",
+          "X-Client-Info": clientInfo,
         },
         fetch: async (input: RequestInfo | URL, init?: RequestInit) => {
           const headers = new Headers(init?.headers)
           if (!headers.has("User-Agent")) headers.set("User-Agent", userAgent)
-          if (!headers.has("X-Client-Info")) headers.set("X-Client-Info", "opencode")
+          if (!headers.has("X-Client-Info")) headers.set("X-Client-Info", clientInfo)
           return fetch(input, { ...init, headers })
         },
       },
