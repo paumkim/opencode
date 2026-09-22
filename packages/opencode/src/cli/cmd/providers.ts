@@ -463,26 +463,24 @@ export const ProvidersLoginCommand = effectCmd({
           "Optional: set DEVIN_ORG_ID for dynamic model discovery.",
       )
 
-      // If the user already logged in via the Devin CLI, reuse that
-      // session token instead of forcing them to paste it again.
-      const home = os.homedir()
-      const credPath = `${home}/.local/share/devin/credentials.toml`
-      try {
-        const text = yield* Effect.promise(() => Bun.file(credPath).text())
-        const apiKeyMatch = text.match(/windsurf_api_key\s*=\s*"([^"]+)"/)
-        if (apiKeyMatch?.[1]) {
-          let apiKey = apiKeyMatch[1]
-          if (apiKey.startsWith("devin-session-token$")) {
-            apiKey = apiKey.slice("devin-session-token$".length)
-          }
-          yield* Prompt.log.info("Found existing Devin CLI session — reusing credentials.")
-          yield* Effect.orDie(authSvc.set(provider, { type: "api", key: apiKey }))
-          yield* Prompt.outro("Done")
-          return
-        }
-      } catch {
-        // No Devin CLI credentials found — fall through to manual entry.
+      // Check whether the user already has a Devin API token configured
+      // in OpenCode auth, or as an environment variable.
+      const existing = yield* authSvc.get(provider)
+      const envKey = process.env["DEVIN_API_KEY"]
+      if (existing || envKey) {
+        yield* Prompt.log.info("Devin credentials already configured.")
+        yield* Prompt.outro("Done")
+        return
       }
+
+      // The Devin CLI stores a Codeium/Windsurf session token in
+      // ~/.local/share/devin/credentials.toml. That token is for the
+      // Codeium gateway, NOT for api.devin.ai, so we cannot import it
+      // here. The user must paste a real Devin API key (apk_* or cog_*).
+      yield* Prompt.log.warn(
+        "The Devin CLI's stored session token cannot be reused for api.devin.ai.\n" +
+        "Please paste a Devin API key (apk_* or cog_*) from https://app.devin.ai/settings/api-keys",
+      )
     }
 
     if (provider === "codeium") {

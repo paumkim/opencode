@@ -11,43 +11,12 @@ import { readFile } from "node:fs/promises"
 // for User-Agent / client identification headers.
 const DEVIN_CLI_VERSION = "3000.11.1"
 
-// Read the Devin CLI's stored credentials as a fallback when the user
-// has not explicitly configured OpenCode auth for the `devin` provider.
-// This lets OpenCode reuse the session the user already established
-// with `devin auth login`, instead of forcing a second login flow.
-async function readDevinCliCredentials(): Promise<{ apiKey?: string; apiUrl?: string }> {
-  const home = os.homedir()
-  const credPath = `${home}/.local/share/devin/credentials.toml`
-  try {
-    const text = await readFile(credPath, "utf-8")
-    const apiKeyMatch = text.match(/windsurf_api_key\s*=\s*"([^"]+)"/)
-    const apiUrlMatch = text.match(/devin_api_url\s*=\s*"([^"]+)"/)
-    let apiKey = apiKeyMatch?.[1]
-    if (apiKey?.startsWith("devin-session-token$")) {
-      apiKey = apiKey.slice("devin-session-token$".length)
-    }
-    return {
-      apiKey,
-      apiUrl: apiUrlMatch?.[1]?.replace(/\/+$/, "") || undefined,
-    }
-  } catch {
-    return {}
-  }
-}
-
 export function devin(dep: CustomDep): CustomLoader {
   return Effect.fnUntraced(function* (input: Info) {
     const env = yield* dep.env()
     const auth = yield* dep.auth(input.id)
-    let apiKey = auth?.type === "api" ? auth.key : env["DEVIN_API_KEY"]
+    const apiKey = auth?.type === "api" ? auth.key : env["DEVIN_API_KEY"]
     const orgId = auth?.type === "api" ? auth.metadata?.orgId : env["DEVIN_ORG_ID"]
-
-    // Fallback: reuse the Devin CLI's existing session token so the user
-    // does not have to log in twice.
-    if (!apiKey) {
-      const creds = yield* Effect.promise(() => readDevinCliCredentials())
-      apiKey = creds.apiKey
-    }
 
     if (!apiKey) {
       return { autoload: false }
@@ -55,15 +24,8 @@ export function devin(dep: CustomDep): CustomLoader {
 
     const isServiceKey = apiKey.startsWith("cog_")
     const configuredBase = env["DEVIN_API_URL"]?.replace(/\/+$/, "")
-    const cliBase = (yield* Effect.promise(() => readDevinCliCredentials())).apiUrl
-    const baseFromCli = cliBase
-      ? isServiceKey
-        ? `${cliBase}/v3/organizations/${orgId}`
-        : `${cliBase}/v1`
-      : undefined
     const apiBase =
       configuredBase ??
-      baseFromCli ??
       (orgId && isServiceKey
         ? `https://api.devin.ai/v3/organizations/${orgId}`
         : "https://api.devin.ai/v1")
