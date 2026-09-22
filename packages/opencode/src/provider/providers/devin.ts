@@ -1,15 +1,74 @@
 import { Effect } from "effect"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import os from "os"
+import { spawn } from "node:child_process"
+import { accessSync, constants } from "node:fs"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import type { CustomDep, CustomLoader, Info, Model } from "../provider"
-import { readFile } from "node:fs/promises"
 
 // Match the real Devin CLI version installed on this system.
 // The Devin CLI binary embeds its version in the manifest and uses it
 // for User-Agent / client identification headers.
 const DEVIN_CLI_VERSION = "3000.11.1"
+
+// Candidate paths for the Devin CLI binary. We prefer the `current` symlink
+// (managed by the Devin CLI updater) and fall back to the exact installed
+// version, then to a generic PATH lookup.
+const DEVIN_CLI_CANDIDATES = [
+  `${process.env.HOME}/.local/share/devin/cli/_versions/current/bin/devin`,
+  `${process.env.HOME}/.local/share/devin/cli/_versions/${DEVIN_CLI_VERSION}/bin/devin`,
+  "devin",
+]
+
+function findDevinCli(): string | null {
+  for (const candidate of DEVIN_CLI_CANDIDATES) {
+    try {
+      accessSync(candidate, constants.X_OK)
+      return candidate
+    } catch {
+      // try next candidate
+    }
+  }
+  return null
+}
+
+async function runDevinCli(cliPath: string, prompt: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const args = ["-p", prompt, "--respect-workspace-trust", "false"]
+    const proc = spawn(cliPath, args, {
+      cwd: os.tmpdir(),
+      stdio: ["ignore", "pipe", "pipe"],
+    })
+
+    let stdout = ""
+    let stderr = ""
+
+    proc.stdout.on("data", (data: Buffer) => {
+      stdout += data.toString()
+    })
+
+    proc.stderr.on("data", (data: Buffer) => {
+      stderr += data.toString()
+    })
+
+    proc.on("error", (err) => {
+      reject(new Error(`Failed to spawn Devin CLI (${cliPath}): ${err.message}`))
+    })
+
+    proc.on("close", (code) => {
+      if (code !== 0) {
+        reject(
+          new Error(
+            `Devin CLI exited with code ${code}: ${stderr.trim() || "unknown error"}`,
+          ),
+        )
+      } else {
+        resolve(stdout.trim())
+      }
+    })
+  })
+}
 
 export function devin(dep: CustomDep): CustomLoader {
   return Effect.fnUntraced(function* (input: Info) {
@@ -36,9 +95,23 @@ export function devin(dep: CustomDep): CustomLoader {
     const userAgent = `devin-cli/${DEVIN_CLI_VERSION} (${os.platform()} ${os.release()}; ${os.arch()})`
     const clientInfo = "devin-cli"
 
+    // Prefer the Devin CLI binary when available. The CLI uses the user's
+    // email-based session (stored in ~/.local/share/devin/) to access the
+    // free SWE model through Codeium's backend, bypassing the org quota
+    // restrictions of api.devin.ai.
+    const cliPath = findDevinCli()
+    const useCli = !!cliPath
+
     return {
       autoload: false,
       getModel(sdk: any, modelID: string) {
+        if (useCli) {
+          return createDevinCliLanguageModel({
+            cliPath: cliPath!,
+            modelID,
+            providerID: "devin",
+          })
+        }
         return createDevinLanguageModel({
           apiBase,
           apiKey,
@@ -210,7 +283,13 @@ function createDevinLanguageModel(input: {
           return {
             content: [{ type: "text" as const, text: output }],
             finishReason: "stop" as const,
-            usage: { promptTokens: 0, completionTokens: 0 },
+            usage: {
+              inputTokens: 0,
+              inputTokenDetails: { cacheRead: 0, cacheWrite: 0, noCache: 0 },
+              outputTokens: 0,
+              outputTokenDetails: { text: 0, reasoning: 0 },
+              totalTokens: 0,
+            },
             warnings: [],
           }
         }
@@ -241,7 +320,17 @@ function createDevinLanguageModel(input: {
               if (status === "completed" || status === "finished" || status === "success") {
                 const output = extractOutput(session)
                 controller.enqueue({ type: "text-delta" as const, id: sessionId, delta: output })
-                controller.enqueue({ type: "finish" as const, usage: { promptTokens: 0, completionTokens: 0 }, finishReason: "stop" as const })
+                controller.enqueue({
+                  type: "finish" as const,
+                  usage: {
+                    inputTokens: 0,
+                    inputTokenDetails: { cacheRead: 0, cacheWrite: 0, noCache: 0 },
+                    outputTokens: 0,
+                    outputTokenDetails: { text: 0, reasoning: 0 },
+                    totalTokens: 0,
+                  },
+                  finishReason: "stop" as const,
+                })
                 controller.close()
                 return
               }
@@ -283,4 +372,80 @@ function extractOutput(session: any): string {
   }
   if (typeof session.status === "string") return `Session status: ${session.status}`
   return JSON.stringify(session, null, 2)
+}
+
+function createDevinCliLanguageModel(opts: {
+  cliPath: string
+  modelID: string
+  providerID: string
+}): any {
+  const { cliPath, modelID, providerID } = opts
+
+  return {
+    specificationVersion: "v3" as const,
+    provider: providerID,
+    modelId: modelID,
+    supportedUrls: [],
+    async doGenerate(options: any) {
+      const prompt = options.prompt
+        .map((p: any) => (typeof p === "string" ? p : p.content ?? ""))
+        .join("\n")
+
+      const output = await runDevinCli(cliPath, prompt)
+
+      return {
+        content: [{ type: "text" as const, text: output }],
+        finishReason: "stop" as const,
+        usage: {
+          inputTokens: 0,
+          inputTokenDetails: { cacheRead: 0, cacheWrite: 0, noCache: 0 },
+          outputTokens: 0,
+          outputTokenDetails: { text: 0, reasoning: 0 },
+          totalTokens: 0,
+        },
+        warnings: [],
+      }
+    },
+    async doStream(options: any) {
+      const prompt = options.prompt
+        .map((p: any) => (typeof p === "string" ? p : p.content ?? ""))
+        .join("\n")
+
+      const stream = new ReadableStream({
+        async pull(controller: any) {
+          try {
+            const output = await runDevinCli(cliPath, prompt)
+            const textId = modelID
+            controller.enqueue({ type: "text-start" as const, id: textId })
+            controller.enqueue({
+              type: "text-delta" as const,
+              id: textId,
+              delta: output,
+            })
+            controller.enqueue({ type: "text-end" as const, id: textId })
+            controller.enqueue({
+              type: "finish" as const,
+              usage: {
+                inputTokens: 0,
+                inputTokenDetails: { cacheRead: 0, cacheWrite: 0, noCache: 0 },
+                outputTokens: 0,
+                outputTokenDetails: { text: 0, reasoning: 0 },
+                totalTokens: 0,
+              },
+              finishReason: "stop" as const,
+            })
+            controller.close()
+          } catch (e) {
+            controller.enqueue({
+              type: "error" as const,
+              error: e instanceof Error ? e.message : "Devin CLI failed",
+            })
+            controller.close()
+          }
+        },
+      })
+
+      return { stream }
+    },
+  }
 }
