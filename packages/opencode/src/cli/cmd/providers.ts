@@ -462,6 +462,27 @@ export const ProvidersLoginCommand = effectCmd({
           "  2. Or set DEVIN_API_KEY environment variable\n\n" +
           "Optional: set DEVIN_ORG_ID for dynamic model discovery.",
       )
+
+      // If the user already logged in via the Devin CLI, reuse that
+      // session token instead of forcing them to paste it again.
+      const home = os.homedir()
+      const credPath = `${home}/.local/share/devin/credentials.toml`
+      try {
+        const text = yield* Effect.promise(() => Bun.file(credPath).text())
+        const apiKeyMatch = text.match(/windsurf_api_key\s*=\s*"([^"]+)"/)
+        if (apiKeyMatch?.[1]) {
+          let apiKey = apiKeyMatch[1]
+          if (apiKey.startsWith("devin-session-token$")) {
+            apiKey = apiKey.slice("devin-session-token$".length)
+          }
+          yield* Prompt.log.info("Found existing Devin CLI session — reusing credentials.")
+          yield* Effect.orDie(authSvc.set(provider, { type: "api", key: apiKey }))
+          yield* Prompt.outro("Done")
+          return
+        }
+      } catch {
+        // No Devin CLI credentials found — fall through to manual entry.
+      }
     }
 
     if (provider === "codeium") {
