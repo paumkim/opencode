@@ -23,6 +23,7 @@ export const SettingsModelsV2: Component = () => {
   const language = useLanguage()
   const models = useModels()
   const serverSdk = useServerSDK()
+  let searchInput: HTMLInputElement | undefined
   const [store, setStore] = persisted(
     Persist.serverGlobal(serverSdk().scope, "settings-v2.models.providers"),
     createStore({ collapsed: {} as Record<string, boolean> }),
@@ -66,6 +67,7 @@ export const SettingsModelsV2: Component = () => {
             autocomplete="off"
             autocapitalize="off"
             aria-label={language.t("dialog.model.search.placeholder")}
+            ref={(element) => (searchInput = element)}
           />
           <Show when={list.filter()}>
             <IconButtonV2
@@ -74,7 +76,11 @@ export const SettingsModelsV2: Component = () => {
               size="small"
               class="settings-v2-tab-search-clear"
               icon={<IconV2 name="close" size="large" class="text-v2-icon-icon-muted" />}
-              onClick={() => list.clear()}
+              aria-label={language.t("common.clear")}
+              onClick={() => {
+                list.clear()
+                requestAnimationFrame(() => searchInput?.focus({ preventScroll: true }))
+              }}
             />
           </Show>
         </div>

@@ -20,8 +20,8 @@
     display: flex;
     flex-direction: column;
     align-items: flex-start;
-    width: 480px;
-    height: 368px;
+    width: min(calc(100vw - 32px), 480px);
+    height: min(calc(100vh - 32px), 368px);
     background: var(--v2-background-bg-layer-01);
     box-shadow: var(--v2-elevation-overlay);
     border-radius: 6px;
@@ -166,8 +166,8 @@
   }
 
   &[data-size="large"] [data-slot="dialog-container"] {
-    width: 640px;
-    height: 480px;
+    width: min(calc(100vw - 32px), 640px);
+    height: min(calc(100vh - 32px), 480px);
   }
 
   &[data-size="x-large"] [data-slot="dialog-container"] {

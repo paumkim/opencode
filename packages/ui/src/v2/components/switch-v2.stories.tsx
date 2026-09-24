@@ -21,7 +21,7 @@ Use in settings panels or forms.
 - TODO: confirm aria attributes from Kobalte.
 
 ### Theming/tokens
-- Uses \`data-component="switch"\` and slot attributes.
+- Uses \`data-component="switch-v2"\` and slot attributes.
 
 `
 

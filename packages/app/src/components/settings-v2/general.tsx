@@ -77,9 +77,10 @@ const PermissionScopeSetting: Component<{ controller: PermissionScopeController 
       description={language.t("toast.permissions.autoaccept.on.description")}
     >
       <div data-action="settings-auto-accept-permissions">
-        <Switch
-          checked={props.controller.accepting()}
-          disabled={!props.controller.enabled()}
+         <Switch
+           aria-label={language.t("command.permissions.autoaccept.enable")}
+           checked={props.controller.accepting()}
+           disabled={!props.controller.enabled()}
           onChange={props.controller.set}
         />
       </div>
@@ -103,6 +104,7 @@ const ShellSetting: Component<{ controller: ShellSettingsController }> = (props)
       <SelectV2
         appearance="inline"
         data-action="settings-shell"
+        aria-label={language.t("settings.general.row.shell.title")}
         options={options()}
         current={options().find((option) => option.value === props.controller.current()) ?? options()[0]}
         placement="bottom-end"
@@ -132,6 +134,7 @@ const AppearanceSection: Component<{ controller: AppearanceSettingsController }>
           <SelectV2
             appearance="inline"
             data-action="settings-color-scheme"
+            aria-label={language.t("settings.general.row.colorScheme.title")}
             options={schemeOptions}
             current={schemeOptions.find((option) => option === props.controller.scheme.current())}
             placement="bottom-end"
@@ -159,6 +162,7 @@ const AppearanceSection: Component<{ controller: AppearanceSettingsController }>
           <SelectV2
             appearance="inline"
             data-action="settings-theme"
+            aria-label={language.t("settings.general.row.theme.title")}
             options={props.controller.theme.options()}
             current={props.controller.theme.current()}
             placement="bottom-end"
@@ -230,6 +234,7 @@ const SoundSetting: Component<{
       <SelectV2
         appearance="inline"
         data-action={config().action}
+        aria-label={language.t(config().title)}
         options={soundOptions}
         current={props.channel.current()}
         value={(option) => option.id}
@@ -259,6 +264,7 @@ const LanguageSetting = () => {
       <SelectV2
         appearance="inline"
         data-action="settings-language"
+        aria-label={language.t("settings.general.row.language.title")}
         options={options()}
         placement="bottom-end"
         gutter={6}
@@ -339,6 +345,7 @@ export const SettingsGeneralV2: Component<{
         >
           <div data-action="settings-feed-reasoning-summaries">
             <Switch
+              aria-label={language.t("settings.general.row.reasoningSummaries.title")}
               checked={settings.general.showReasoningSummaries()}
               onChange={(checked) => settings.general.setShowReasoningSummaries(checked)}
             />
@@ -351,6 +358,7 @@ export const SettingsGeneralV2: Component<{
         >
           <div data-action="settings-feed-shell-tool-parts-expanded">
             <Switch
+              aria-label={language.t("settings.general.row.shellToolPartsExpanded.title")}
               checked={settings.general.shellToolPartsExpanded()}
               onChange={(checked) => settings.general.setShellToolPartsExpanded(checked)}
             />
@@ -363,6 +371,7 @@ export const SettingsGeneralV2: Component<{
         >
           <div data-action="settings-feed-edit-tool-parts-expanded">
             <Switch
+              aria-label={language.t("settings.general.row.editToolPartsExpanded.title")}
               checked={settings.general.editToolPartsExpanded()}
               onChange={(checked) => settings.general.setEditToolPartsExpanded(checked)}
             />
@@ -376,6 +385,7 @@ export const SettingsGeneralV2: Component<{
           >
             <div data-action="settings-mobile-titlebar-bottom">
               <Switch
+                aria-label={language.t("settings.general.row.mobileTitlebarBottom.title")}
                 checked={settings.general.mobileTitlebarPosition() === "bottom"}
                 onChange={(checked) => settings.general.setMobileTitlebarPosition(checked ? "bottom" : "top")}
               />
@@ -397,6 +407,7 @@ export const SettingsGeneralV2: Component<{
         >
           <div data-action="settings-show-file-tree">
             <Switch
+              aria-label={language.t("settings.general.row.showFileTree.title")}
               checked={settings.general.showFileTree()}
               onChange={(checked) => settings.general.setShowFileTree(checked)}
             />
@@ -409,6 +420,7 @@ export const SettingsGeneralV2: Component<{
         >
           <div data-action="settings-show-search">
             <Switch
+              aria-label={language.t("settings.general.row.showSearch.title")}
               checked={settings.general.showSearch()}
               onChange={(checked) => settings.general.setShowSearch(checked)}
             />
@@ -421,6 +433,7 @@ export const SettingsGeneralV2: Component<{
         >
           <div data-action="settings-show-status">
             <Switch
+              aria-label={language.t("settings.general.row.showStatus.title")}
               checked={settings.general.showStatus()}
               onChange={(checked) => settings.general.setShowStatus(checked)}
             />
@@ -433,6 +446,7 @@ export const SettingsGeneralV2: Component<{
         >
           <div data-action="settings-show-custom-agents">
             <Switch
+              aria-label={language.t("settings.general.row.showCustomAgents.title")}
               checked={settings.general.showCustomAgents()}
               onChange={(checked) => settings.general.setShowCustomAgents(checked)}
             />
@@ -453,6 +467,7 @@ export const SettingsGeneralV2: Component<{
         >
           <div data-action="settings-notifications-agent">
             <Switch
+              aria-label={language.t("settings.general.notifications.agent.title")}
               checked={settings.notifications.agent()}
               onChange={(checked) => settings.notifications.setAgent(checked)}
             />
@@ -465,6 +480,7 @@ export const SettingsGeneralV2: Component<{
         >
           <div data-action="settings-notifications-permissions">
             <Switch
+              aria-label={language.t("settings.general.notifications.permissions.title")}
               checked={settings.notifications.permissions()}
               onChange={(checked) => settings.notifications.setPermissions(checked)}
             />
@@ -477,6 +493,7 @@ export const SettingsGeneralV2: Component<{
         >
           <div data-action="settings-notifications-errors">
             <Switch
+              aria-label={language.t("settings.general.notifications.errors.title")}
               checked={settings.notifications.errors()}
               onChange={(checked) => settings.notifications.setErrors(checked)}
             />
@@ -497,6 +514,7 @@ export const SettingsGeneralV2: Component<{
         >
           <div data-action="settings-release-notes">
             <Switch
+              aria-label={language.t("settings.general.row.releaseNotes.title")}
               checked={settings.general.releaseNotes()}
               onChange={(checked) => settings.general.setReleaseNotes(checked)}
             />
@@ -527,7 +545,11 @@ export const SettingsGeneralV2: Component<{
             description={language.t("settings.general.row.pinchZoom.description")}
           >
             <div data-action="settings-pinch-zoom">
-              <Switch checked={pinchZoom.latest} onChange={onPinchZoomChange} />
+              <Switch
+                aria-label={language.t("settings.general.row.pinchZoom.title")}
+                checked={pinchZoom.latest}
+                onChange={onPinchZoomChange}
+              />
             </div>
           </SettingsRowV2>
         </SettingsListV2>

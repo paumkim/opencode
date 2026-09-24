@@ -136,6 +136,7 @@ export const DialogManageModelsV2: Component = () => {
   const setModelVisibility = (item: ModelItem, checked: boolean) => {
     local.model.setVisibility({ modelID: item.id, providerID: item.provider.id }, checked)
   }
+  let searchInput: HTMLInputElement | undefined
   const list = useFilteredList<ModelItem>({
     items: () => local.model.list(),
     key: (x) => `${x.provider.id}:${x.id}`,
@@ -180,6 +181,7 @@ export const DialogManageModelsV2: Component = () => {
               autocapitalize="off"
               autofocus
               aria-label={language.t("dialog.model.search.placeholder")}
+              ref={(element) => (searchInput = element)}
             />
             <Show when={list.filter()}>
               <IconButtonV2
@@ -188,7 +190,13 @@ export const DialogManageModelsV2: Component = () => {
                 size="small"
                 class="settings-v2-tab-search-clear"
                 icon={<IconV2 name="close" size="large" class="text-v2-icon-icon-muted" />}
-                onClick={() => list.clear()}
+                 onClick={() => {
+                   list.clear()
+                   requestAnimationFrame(() => {
+                     if (searchInput?.isConnected) searchInput.focus({ preventScroll: true })
+                   })
+                 }}
+
                 aria-label={language.t("common.clear")}
               />
             </Show>

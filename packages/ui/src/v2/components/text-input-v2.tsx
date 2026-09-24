@@ -27,6 +27,7 @@ export interface TextInputV2Props extends Omit<ComponentProps<"input">, "type"> 
 
 export function TextInputV2(props: TextInputV2Props) {
   const i18n = useI18n()
+  let inputElement: HTMLInputElement | undefined
   const [local, inputProps] = splitProps(props, [
     "class",
     "classList",
@@ -65,7 +66,17 @@ export function TextInputV2(props: TextInputV2Props) {
           type={inputProps.type ?? "text"}
           disabled={local.disabled}
           aria-invalid={local.invalid ? true : undefined}
-          data-slot="text-input-v2-input"
+           data-slot="text-input-v2-input"
+           ref={(element) => {
+             inputElement = element
+             const ref = inputProps.ref as unknown as
+               | ((element: HTMLInputElement) => void)
+               | { current: HTMLInputElement }
+               | undefined
+             if (typeof ref === "function") ref(element)
+             else if (ref) ref.current = element
+           }}
+
         />
       </div>
       <Show when={local.showClearButton || local.showCopyButton}>
@@ -83,11 +94,14 @@ export function TextInputV2(props: TextInputV2Props) {
             if (!local.showClearButton) return
             event.preventDefault()
           }}
-          onClick={(event) => {
-            if (local.showClearButton) {
-              local.onClearClick?.(event)
-              return
-            }
+           onClick={(event) => {
+             if (local.showClearButton) {
+               local.onClearClick?.(event)
+               requestAnimationFrame(() => {
+                 if (inputElement?.isConnected) inputElement.focus({ preventScroll: true })
+               })
+               return
+             }
             local.onCopyClick?.(event)
           }}
         >

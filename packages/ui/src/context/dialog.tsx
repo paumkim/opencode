@@ -21,7 +21,7 @@ type DialogElement = () => JSX.Element
 type Active = {
   id: string
   node: JSX.Element
-  dispose: () => void
+  dispose: (restoreFocus?: boolean) => void
   owner: Owner
   onClose?: () => void
   setClosing: (closing: boolean) => void
@@ -75,15 +75,25 @@ function init() {
     makeEventListener(window, "keydown", onKeyDown, { capture: true })
   })
 
-  const mount = (element: DialogElement, owner: Owner, onClose: (() => void) | undefined, layer: number) => {
+  const mount = (element: DialogElement, owner: Owner, onClose: (() => void) | undefined, layerIndex: number) => {
     const id = Math.random().toString(36).slice(2)
-    const zIndex = 50 + layer * 10
-    let dispose: (() => void) | undefined
+    const zIndex = 50 + layerIndex * 10
+    let disposeRoot: (() => void) | undefined
     let setClosing: ((closing: boolean) => void) | undefined
+    let layerElement: HTMLDivElement | undefined
+    const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : undefined
+    const dispose = (restoreFocus = true) => {
+      const shouldRestore =
+        restoreFocus &&
+        previouslyFocused?.isConnected &&
+        (layerElement?.contains(document.activeElement) === true || document.activeElement === document.body)
+      disposeRoot?.()
+      if (shouldRestore) previouslyFocused.focus({ preventScroll: true })
+    }
 
     const node = runWithOwner(owner, () =>
       createRoot((d: () => void) => {
-        dispose = d
+        disposeRoot = d
         const [closing, setClosingSignal] = createSignal(false)
         setClosing = setClosingSignal
         return (
@@ -102,7 +112,8 @@ function init() {
                 onClick={() => close(id)}
               />
               <div
-                data-dialog-layer={layer}
+                ref={layerElement}
+                data-dialog-layer={layerIndex}
                 style={{
                   position: "fixed",
                   inset: "0",
@@ -121,7 +132,7 @@ function init() {
       }),
     )
 
-    if (!dispose || !setClosing) return
+    if (!disposeRoot || !setClosing) return
 
     const active: Active = { id, node, dispose, owner, onClose, setClosing }
     setStack((items) => [...items, active])
@@ -137,7 +148,7 @@ function init() {
   }
 
   const show = (element: DialogElement, owner: Owner, onClose?: () => void) => {
-    for (const item of stack()) item.dispose()
+    for (const item of stack()) item.dispose(false)
     setStack([])
     if (timer.current !== undefined) {
       clearTimeout(timer.current)

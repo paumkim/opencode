@@ -65,6 +65,9 @@ export function SelectV2<T>(props: SelectV2Props<T>) {
   const [local, others] = splitProps(props, [
     "class",
     "classList",
+    "aria-label",
+    "aria-labelledby",
+    "aria-describedby",
     "placeholder",
     "options",
     "current",
@@ -175,6 +178,9 @@ export function SelectV2<T>(props: SelectV2Props<T>) {
     >
       <Kobalte.Trigger
         as="div"
+        aria-label={local["aria-label"]}
+        aria-labelledby={local["aria-labelledby"]}
+        aria-describedby={local["aria-describedby"]}
         data-component="select-v2"
         data-appearance={local.appearance ?? "base"}
         data-invalid={local.invalid ? "" : undefined}

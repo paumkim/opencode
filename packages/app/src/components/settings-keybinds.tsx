@@ -443,6 +443,7 @@ function SettingsKeybindsV2View(props: {
   onReset: () => void
 }) {
   const language = useLanguage()
+  let searchInput: HTMLInputElement | undefined
   const [store, setStore] = createStore({ filter: "" })
   const filtered = createMemo(() => props.filtered(store.filter))
   const hasResults = createMemo(() => props.groups.some((group) => (filtered().get(group)?.length ?? 0) > 0))
@@ -468,6 +469,7 @@ function SettingsKeybindsV2View(props: {
             autocomplete="off"
             autocapitalize="off"
             aria-label={language.t("settings.shortcuts.search.placeholder")}
+            ref={(element) => (searchInput = element)}
           />
           <Show when={store.filter}>
             <IconButtonV2
@@ -476,7 +478,11 @@ function SettingsKeybindsV2View(props: {
               size="small"
               class="settings-v2-tab-search-clear"
               icon={<IconV2 name="close" size="large" class="text-v2-icon-icon-muted" />}
-              onClick={() => setStore("filter", "")}
+              aria-label={language.t("common.clear")}
+              onClick={() => {
+                setStore("filter", "")
+                requestAnimationFrame(() => searchInput?.focus({ preventScroll: true }))
+              }}
             />
           </Show>
         </div>
@@ -535,6 +541,7 @@ export const SettingsKeybinds: Component<{ v2?: boolean }> = (props) => {
   const command = useCommand()
   const language = useLanguage()
   const settings = useSettings()
+  let searchInput: HTMLInputElement | undefined
 
   const [store, setStore] = createStore({
     active: null as string | null,
@@ -768,9 +775,18 @@ export const SettingsKeybinds: Component<{ v2?: boolean }> = (props) => {
               autocomplete="off"
               autocapitalize="off"
               class="flex-1"
+              ref={(element: HTMLInputElement) => (searchInput = element)}
             />
             <Show when={store.filter}>
-              <IconButton icon="circle-x" variant="ghost" onClick={() => setStore("filter", "")} />
+              <IconButton
+                icon="circle-x"
+                variant="ghost"
+                aria-label={language.t("common.clear")}
+                onClick={() => {
+                  setStore("filter", "")
+                  requestAnimationFrame(() => searchInput?.focus({ preventScroll: true }))
+                }}
+              />
             </Show>
           </div>
         </div>

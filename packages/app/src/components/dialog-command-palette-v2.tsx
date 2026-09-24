@@ -6,7 +6,18 @@ import { Icon } from "@opencode-ai/ui/v2/icon"
 import { KeybindV2 } from "@opencode-ai/ui/v2/keybind-v2"
 import { TextInputV2 } from "@opencode-ai/ui/v2/text-input-v2"
 import { useDialog } from "@opencode-ai/ui/context/dialog"
-import { createEffect, createMemo, createResource, createSignal, For, Match, onCleanup, Show, Switch } from "solid-js"
+import {
+  createEffect,
+  createMemo,
+  createResource,
+  createSignal,
+  createUniqueId,
+  For,
+  Match,
+  onCleanup,
+  Show,
+  Switch,
+} from "solid-js"
 import { commandPaletteOptions, formatKeybindParts, useCommand } from "@/context/command"
 import { useGlobal } from "@/context/global"
 import { useLanguage } from "@/context/language"
@@ -134,12 +145,16 @@ function CommandPaletteView(props: {
   const tabs = useTabs()
   const [query, setQuery] = createSignal("")
   const [active, setActive] = createSignal(0)
+  const id = createUniqueId()
+  const searchId = `${id}-search`
+  const resultsId = `${id}-results`
+  const optionId = (index: number) => `${id}-option-${index}`
 
   const [entries] = createResource(query, props.loadItems, { initialValue: [] as CommandPaletteEntry[] })
   // Render stale results while a new query loads to avoid flashing "Loading" per keystroke.
   const visibleEntries = createMemo(() => uniqueCommandPaletteEntries(entries.latest ?? []))
   const groupedEntries = createMemo(() => groups(visibleEntries()))
-  const activeEntry = createMemo(() => visibleEntries()[active()])
+  const activeEntry = createMemo(() => (entries.loading ? undefined : visibleEntries()[active()]))
   const openSessions = createMemo(
     () => new Set(tabs.store.flatMap((tab) => (tab.type === "session" ? [`${tab.server}\0${tab.sessionId}`] : []))),
   )
@@ -157,6 +172,7 @@ function CommandPaletteView(props: {
   let resultsRef: HTMLDivElement | undefined
 
   const move = (delta: -1 | 1) => {
+    if (entries.loading) return
     const count = visibleEntries().length
     if (count === 0) return
     setActive((index) => (index + delta + count) % count)
@@ -166,19 +182,20 @@ function CommandPaletteView(props: {
   }
 
   const handleKeyDown = (event: KeyboardEvent) => {
-    if (event.key === "ArrowDown") {
+    if (event.isComposing || event.keyCode === 229) return
+    if (event.key === "ArrowDown" && !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey) {
       event.preventDefault()
       move(1)
       return
     }
-    if (event.key === "ArrowUp") {
+    if (event.key === "ArrowUp" && !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey) {
       event.preventDefault()
       move(-1)
       return
     }
     if (event.key === "Enter") {
       event.preventDefault()
-      props.select(activeEntry())
+      if (!entries.loading) props.select(activeEntry())
       return
     }
     if (event.key === "Escape") {
@@ -186,6 +203,11 @@ function CommandPaletteView(props: {
       props.close()
     }
   }
+
+  const activeDescendant = createMemo(() => {
+    const index = active()
+    return index >= 0 && index < visibleEntries().length && activeEntry() ? optionId(index) : undefined
+  })
 
   return (
     <Dialog class="command-palette-v2" size="large">
@@ -197,14 +219,27 @@ function CommandPaletteView(props: {
             autocomplete="off"
             spellcheck={false}
             appearance="large"
+            id={searchId}
+            role="combobox"
+            aria-autocomplete="list"
+            aria-expanded={true}
+            aria-controls={resultsId}
+            aria-activedescendant={activeDescendant()}
+            aria-label={props.placeholder}
             placeholder={props.placeholder}
             leadingIcon={<Icon name="magnifying-glass" />}
             onInput={(event) => setQuery(event.currentTarget.value)}
             onKeyDown={handleKeyDown}
           />
         </div>
-        <ScrollView class="command-palette-v2-scroll" viewportRef={(el) => (resultsRef = el)}>
-          <div class="command-palette-v2-results" role="listbox">
+        <ScrollView
+          class="command-palette-v2-scroll"
+          viewportRef={(el) => {
+            resultsRef = el
+            el.tabIndex = -1
+          }}
+        >
+          <div id={resultsId} class="command-palette-v2-results" role="listbox">
             <Show
               when={visibleEntries().length > 0}
               fallback={
@@ -222,16 +257,21 @@ function CommandPaletteView(props: {
                     <For each={group.entries}>
                       {(item) => (
                         <PaletteRow
+                          id={optionId(visibleEntries().indexOf(item))}
                           item={item}
-                          active={activeEntry()?.id === item.id}
+                          active={!entries.loading && activeEntry()?.id === item.id}
                           language={language}
                           sessionOpen={
                             item.server && item.sessionID
                               ? openSessions().has(`${item.server}\0${item.sessionID}`)
                               : false
                           }
-                          onActive={() => setActive(visibleEntries().findIndex((entry) => entry.id === item.id))}
-                          onSelect={() => props.select(item)}
+                           onActive={() => {
+                             if (!entries.loading) setActive(visibleEntries().findIndex((entry) => entry.id === item.id))
+                           }}
+                           onSelect={() => {
+                             if (!entries.loading) props.select(item)
+                           }}
                         />
                       )}
                     </For>
@@ -247,6 +287,7 @@ function CommandPaletteView(props: {
 }
 
 function PaletteRow(props: {
+  id: string
   item: CommandPaletteEntry
   active: boolean
   language: ReturnType<typeof useLanguage>
@@ -261,7 +302,9 @@ function PaletteRow(props: {
 
   return (
     <button
+      id={props.id}
       type="button"
+      tabIndex={-1}
       class="command-palette-v2-row group"
       role="option"
       aria-selected={props.active}

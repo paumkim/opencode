@@ -20,6 +20,7 @@ export const SettingsServersV2: Component = () => {
   const dialog = useDialog()
   const language = useLanguage()
   const controller = useServerManagementController()
+  let searchInput: HTMLInputElement | undefined
   const [store, setStore] = createStore({ filter: "" })
   const wslServers = useFilteredWslServers(() => store.filter)
 
@@ -69,6 +70,7 @@ export const SettingsServersV2: Component = () => {
               autocomplete="off"
               autocapitalize="off"
               aria-label={language.t("dialog.server.search.placeholder")}
+              ref={(element) => (searchInput = element)}
             />
             <Show when={store.filter}>
               <IconButtonV2
@@ -77,7 +79,11 @@ export const SettingsServersV2: Component = () => {
                 size="small"
                 class="settings-v2-tab-search-clear"
                 icon={<IconV2 name="close" size="large" class="text-v2-icon-icon-muted" />}
-                onClick={() => setStore("filter", "")}
+                aria-label={language.t("common.clear")}
+                onClick={() => {
+                  setStore("filter", "")
+                  requestAnimationFrame(() => searchInput?.focus({ preventScroll: true }))
+                }}
               />
             </Show>
           </div>

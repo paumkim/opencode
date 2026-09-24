@@ -1,22 +1,24 @@
-[data-component="dialog-v2"].settings-v2-wsl-dialog [data-slot="dialog-container"] {
+[data-component="dialog-v2"] > .settings-v2-wsl-dialog[data-slot="dialog-container"] {
+  border-radius: 10px;
   width: 480px;
   max-width: calc(100vw - 32px);
   height: auto;
   align-items: stretch;
 }
 
-[data-component="dialog-v2"].settings-v2-wsl-dialog [data-slot="dialog-content"] {
-  align-items: stretch;
+[data-component="dialog-v2"] > .settings-v2-wsl-dialog[data-slot="dialog-container"] > [data-slot="dialog-content"] {
   width: 100%;
+  border-radius: 10px;
+  align-items: stretch;
   overflow: hidden;
 }
 
-[data-component="dialog-v2"].settings-v2-wsl-dialog [data-slot="dialog-header"] {
+.settings-v2-wsl-dialog [data-slot="dialog-header"] {
   align-items: center;
   padding: 24px 16px 0;
 }
 
-[data-component="dialog-v2"].settings-v2-wsl-dialog [data-slot="dialog-body"] {
+.settings-v2-wsl-dialog [data-slot="dialog-body"] {
   display: flex;
   width: 100%;
   min-width: 0;
@@ -37,29 +39,29 @@
   padding: 16px 16px 1px;
 }
 
-[data-component="dialog-v2"].settings-v2-wsl-dialog [data-slot="dialog-footer"] {
+.settings-v2-wsl-dialog [data-slot="dialog-footer"] {
   padding: 0 16px 24px;
   margin-top: 8px;
 }
 
-[data-component="dialog-v2"].settings-v2-wsl-not-installed-dialog [data-slot="dialog-container"] {
+[data-component="dialog-v2"] > .settings-v2-wsl-not-installed-dialog[data-slot="dialog-container"] {
+  border-radius: 10px;
   width: 480px;
   max-width: calc(100vw - 32px);
   min-height: 264px;
   height: auto;
   background: var(--v2-background-bg-layer-01);
   box-shadow: var(--v2-elevation-overlay);
-  border-radius: 10px;
 }
 
-[data-component="dialog-v2"].settings-v2-wsl-not-installed-dialog [data-slot="dialog-content"] {
-  align-items: stretch;
+[data-component="dialog-v2"] > .settings-v2-wsl-not-installed-dialog[data-slot="dialog-container"] > [data-slot="dialog-content"] {
   min-height: 264px;
   border-radius: 10px;
+  align-items: stretch;
   overflow: hidden;
 }
 
-[data-component="dialog-v2"].settings-v2-wsl-not-installed-dialog [data-slot="dialog-body"] {
+.settings-v2-wsl-not-installed-dialog [data-slot="dialog-body"] {
   display: flex;
   flex: 1;
   flex-direction: column;

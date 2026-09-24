@@ -44,7 +44,7 @@ export function DialogAddWslServer(props: DialogWslServerProps = {}) {
     <Show
       when={!controller.wslServers.isPending && !controller.wslServers.isError}
       fallback={
-        <Dialog fit class="settings-v2-wsl-dialog">
+        <Dialog fit containerClass="settings-v2-wsl-dialog">
           <Show
             when={!controller.wslServers.isError}
             fallback={<div class="settings-v2-wsl-loading">{controller.loadError()}</div>}
@@ -71,7 +71,7 @@ export function DialogAddWslServer(props: DialogWslServerProps = {}) {
               />
             }
           >
-            <Dialog fit class="settings-v2-wsl-dialog">
+            <Dialog fit containerClass="settings-v2-wsl-dialog">
               <div class="settings-v2-wsl-loading">
                 <LoaderV2 />
               </div>
@@ -79,7 +79,7 @@ export function DialogAddWslServer(props: DialogWslServerProps = {}) {
           </Show>
         }
       >
-        <Dialog fit class="settings-v2-wsl-dialog">
+        <Dialog fit containerClass="settings-v2-wsl-dialog">
           <DialogHeader hideClose={true}>
             <DialogTitle>
               {controller.view() === "main" ? language.t("wsl.server.add") : language.t("wsl.onboarding.installDistro")}
@@ -406,7 +406,7 @@ function DialogWslSetup(props: {
   }
 
   return (
-    <Dialog fit class="settings-v2-wsl-not-installed-dialog">
+    <Dialog fit containerClass="settings-v2-wsl-not-installed-dialog">
       <div class="settings-v2-wsl-not-installed-content">
         <div class="settings-v2-wsl-not-installed-message">
           <svg

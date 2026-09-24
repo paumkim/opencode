@@ -43,6 +43,7 @@ export const SettingsModels: Component = () => {
 const SettingsModelsContent: Component = () => {
   const language = useLanguage()
   const models = useModels()
+  let searchInput: HTMLInputElement | undefined
 
   const list = useFilteredList<ModelItem>({
     items: (_filter) => models.list(),
@@ -87,9 +88,20 @@ const SettingsModelsContent: Component = () => {
               autocomplete="off"
               autocapitalize="off"
               class="flex-1"
+              ref={(element: HTMLInputElement) => (searchInput = element)}
             />
             <Show when={list.filter()}>
-              <IconButton icon="circle-x" variant="ghost" onClick={list.clear} />
+              <IconButton
+                icon="circle-x"
+                variant="ghost"
+                aria-label={language.t("common.clear")}
+                onClick={() => {
+                  list.clear()
+                  requestAnimationFrame(() => {
+                    if (searchInput?.isConnected) searchInput.focus({ preventScroll: true })
+                  })
+                }}
+              />
             </Show>
           </div>
         </div>

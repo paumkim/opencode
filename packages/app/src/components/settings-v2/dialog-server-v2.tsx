@@ -53,7 +53,7 @@ export const DialogServerV2: Component<{
   }
 
   return (
-    <Dialog fit class="settings-v2-server-dialog">
+    <Dialog fit containerClass="settings-v2-server-dialog">
       <DialogHeader hideClose={true}>
         <DialogTitle>{title()}</DialogTitle>
       </DialogHeader>

@@ -25,7 +25,7 @@ export function LayoutTransitionToggle(props: {
             description={props.description}
           >
             <div data-action="settings-new-layout-designs">
-              <Switch checked={props.checked} onChange={props.onChange} />
+              <Switch aria-label={props.title} checked={props.checked} onChange={props.onChange} />
             </div>
           </SettingsRowV2>
         </SettingsListV2>

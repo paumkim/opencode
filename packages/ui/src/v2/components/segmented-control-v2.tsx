@@ -160,12 +160,11 @@ export function SegmentedControlItemV2(props: SegmentedControlItemV2Props) {
     if (e.defaultPrevented || disabled()) return
     const t = e.currentTarget
 
-    if (e.key === "ArrowRight") {
+    if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
       e.preventDefault()
-      ctx.focusNext(t, 1)
-    } else if (e.key === "ArrowLeft") {
-      e.preventDefault()
-      ctx.focusNext(t, -1)
+      const rtl = getComputedStyle(t).direction === "rtl"
+      const direction: 1 | -1 = e.key === "ArrowRight" ? (rtl ? -1 : 1) : rtl ? 1 : -1
+      ctx.focusNext(t, direction)
     }
 
     // accessibility stuff
