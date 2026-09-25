@@ -18,6 +18,7 @@
   },
   "devDependencies": {
     "@tsconfig/bun": "catalog:",
+    "@types/bun": "catalog:",
     "typescript": "catalog:",
     "@typescript/native-preview": "catalog:"
   }
