@@ -1,4 +1,6 @@
 import { describe, it, expect, afterAll } from "bun:test"
+import { existsSync } from "node:fs"
+import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import {
   isSupported, getNativePath, loadLibrary, unloadLibrary,
@@ -9,7 +11,9 @@ import { detectPlatform } from "../src/build/detect"
 // Native proof: missing libraries, headers, symbols and ABI failures must fail.
 afterAll(() => unloadLibrary())
 
-describe("ghostty-terminal FFI", () => {
+// Requires a prebuilt native library and a Bun host. Keep it out of ordinary
+// package tests just like the upstream build/ABI suite.
+describe.skipIf(process.env.GHOSTTY_NATIVE_TEST !== "1")("ghostty-terminal FFI", () => {
   it("detects platform", () => {
     const platform = detectPlatform()
     expect(platform.platform).toBe(process.platform)
@@ -22,6 +26,9 @@ describe("ghostty-terminal FFI", () => {
     expect(isSupported()).toBe(true)
     expect(getNativePath()).toBe(fileURLToPath(new URL(`../native/${detectPlatform().libraryFilename}`, import.meta.url)))
     expect(loadLibrary().path).toBe(getNativePath())
+    const nativeDir = dirname(getNativePath())
+    expect(existsSync(join(nativeDir, "formatter.c"))).toBe(true)
+    expect(existsSync(join(nativeDir, "include"))).toBe(true)
   })
 
   it("formats real Ghostty state after SGR, CUP, overwrite and split UTF-8 input", () => {

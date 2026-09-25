@@ -24,10 +24,13 @@ function openLibrary(path: string) {
 }
 
 function openShim(path: string) {
-  // Header-checked adapter for the options struct passed by value.
+  const nativeDir = dirname(path)
+  // Resolve build resources from the selected native library, not import.meta.url:
+  // compiled Bun modules report /$bunfs/root paths that the system C compiler
+  // cannot open.
   return cc({
-    source: fileURLToPath(new URL("./formatter.c", import.meta.url)),
-    include: [fileURLToPath(new URL("../../native/include", import.meta.url))],
+    source: join(nativeDir, "formatter.c"),
+    include: [join(nativeDir, "include")],
     flags: [`-L${dirname(path)}`],
     library: ["ghostty-vt"],
     symbols: {

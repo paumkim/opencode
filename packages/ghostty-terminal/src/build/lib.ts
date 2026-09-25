@@ -76,6 +76,7 @@ export async function buildLib(): Promise<BuildResult> {
     const artifact = join(native, process.platform === "win32" ? "bin" : "lib", platform.libraryFilename)
     const libraryPath = join(native, platform.libraryFilename)
     await copyFile(artifact, libraryPath)
+    await copyFile(join(packageDir, "src", "ffi", "formatter.c"), join(native, "formatter.c"))
     await Bun.write(join(native, "zig-version"), `${zigVersion}\n`)
     await Bun.write(
       join(native, "build-info.json"),
