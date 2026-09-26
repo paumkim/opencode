@@ -1,3 +1,9 @@
+> **SUPERSEDED (2026-09-26).** Goal mode is no longer a plugin. It is core:
+> tool schemas live in `packages/opencode/src/goal/tools.ts`, and the idle
+> continuation / compaction hooks live in `packages/opencode/src/goal/driver.ts`.
+> `packages/opencode/src/plugin/goal/server.ts` no longer exists. The architecture
+> described below was accurate when written; treat the file paths as historical.
+
 # Audit — `/goal` slash command (opencode)
 
 Date: 2026-09-25 · Branch: `dev` @ `5e82437f5` · Scope: command wiring, plugin runtime, state machine, TUI/UI, test coverage

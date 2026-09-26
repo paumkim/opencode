@@ -186,11 +186,21 @@ If closure tools fail or are unavailable, report that closure was not confirmed.
 
 ## Local source references (not deployment proof)
 
-- `packages/opencode/src/plugin/goal/server.ts`: tool schemas, Plan-mode creation,
-  `/goal` command mapping, idle continuation, and task deferral.
+- `packages/opencode/src/goal/tools.ts`: goal tool schemas, and the core tool
+  registry's `builtin` list that loads them unconditionally.
 - `packages/opencode/src/goal/impl.ts`: lifecycle eligibility, derived checkpoints,
   continuation accounting, limits, and failure handling.
+- `packages/opencode/src/goal/driver.ts`: idle continuation, task deferral, the
+  per-instance event subscription, and the compaction hooks
+  (`experimental.compaction.autocontinue` only suppresses the built-in continue
+  while a goal is `active`).
+- `packages/core/src/prompt/command/goal.txt`: the `/goal` command prompt, including
+  the unattended/overnight tolerance guidance.
 - `packages/opencode/src/tool/task.ts`: base task arguments and task-ID resumption.
+
+Goal mode is core, not a plugin. It is loaded unconditionally and is not affected by
+`OPENCODE_DISABLE_DEFAULT_PLUGINS`. Config still reads the legacy
+`plugin_options["local.goal-mode.server"]` key for backwards compatibility.
 
 These paths are relative to the repository root. Prefer exposed tool contracts
 and higher-priority authorization rules if the running deployment differs.
