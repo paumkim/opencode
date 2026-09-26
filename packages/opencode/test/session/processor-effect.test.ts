@@ -2058,6 +2058,66 @@ itNoEdit.instance(
 )
 
 itNoEdit.instance(
+  "session.processor does not let a read-only tool result clear the text loop",
+  () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const { processors, session, provider } = yield* boot()
+
+      const chat = yield* session.create({})
+      const parent = yield* user(chat.id, "read does not reset")
+      const msg = yield* assistant(chat.id, parent.id, path.resolve(test.directory))
+      const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+      const handle = yield* processors.create({
+        assistantMessage: msg,
+        sessionID: chat.id,
+        model: mdl,
+      })
+
+      const input = {
+        user: {
+          id: parent.id,
+          sessionID: chat.id,
+          role: "user" as const,
+          time: parent.time,
+          agent: parent.agent,
+          model: { providerID: ref.providerID, modelID: ref.modelID },
+        } satisfies SessionV1.User,
+        sessionID: chat.id,
+        model: mdl,
+        agent: agent(),
+        system: [],
+        messages: [{ role: "user" as const, content: "read does not reset" }],
+        tools: {},
+      }
+
+      // `stateChanged` is set on ANY successful tool result, including one that only read a file.
+      // It is named - and commented - as "real progress (a tool result that changed state, or a
+      // file patch)", but a read changes no state: it returns the same bytes every time, which is
+      // exactly the shape a looping model produces while it re-reads the same file and narrates the
+      // same sentence. So the middle turn below CLEARED the cross-turn text streak while doing
+      // nothing, and the third identical turn restarted the count from 1 - the detector could not
+      // reach its threshold at all, and an unattended run repeating itself around a file read was
+      // never told to stop.
+      pushLLM(textTurn("checking the parser"))
+      pushLLM(providerToolTurn("read", { filePath: "a.txt" }))
+      pushLLM(textTurn("checking the parser"))
+      pushLLM(textTurn("checking the parser"))
+
+      yield* handle.process(input)
+      yield* handle.process(input)
+      expect(handle.loopDetected).toBe(false)
+      yield* handle.process(input)
+      const third = yield* handle.process(input)
+
+      expect(third.result).toBe("stop")
+      expect(handle.loopDetected).toBe(true)
+      expect(handle.loopReason).toBe("text")
+    }),
+  { config: cfg },
+)
+
+itNoEdit.instance(
   "session.processor doom-loop detection is not defeated by tool-argument key order",
   () =>
     Effect.gen(function* () {
