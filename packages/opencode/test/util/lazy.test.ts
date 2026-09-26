@@ -47,4 +47,18 @@ describe("util.lazy", () => {
     expect(lazyNull()).toBe(null)
     expect(lazyUndefined()).toBe(undefined)
   })
+
+  test("should not cache a thrown initializer as undefined", () => {
+    let callCount = 0
+    const lazyValue = lazy(() => {
+      callCount++
+      if (callCount === 1) throw new Error("load failed")
+      return "recovered"
+    })
+
+    expect(() => lazyValue()).toThrow("load failed")
+    expect(lazyValue()).toBe("recovered")
+    expect(lazyValue()).toBe("recovered")
+    expect(callCount).toBe(2)
+  })
 })

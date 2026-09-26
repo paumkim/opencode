@@ -44,6 +44,12 @@ const ALTERNATION_WINDOW = 6
 const ALTERNATION_MIN_UNIQUE = 2
 
 /**
+ * How much of a step's closing text a checkpoint keeps as its accomplishment. The checkpoint is a
+ * resume hint, not a transcript, so a bounded excerpt of the step's own summary is what it wants.
+ */
+const CHECKPOINT_ACHIEVEMENT_CHARS = 200
+
+/**
  * Canonical JSON with object keys sorted recursively, so two tool inputs that differ only in key
  * order compare equal. Providers re-serialize their tool arguments, and key order is not stable
  * across turns, so comparing raw `JSON.stringify` output let an identical repeated call slip past
@@ -187,6 +193,17 @@ interface ProcessorContext extends Input {
   blocked: boolean
   needsCompaction: boolean
   currentText: SessionV1.TextPart | undefined
+  /**
+   * The last text block this step COMPLETED, kept after `currentText` is cleared.
+   *
+   * A checkpoint records what a step accomplished, and it is built in the `step-finish` handler -
+   * but `currentText` is the OPEN text block, and `text-end` clears it. `Lifecycle.finish` closes
+   * every open text block before it emits `step-finish`, so on a well-formed stream `currentText` is
+   * always `undefined` there and the checkpoint's `accomplishments` was structurally always `[]`:
+   * the one case worth checkpointing (the step changed files) was the one case guaranteed to record
+   * nothing. Retaining the completed text is what makes the field mean what it says.
+   */
+  lastStepText: string
   reasoningMap: Record<string, SessionV1.ReasoningPart>
   loopDetected: boolean
   runawayDetected: boolean
@@ -274,7 +291,8 @@ const layer = Layer.effect(
         blocked: false,
         needsCompaction: false,
         currentText: undefined,
-reasoningMap: {},
+        lastStepText: "",
+        reasoningMap: {},
         loopDetected: false,
         runawayDetected: false,
         turnSignature: "",
@@ -841,9 +859,7 @@ const reasoning = ctx.reasoningMap[value.id]
                 .create({
                   sessionID: ctx.sessionID,
                   task: ctx.assistantMessage.parentID ?? ctx.sessionID,
-                  accomplishments: ctx.currentText?.text
-                    ? [ctx.currentText.text.slice(0, 200)]
-                    : [],
+                accomplishments: ctx.lastStepText ? [ctx.lastStepText] : [],
                   nextSteps: [],
                   context: {
                     hasEditInStep: ctx.hasEditInStep,
@@ -964,6 +980,12 @@ if (ctx.currentText.text.trim()) {
                }
              }
             yield* session.updatePart(ctx.currentText)
+            // Retained after the block closes, so the `step-finish` handler can report what the step
+            // said. `step-finish` always follows this, so a step's narrative is available there and
+            // nowhere after it. Bounded to what a checkpoint records anyway, and only the LAST block:
+            // a step's closing text is its summary, and concatenating every block would grow with
+            // the step rather than describe it.
+            if (ctx.currentText.text) ctx.lastStepText = ctx.currentText.text.slice(0, CHECKPOINT_ACHIEVEMENT_CHARS)
             ctx.currentText = undefined
             return
 
