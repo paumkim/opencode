@@ -281,4 +281,38 @@ describe("stall detection can see a loop", () => {
     expect(goal?.status).toBe("active")
     expect(goal?.noProgressTurns).toBe(0)
   })
+
+  test("a goal that records work every turn is not paused, in the order the driver runs them", async () => {
+    // The order matters, and the helper above does NOT model it. In production `runAutoContinue`
+    // scores the turn that just finished and only then reserves the next continuation, while the
+    // model's own `record_goal_completion` call for that turn lands DURING the turn - i.e. before the
+    // scoring. So the real sequence per turn is: record, then score, then reserve. Getting it
+    // backwards (score, then record) makes the ledger look frozen for one extra turn and pauses a
+    // goal that did everything it was asked to, so the order is pinned here explicitly rather than
+    // left to whichever helper a test happens to use.
+    const sessionID = "loop-4"
+    await createGoal(sessionID, "find further bugs", { maxAutoTurns: 100, maxNoProgressTurns: 2 })
+    await recordGoalCompletion(sessionID, "fixed the parser")
+
+    for (const id of ["a", "b", "c", "d", "e"]) {
+      // The model's record for the turn it just finished, landing before the turn is scored.
+      await recordGoalCompletion(sessionID, `finished unit ${id}`)
+      // Then the scoring call `runAutoContinue` makes, then the reservation.
+      await recordAssistantProgress(sessionID, {
+        messageID: id,
+        text: "same",
+        outputTokens: 1,
+        toolCalls: 6,
+        evaluateContinuation: true,
+      })
+      const reserved = await reserveContinuation(sessionID, 0, 0)
+      expect(reserved).not.toBeNull()
+      await recordContinuationResult(sessionID, "success", 3)
+    }
+
+    const goal = await getGoal(sessionID)
+    expect(goal?.status).toBe("active")
+    expect(goal?.noProgressTurns).toBe(0)
+    expect(goal?.completedRecorded).toBe(6)
+  })
 })
