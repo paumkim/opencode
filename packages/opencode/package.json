@@ -11,6 +11,7 @@
     "test:httpapi": "bun run script/httpapi-exercise.ts --mode coverage --fail-on-missing && bun run script/httpapi-exercise.ts --mode auth --fail-on-missing && bun run script/httpapi-exercise.ts --mode effect --fail-on-missing",
     "bench:test": "bun run script/bench-test-suite.ts",
     "profile:test": "bun run script/profile-test-files.ts",
+    "stress": "bun run script/stress-harness.ts",
     "build": "bun run script/build.ts",
     "dev": "bun run ./src/index.ts",
     "dev:temporary": "bun run ./src/temporary.ts"

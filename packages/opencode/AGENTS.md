@@ -1,5 +1,26 @@
 # opencode database guide
 
+## HARD RULE: Never Exhaust System Memory
+
+**Running the full `bun test` suite has crashed this machine by consuming all available RAM. It is forbidden.**
+
+- **NEVER run the full test suite.** Not `bun test`, not `bun test test/`, not `bun run test`, not `bun run bench:test`, not `bun run script/bench-test-suite.ts`, and nothing else that fans out across the whole `test/` tree. This applies to the orchestrator AND to every subagent.
+- **Always scope to specific files:** `bun test test/tool/edit.test.ts`, or one narrow directory. Grep for the relevant paths first, then run only those.
+- **Never raise concurrency.** No `--concurrent`, and do not raise Bun's default worker count. A memory spike means run FEWER tests, not more.
+- **Cap memory with a cgroup, never `ulimit -v`:** `systemd-run --user --scope -p MemoryMax=6G -p MemorySwapMax=0 -- bun test <specific-file>`. `ulimit -v` is actively harmful under Bun — it caps *address space*, and Bun reserves ~74GB of it while using ~65MB RSS, so a `ulimit -v` below that kills the process outright (`ulimit -v 4194304` crashed `bun run typecheck`; the same command uncapped passes).
+- **Watch RSS** during stress/soak runs and abort past ~6GB. Prefer short targeted runs over one huge run.
+- **State this rule in every subagent prompt** that involves tests. A subagent told to "run the tests" will otherwise run the whole suite and exhaust RAM.
+- If a task seems to need the full suite, STOP and ask the user first. Default answer is no.
+
+### Heavy tooling in this package
+
+- **`tsgo --noEmit` peaks at ~1.95 GB RSS per package.** Never run the root `bun typecheck` (which is `bun turbo typecheck` across ~33 packages in parallel) uncapped:
+  `systemd-run --user --scope -p MemoryMax=6G -p MemorySwapMax=0 -- bun turbo typecheck --concurrency=2`
+  Verified 33/33 pass in ~17s.
+- When you only touched this package, prefer `bun run typecheck` from `packages/opencode` — one `tsgo` at ~2GB beats a parallel fan-out.
+- **Use the local prettier, not `bunx`:** `node ../../node_modules/prettier/bin/prettier.cjs --write <files>`. `bunx` re-resolves the package and spawns extra processes for no reason.
+- Prefer `prettier --check` over `--write` on pre-existing files; several are not prettier-clean (e.g. `src/session/processor.ts`) and `--write` will bury your change under ~230 lines of unrelated reformatting.
+
 ## Database
 
 - **Schema**: opencode storage entrypoint is `src/storage/schema.ts`, which re-exports Drizzle tables from `@opencode-ai/core` (`packages/core/src/**/*.sql.ts`, e.g. `src/database/schema.sql.ts`).

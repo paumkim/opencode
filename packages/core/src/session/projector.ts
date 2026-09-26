@@ -177,9 +177,14 @@ function run(db: DatabaseService, event: SessionEvent.Event) {
             .orderBy(desc(SessionMessageTable.seq))
             .all()
             .pipe(Effect.orDie)
-          return rows
-            .map(decodeRow)
-            .find((message): message is SessionMessage.Shell => message.type === "shell" && message.callID === callID)
+          // Select before decoding. The callID lives in the JSON payload, so it
+          // can only be matched in JS, but decoding every shell row in the
+          // session to find one made each shell event more expensive as the
+          // session grew. Decode just the row that matches.
+          const match = rows.find((row) => (row.data as { callID?: string }).callID === callID)
+          if (!match) return
+          const message = decodeRow(match)
+          return message.type === "shell" ? message : undefined
         })
       },
       updateAssistant: updateMessage,

@@ -175,6 +175,24 @@ const layer = Layer.effect(
     // alternation (A → B → A → B) that the consecutive-identity detectors miss.
     const turnSignatures = new Map<SessionID, string[]>()
 
+    // These three maps live at the app layer rather than per instance, so they
+    // outlive the session they describe. Without an explicit release a deleted
+    // session's entries are retained for the life of the process, which adds up
+    // over a long-lived server that creates and deletes many sessions.
+    const forgetSession = (sessionID: SessionID) => {
+      textLoop.delete(sessionID)
+      reasoningLoop.delete(sessionID)
+      turnSignatures.delete(sessionID)
+    }
+    const releaseOnDelete = yield* events.listen((event) =>
+      Effect.sync(() => {
+        if (event.type !== Session.Event.Deleted.type) return
+        const sessionID = (event.data as { sessionID?: SessionID }).sessionID
+        if (sessionID) forgetSession(sessionID)
+      }),
+    )
+    yield* Scope.addFinalizer(scope, releaseOnDelete)
+
     const create = Effect.fn("SessionProcessor.create")(function* (input: Input) {
       // Pre-capture snapshot before the LLM stream starts. The AI SDK
       // may execute tools internally before emitting start-step events,

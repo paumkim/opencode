@@ -32,16 +32,41 @@ function convertToLineEnding(text: string, ending: "\n" | "\r\n"): string {
   return text.replaceAll("\n", "\r\n")
 }
 
-const locks = new Map<string, Semaphore.Semaphore>()
+// Per-file mutual exclusion so concurrent edits of the same path serialize.
+// Entries are reference counted and dropped when the last holder/waiter leaves,
+// otherwise every distinct path ever edited leaks a semaphore for the life of
+// the process. The count is incremented before acquiring the permit and
+// decremented after releasing it, so a caller can never observe a dropped entry
+// while another caller is still holding the previous semaphore.
+const locks = new Map<string, { semaphore: Semaphore.Semaphore; refs: number }>()
 
-function lock(filePath: string) {
-  const resolvedFilePath = FSUtil.resolve(filePath)
-  const hit = locks.get(resolvedFilePath)
-  if (hit) return hit
+/** @internal Exported for testing so test/tool/edit-file-lock.test.ts can assert that
+ * lock entries are released instead of leaking one semaphore per edited path. */
+export const testFileLocks: ReadonlyMap<string, { semaphore: Semaphore.Semaphore; refs: number }> = locks
 
-  const next = Semaphore.makeUnsafe(1)
-  locks.set(resolvedFilePath, next)
-  return next
+function withFileLock<A, E, R>(filePath: string, effect: Effect.Effect<A, E, R>) {
+  return Effect.gen(function* () {
+    const resolvedFilePath = FSUtil.resolve(filePath)
+    let entry = locks.get(resolvedFilePath)
+    if (!entry) {
+      entry = { semaphore: Semaphore.makeUnsafe(1), refs: 0 }
+      locks.set(resolvedFilePath, entry)
+    }
+    // Claim the reference synchronously before yielding, so a concurrent caller
+    // either sees this entry or creates the next one after we have released it.
+    entry.refs += 1
+    const claimed = entry
+    return yield* claimed.semaphore
+      .withPermits(1)(effect)
+      .pipe(
+        Effect.ensuring(
+          Effect.sync(() => {
+            claimed.refs -= 1
+            if (claimed.refs <= 0 && locks.get(resolvedFilePath) === claimed) locks.delete(resolvedFilePath)
+          }),
+        ),
+      )
+  })
 }
 
 export const Parameters = Schema.Struct({
@@ -85,7 +110,8 @@ export const EditTool = Tool.define(
           let diff = ""
           let contentOld = ""
           let contentNew = ""
-          yield* lock(filePath).withPermits(1)(
+          yield* withFileLock(
+            filePath,
             Effect.gen(function* () {
               if (params.oldString === "") {
                 const existed = yield* afs.existsSafe(filePath)
