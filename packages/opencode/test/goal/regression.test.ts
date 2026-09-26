@@ -16,6 +16,7 @@ import {
   readState,
   recordAssistantProgress,
   recordContinuationResult,
+  recordGoalCompletion,
   reserveContinuation,
   setGoalStatus,
   updateGoalObjective,
@@ -1277,6 +1278,31 @@ describe("H35: the system-reminder and compaction surfaces are covered at the so
     expect(context).toContain("only with evidence")
     expect(context).not.toContain(INJECTION)
     expect(context).toContain("&lt;/untrusted_objective&gt;")
+  })
+
+  test("the compaction context carries the completed ledger, so it survives compaction", async () => {
+    await goalFor("h35-ledger-compaction")
+    for (const item of ["fixed the goal path migration", "added the ledger regression test", "unified the limit contract"])
+      await recordGoalCompletion("h35-ledger-compaction", item)
+
+    const goal = (await getGoal("h35-ledger-compaction"))!
+    const context = compactionContext(goal)
+
+    // The bug: `compactionContext` is built from `formatGoal`, and `formatGoal` reports the
+    // objective, budgets, checkpoint and status but not the completed ledger. Compaction is the one
+    // moment the ledger is most at risk, because the summariser rewrites the conversation and keeps
+    // only what this text names - and the ledger is precisely what stops a goal from redoing finished
+    // work. So the post-compaction context kept the objective and the budget and lost the record of
+    // what was already done, which is how an unattended goal re-derives its own history and re-fixes
+    // the same defect.
+    //
+    // Three items, not one: `recordGoalCompletion` also writes `lastCheckpoint`, and `formatGoal`
+    // prints the latest checkpoint, so a single recorded item DOES reach the compaction text - by
+    // accident, and only the newest one. Asserting on one item would have passed against the defect.
+    for (const item of ["fixed the goal path migration", "added the ledger regression test", "unified the limit contract"])
+      expect(context).toContain(item)
+    // Same fix, so the same report is the state block for the plan-mode and current-state reminders.
+    expect(formatGoal(goal)).toContain("added the ledger regression test")
   })
 })
 
