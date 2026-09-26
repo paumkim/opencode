@@ -3,7 +3,9 @@ import { expect, spyOn, test } from "bun:test"
 import { testRender } from "@opentui/solid"
 import { RGBA } from "@opentui/core"
 import { createSignal } from "solid-js"
+import { mkdir } from "node:fs/promises"
 import path from "node:path"
+import { legacyStateFile, statePath } from "@opencode-ai/core/goal/path"
 import {
   GoalBar,
   goalMenuOptions,
@@ -32,9 +34,22 @@ const goal = (sessionID?: string, status = "active"): Goal => ({
 })
 
 // Mock only surrounding contexts; render the real component and read real temp JSON.
-async function mount(goals: Goal[], sessionID?: string, keyed = false, width = 40, interactive = false) {
+// `locate` picks which layout the state file uses: "env" writes wherever
+// OPENCODE_GOAL_STATE_PATH points, "default" and "legacy" write to the real XDG locations
+// the component falls back to. Every other test uses "env" for speed, which is exactly why
+// the two default-location tests below are the only ones that can catch the bar and the
+// server disagreeing about where goal state lives.
+async function mount(
+  goals: Goal[],
+  sessionID?: string,
+  keyed = false,
+  width = 40,
+  interactive = false,
+  locate: "env" | "default" | "legacy" = "env",
+) {
   const tmp = await tmpdir()
   const previous = process.env.OPENCODE_GOAL_STATE_PATH
+  const previousDataHome = process.env.XDG_DATA_HOME
   const listeners = new Map<string, () => void>()
   // Interactive mounts capture dialog.replace so a real mouse click can be
   // asserted to open the menu; the non-interactive ones never click.
@@ -74,14 +89,23 @@ async function mount(goals: Goal[], sessionID?: string, keyed = false, width = 4
     for (const mock of mocks) mock.mockRestore()
     if (previous === undefined) delete process.env.OPENCODE_GOAL_STATE_PATH
     else process.env.OPENCODE_GOAL_STATE_PATH = previous
+    if (previousDataHome === undefined) delete process.env.XDG_DATA_HOME
+    else process.env.XDG_DATA_HOME = previousDataHome
     await tmp[Symbol.asyncDispose]()
   }
   try {
-    process.env.OPENCODE_GOAL_STATE_PATH = path.join(tmp.path, "goals.json")
-    await Bun.write(
-      process.env.OPENCODE_GOAL_STATE_PATH,
-      JSON.stringify({ goals: keyed ? Object.fromEntries(goals.map((g, i) => [String(i), g])) : goals }),
-    )
+    if (locate === "env") {
+      process.env.OPENCODE_GOAL_STATE_PATH = path.join(tmp.path, "goals.json")
+    } else {
+      delete process.env.OPENCODE_GOAL_STATE_PATH
+      process.env.XDG_DATA_HOME = tmp.path
+    }
+    // Resolved through the same module the component uses, so a test cannot pin a second
+    // hard-coded copy of the path and drift from it the way the bar did. "legacy" writes the
+    // pre-migration location to cover the window before the server moves that file across.
+    const target = locate === "legacy" ? legacyStateFile() : statePath()
+    await mkdir(path.dirname(target), { recursive: true })
+    await Bun.write(target, JSON.stringify({ goals: keyed ? Object.fromEntries(goals.map((g, i) => [String(i), g])) : goals }))
     app = await testRender(() => <GoalBar sessionID={session()} />, { width, height: 3 })
     const rendered = app
     return {
@@ -125,6 +149,20 @@ test("GoalBar hides a different session and unscoped records", async () => {
   expect(await view.frame()).toBe("")
   view.setSession("session-a")
   view.listeners.get("message.updated")!()
+  expect(await view.frame()).toContain("Goal active")
+})
+
+// Regression: the bar kept its own copy of the state path and was left behind when goal mode
+// moved off the plugin-era directory. It then polled the abandoned file, found nothing, and
+// rendered an empty prompt for a goal that was running - indistinguishable from goal mode off.
+test("GoalBar renders a goal from the real default state location", async () => {
+  await using view = await mount([goal("session-a")], "session-a", false, 40, false, "default")
+  expect(await view.frame()).toContain("Goal active")
+})
+
+test("GoalBar falls back to the plugin-era path when the current one is absent", async () => {
+  // The state before the server's first read migrates that file across.
+  await using view = await mount([goal("session-a")], "session-a", false, 40, false, "legacy")
   expect(await view.frame()).toContain("Goal active")
 })
 
