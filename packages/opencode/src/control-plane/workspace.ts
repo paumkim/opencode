@@ -468,8 +468,11 @@ const layer = Layer.effect(
       yield* FiberMap.run(
         syncFibers,
         space.id,
-        // TODO: look into `tapError` to set the status but still
-        // allow the fiber to fail and automatically get removed
+        // Swallow the failure but record it. A previous TODO here suggested `tapError` so the
+        // fiber could "fail and automatically get removed", but FiberMap removes the entry on
+        // any exit, not just a failure, and nothing awaits the map's failure deferred (only
+        // has/run/remove are used), so letting this fail would surface nothing and lose the
+        // error. Catching is what makes the status and warning below reachable.
         syncWorkspaceLoop(space).pipe(
           Effect.catch((error) =>
             Effect.gen(function* () {
