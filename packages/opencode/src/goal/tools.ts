@@ -9,6 +9,7 @@ import {
   formatGoalHistory,
   getGoal,
   markGoalUnmet,
+  recordGoalCompletion,
   setGoalStatus,
   updateGoalObjective,
 } from "@/goal/impl"
@@ -207,7 +208,7 @@ export function goalTools(deps: Deps): Record<string, Tool.Def<Schema.Decoder<un
   return {
     get_goal: defineTool(
       "get_goal",
-      "Get the current goal for this OpenCode session, including status, observed token usage, elapsed-time usage, budgets, checkpoints, and history.",
+      "Get the current goal for this OpenCode session, including status, observed token usage, elapsed-time usage, budgets, completed work, checkpoints, and history.",
       {},
       deps,
       async (_args, context) => JSON.stringify({ goal: await getGoal(context.sessionID) }, null, 2),
@@ -220,6 +221,17 @@ export function goalTools(deps: Deps): Record<string, Tool.Def<Schema.Decoder<un
       async (_args, context) => {
         const goal = await getGoal(context.sessionID)
         return JSON.stringify({ goal, history_report: formatGoalHistory(goal) }, null, 2)
+      },
+    ),
+    record_goal_completion: defineTool(
+      "record_goal_completion",
+      "Record one unit of work as finished on the active session goal. Call this as soon as a bounded deliverable is done AND verified, with a short description of what is now true. The completed list is written into every continuation prompt, so it is how the next turn knows what is already done and can move forward instead of redoing it. Re-recording an item that is already listed is a no-op. Recording nothing across a tool-heavy turn counts as no progress and will pause the goal, so a long run must record each finished unit.",
+      { item: z.string().min(1).describe("Short description of the finished work, as a statement of what is now true.") },
+      deps,
+      async (args, context) => {
+        const goal = await recordGoalCompletion(context.sessionID, args.item)
+        if (!goal) return "No active goal for this session; nothing was recorded."
+        return JSON.stringify({ goal }, null, 2)
       },
     ),
     create_goal: defineTool(
