@@ -243,6 +243,11 @@ function normalizeGoal(goal: Goal) {
   goal.history = (goal.history ?? []).slice(-GOAL_HISTORY_LIMIT)
   goal.checkpoints = (goal.checkpoints ?? []).slice(-GOAL_CHECKPOINT_LIMIT)
   goal.completed = boundCompletedItems(goal.completed)
+  // The monotonic count, seeded from the retained ledger for a goal persisted before this field
+  // existed. Seeding keeps the stall guard conservative (an under-count can only make the baseline
+  // look older, never make a fresh record look like no change) - and a goal that was already at the
+  // cap re-anchors at 40, which is exactly the point at which its length stops meaning anything.
+  goal.completedRecorded = Math.max(nonNegativeInteger(goal.completedRecorded, 0), goal.completed.length)
   goal.continuationBaselineCompleted = nonNegativeInteger(goal.continuationBaselineCompleted, 0)
   goal.lastCheckpoint = goal.lastCheckpoint ?? goal.checkpoints.at(-1) ?? null
   goal.lastAssistantText = boundRetainedText(goal.lastAssistantText)
@@ -366,7 +371,7 @@ function reactivate(goal: Goal) {
   // the first turn after resuming. Clear it so the resumed turn is not judged against stale text.
   goal.continuationBaselineMessageID = ""
   goal.continuationBaselineSummary = ""
-  goal.continuationBaselineCompleted = goal.completed.length
+  goal.continuationBaselineCompleted = goal.completedRecorded
 }
 
 function remainingTokens(goal: Goal) {
@@ -404,6 +409,7 @@ export function snapshot(goal: Goal): GoalSnapshot {
     history: goal.history,
     checkpoints: goal.checkpoints,
     completed: goal.completed,
+    completedRecorded: goal.completedRecorded,
     lastCheckpoint: goal.lastCheckpoint,
     lastAssistantText: goal.lastAssistantText,
     lastAssistantMessageID: goal.lastAssistantMessageID,
@@ -469,6 +475,7 @@ export async function createGoal(
       history: [],
       checkpoints: [],
       completed: [],
+      completedRecorded: 0,
       continuationBaselineCompleted: 0,
       lastCheckpoint: null,
       lastAssistantText: "",
@@ -681,7 +688,7 @@ export async function extendGoal(
       goal.lastContinuationAt = null
       goal.continuationBaselineMessageID = ""
       goal.continuationBaselineSummary = ""
-      goal.continuationBaselineCompleted = goal.completed.length
+      goal.continuationBaselineCompleted = goal.completedRecorded
       goal.lastStatus = "Goal limits extended; execution reactivated."
     } else {
       goal.lastStatus = "Goal limits extended, but cumulative usage still exceeds a limit."
@@ -821,7 +828,7 @@ export async function recordAssistantProgress(sessionID: string, input: Assistan
       // is the signature of that loop, so the ledger has to be able to contradict the tool count.
       // Scoped to goals that adopted the ledger: an empty ledger means the agent never recorded
       // anything, and penalising that would change today's behaviour for every existing goal.
-      const ledgerStalled = goal.completed.length > 0 && goal.completed.length === goal.continuationBaselineCompleted
+      const ledgerStalled = goal.completedRecorded > 0 && goal.completedRecorded === goal.continuationBaselineCompleted
       const advancing = workedWithTools && !ledgerStalled
       if (lowOutput && !changedSinceContinuation && !advancing) {
         goal.noProgressTurns += 1
@@ -866,7 +873,7 @@ export async function reserveContinuation(sessionID: string, maxAutoTurns: numbe
     goal.lastContinuationAt = now
     goal.continuationBaselineMessageID = goal.lastAssistantMessageID
     goal.continuationBaselineSummary = summarizeText(goal.lastAssistantText)
-    goal.continuationBaselineCompleted = goal.completed.length
+    goal.continuationBaselineCompleted = goal.completedRecorded
     goal.lastStatus = `Auto-continue ${goal.autoTurns} reserved.`
     pushHistory(goal, "autoContinue", goal.lastStatus)
     goal.updatedAt = now
@@ -1000,9 +1007,19 @@ export async function recordGoalCompletion(sessionID: string, item: string) {
     if (!goal || goal.status !== "active") return goal ? snapshot(goal) : null
     const value = truncateToCodePoints(item.trim(), GOAL_MAX_COMPLETED_ITEM_CHARS)
     if (!value) throw new GoalError({ message: "completed item must not be empty" })
-    const before = goal.completed.length
+    // "Already recorded" means a DUPLICATE, not "the array is the same length". The ledger is capped
+    // by dropping the oldest entries, so its length is pinned at the cap no matter what is added, and
+    // comparing lengths read every genuine record from the 41st onward as a no-op - silently dropping
+    // the checkpoint, the history entry, and the loop guard's only evidence that the turn closed real
+    // work out. The model is told to call this the moment a unit is done, so that silence is what made
+    // a long run believe it had recorded nothing and then pause itself for "no progress".
+    //
+    // `boundCompletedItems` de-duplicates case-insensitively, so the membership test has to match or
+    // a re-report under different capitalisation would be counted as new work here and then dropped
+    // there.
+    if (goal.completed.some((item) => item.toLowerCase() === value.toLowerCase())) return snapshot(goal)
     goal.completed = boundCompletedItems([...goal.completed, value])
-    if (goal.completed.length === before) return snapshot(goal)
+    goal.completedRecorded += 1
     goal.lastCheckpoint = { summary: `Completed: ${value}`, timestamp: Math.floor(Date.now() / 1000) }
     pushHistory(goal, "progress", value)
     return snapshot(goal)
