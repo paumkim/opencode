@@ -1,4 +1,4 @@
-import { Data, Effect, Schema } from "effect"
+import { Data, Schema } from "effect"
 
 export const GOAL_SYSTEM_MARKER = "OpenCode goal mode"
 export const GOAL_METADATA_KEY = "opencode.goal"
@@ -10,7 +10,13 @@ export const GOAL_CHECKPOINT_LIMIT = 8
 export const GOAL_CHECKPOINT_CHAR_LIMIT = 280
 export const GOAL_DEFAULT_NO_PROGRESS_TOKEN_THRESHOLD = 50
 export const GOAL_DEFAULT_MAX_NO_PROGRESS_TURNS = 2
-export const GOAL_DEFAULT_MAX_AUTO_TURNS = 25
+/**
+ * Effective auto-continue cap applied when a goal does not carry its own `maxAutoTurns`.
+ * 0 means unbounded, matching the documented "omit or pass null for unlimited" tool contract.
+ * This is the single source of truth: `extendGoal` reactivation eligibility and the runtime
+ * enforcement in `maybeStopForUsageLimit` MUST both resolve through it.
+ */
+export const GOAL_DEFAULT_MAX_AUTO_TURNS = 0
 export const GOAL_DEFAULT_CONTINUE_INTERVAL_SECONDS = 3
 export const GOAL_DEFAULT_MAX_PROMPT_FAILURES = 3
 
@@ -19,6 +25,7 @@ export type MutableGoalStatus = "active" | "paused"
 export type GoalHistoryType =
   | "created"
   | "updated"
+  | "extended"
   | "paused"
   | "resumed"
   | "completed"
@@ -46,6 +53,10 @@ export type Goal = {
   status: GoalStatus
   tokenBudget: number | null
   tokensUsed: number
+  /** Cumulative session token total when the goal was created. */
+  sessionTokensAtCreation?: number
+  /** Most recent cumulative session token total used to calculate goal-local deltas. */
+  lastSessionTokens?: number
   timeUsedSeconds: number
   createdAt: number
   updatedAt: number
@@ -75,7 +86,14 @@ export type Goal = {
   continuationBaselineSummary: string
 }
 
-export type GoalSnapshot = Omit<Goal, "lastAccountedAt" | "autoTurns" | "lastContinuationAt"> & {
+export type GoalSnapshot = Omit<
+  Goal,
+  | "lastAccountedAt"
+  | "autoTurns"
+  | "lastContinuationAt"
+  | "sessionTokensAtCreation"
+  | "lastSessionTokens"
+> & {
   remainingTokens: number | null
   sampledAt: number
   autoTurns: number
@@ -90,6 +108,14 @@ export type CreateGoalOptions = {
   maxNoProgressTurns?: number | null
   agent?: string | null
   initialStatus?: MutableGoalStatus
+  /** Cumulative session tokens observed immediately before creating the goal. */
+  sessionTokensAtCreation?: number | null
+}
+
+export type ExtendGoalOptions = {
+  tokenBudget?: number | null
+  maxAutoTurns?: number | null
+  maxDurationSeconds?: number | null
 }
 
 export type AssistantProgressInput = {
@@ -105,6 +131,7 @@ const HistoryEntrySchema = Schema.Struct({
   type: Schema.Literals([
     "created",
     "updated",
+    "extended",
     "paused",
     "resumed",
     "completed",
@@ -137,6 +164,8 @@ const GoalSchema = Schema.Struct({
   ]),
   tokenBudget: NullableNumber,
   tokensUsed: Schema.Number,
+  sessionTokensAtCreation: Schema.optional(Schema.Number),
+  lastSessionTokens: Schema.optional(Schema.Number),
   timeUsedSeconds: Schema.Number,
   createdAt: Schema.Number,
   updatedAt: Schema.Number,

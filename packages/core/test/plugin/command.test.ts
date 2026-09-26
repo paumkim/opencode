@@ -44,4 +44,35 @@ describe("CommandPlugin.Plugin", () => {
       })
     }),
   )
+
+  it.effect("registers the native goal command", () =>
+    Effect.gen(function* () {
+      const command = yield* CommandV2.Service
+      yield* CommandPlugin.Plugin.effect(
+        host({
+          command: { transform: command.transform, reload: command.reload },
+        }),
+      ).pipe(
+        Effect.provideService(
+          Location.Service,
+          Location.Service.of(location({ directory }, { projectDirectory: project })),
+        ),
+      )
+
+      const goal = yield* command.get("goal")
+      expect(goal).toMatchObject({
+        name: "goal",
+        description: "Set or view the long-running session goal",
+      })
+      // The goal template has no ${path} placeholder, so it is registered verbatim.
+      const template = goal?.template ?? ""
+      expect(template).toContain('OpenCode goal mode command "/goal" was invoked')
+      expect(template).toContain("<goal_command_arguments>")
+      expect(template).toContain("$ARGUMENTS")
+      for (const tool of ["get_goal", "get_goal_history", "clear_goal", "extend_goal", "create_goal"]) {
+        expect(template).toContain(tool)
+      }
+      expect((yield* command.list()).map((item) => item.name)).toEqual(["init", "review", "goal"])
+    }),
+  )
 })

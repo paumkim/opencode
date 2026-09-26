@@ -7,6 +7,9 @@ import { Effect, Layer, Context, Schema } from "effect"
 import { Config } from "@/config/config"
 import { MCP } from "../mcp"
 import { Skill } from "../skill"
+// Single source of truth for the /goal prompt. The copy under packages/core/src/plugin/command/ is
+// exported as GOAL_PROMPT so the two command registries cannot drift.
+import { GOAL_PROMPT as PROMPT_GOAL } from "@opencode-ai/core/plugin/command"
 import PROMPT_INITIALIZE from "./template/initialize.txt"
 import PROMPT_REVIEW from "./template/review.txt"
 import { LegacyEvent } from "@opencode-ai/schema/legacy-event"
@@ -44,6 +47,7 @@ export function hints(template: string) {
 }
 
 export const Default = {
+  GOAL: "goal",
   INIT: "init",
   REVIEW: "review",
 } as const
@@ -67,6 +71,15 @@ const layer = Layer.effect(
       const bridge = yield* EffectBridge.make()
       const commands: Record<string, Info> = {}
 
+      commands[Default.GOAL] = {
+        name: Default.GOAL,
+        description: "Set or view the long-running session goal",
+        source: "command",
+        get template() {
+          return PROMPT_GOAL
+        },
+        hints: hints(PROMPT_GOAL),
+      }
       commands[Default.INIT] = {
         name: Default.INIT,
         description: "guided AGENTS.md setup",

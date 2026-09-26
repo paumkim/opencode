@@ -1,4 +1,4 @@
-import type { Config, Plugin } from "@opencode-ai/plugin"
+import type { Plugin } from "@opencode-ai/plugin"
 import { z } from "zod"
 import {
   accountUsage,
@@ -6,6 +6,7 @@ import {
   completeGoal,
   createGoal,
   estimateTokensFromText,
+  extendGoal,
   formatGoalHistory,
   getGoal,
   markGoalUnmet,
@@ -26,8 +27,6 @@ type Options = {
   min_continue_interval_seconds?: number
   max_turn_time?: number
   max_prompt_failures?: number
-  register_command?: boolean
-  command_name?: string
   default_token_budget?: number
   max_goal_duration_seconds?: number
   no_progress_token_threshold?: number
@@ -38,6 +37,12 @@ type Options = {
 
 type CreateGoalArgs = {
   objective: string
+  token_budget?: number | null
+  max_auto_turns?: number | null
+  max_duration_seconds?: number | null
+}
+
+type ExtendGoalArgs = {
   token_budget?: number | null
   max_auto_turns?: number | null
   max_duration_seconds?: number | null
@@ -55,10 +60,11 @@ type UpdateGoalArgs =
       blocker?: string
     }
 
-const DEFAULT_MAX_AUTO_TURNS = 25
+// 0 means unbounded: goals are never capped at a default number of auto-continues.
+// An explicit positive `max_auto_turns` plugin option still wins (see positiveIntegerOrNull below).
+const DEFAULT_MAX_AUTO_TURNS = 0
 const DEFAULT_CONTINUE_INTERVAL_SECONDS = 3
 const DEFAULT_MAX_PROMPT_FAILURES = 3
-const DEFAULT_COMMAND_NAME = "goal"
 const DEFAULT_RESTRICTED_AGENTS = ["plan"]
 const GOAL_SYSTEM_MARKER = "OpenCode goal mode"
 const TASK_SETTLE_DELAY_MS = 25
@@ -67,7 +73,33 @@ const MAX_TIMER_DELAY_MS = 2_147_483_647
 const TASK_TERMINAL_STATES = new Set<TaskState>(["completed", "error", "cancelled"])
 const PLAN_MODE_CREATE_NOTICE =
   'Goal recorded while the session is in Plan mode, so execution is paused. Do not start implementation work now. Ask the user to switch to Build mode and resume the goal (for example with "/goal resume") to begin execution.'
-const activeContinuations = new Set<string>()
+// Module-scoped so a session cannot be double-continued across plugin instances, but bounded:
+// a continuation that never settles (a hung HTTP call — the SDK disables request timeouts) would
+// otherwise hold its sessionID forever and silently kill goal mode for that session.
+const CONTINUATION_CLAIM_TTL_MS = 120_000
+const activeContinuations = new Map<string, number>()
+
+function claimContinuation(sessionID: string) {
+  const now = Date.now()
+  for (const [id, claimedAt] of activeContinuations) {
+    if (now - claimedAt > CONTINUATION_CLAIM_TTL_MS) activeContinuations.delete(id)
+  }
+  if (activeContinuations.has(sessionID)) return false
+  activeContinuations.set(sessionID, now)
+  return true
+}
+
+function releaseContinuation(sessionID: string) {
+  activeContinuations.delete(sessionID)
+}
+
+/** Exposed for tests: backdate every claim past the TTL to simulate an aged-out hung call. */
+export function staleAllContinuationClaims() {
+  const stale = Date.now() - CONTINUATION_CLAIM_TTL_MS - 1_000
+  for (const [id, claimedAt] of activeContinuations) {
+    activeContinuations.set(id, Math.min(claimedAt, stale))
+  }
+}
 
 type TaskState = "running" | "completed" | "error" | "cancelled"
 
@@ -106,52 +138,23 @@ function restrictedAgentSet(options?: Options) {
   return new Set(names.map((name) => (typeof name === "string" ? name.trim().toLowerCase() : "")).filter(Boolean))
 }
 
-function goalCommandTemplate(commandName: string) {
-  return `OpenCode goal mode command "/${commandName}" was invoked.
-
-Arguments:
-<goal_command_arguments>
-$ARGUMENTS
-</goal_command_arguments>
-
-Use the goal tools to handle this command:
-
-- If the arguments are empty, call get_goal and briefly report the current goal state.
-- If the arguments are "status", "show", or "current", call get_goal and briefly report the current goal state.
-- If the arguments are "history", call get_goal_history and briefly report the current goal history.
-- If the arguments are "clear", "stop", "off", "reset", "none", or "cancel", call clear_goal and report whether a goal was cleared.
-- If the arguments are "pause", pause the current goal by calling update_goal_status with status "paused" and report the result.
-- If the arguments are "resume", resume the current goal by calling update_goal_status with status "active" and continue working toward it.
-- If the arguments start with "edit ", update the current goal objective by calling update_goal_objective with the remaining text.
-- If the arguments start with "complete " or "done ", perform a completion audit against real artifacts and command output. Call update_goal with status "complete" only if the goal is achieved, using concise evidence from the audit.
-- If the arguments start with "unmet ", "blocked ", or "blocker ", call update_goal with status "unmet" only when the goal cannot be achieved or needs external input, using the remaining arguments as the blocker.
-- Otherwise, create a new goal with create_goal. Use the full arguments as the objective. If the user includes explicit budget instructions, pass token_budget, max_auto_turns, or max_duration_seconds to create_goal rather than leaving those words in the objective.
-
-Create a goal only from these explicit command arguments. Do not infer a goal from unrelated session context. After create_goal succeeds, continue working toward the new goal.`
-}
-
-function commandNameFromOptions(options?: Options) {
-  const name = options?.command_name?.trim() || DEFAULT_COMMAND_NAME
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name)) return DEFAULT_COMMAND_NAME
-  return name
-}
-
 function positiveIntegerOrNull(value: unknown) {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null
+}
+
+export function resolveCreateGoalLimits(input: CreateGoalArgs, options?: Options) {
+  return {
+    tokenBudget: Object.hasOwn(input, "token_budget") ? input.token_budget ?? null : options?.default_token_budget ?? null,
+    maxAutoTurns: Object.hasOwn(input, "max_auto_turns") ? input.max_auto_turns ?? null : null,
+    maxDurationSeconds: Object.hasOwn(input, "max_duration_seconds")
+      ? input.max_duration_seconds ?? null
+      : options?.max_goal_duration_seconds ?? null,
+  }
 }
 
 function timeoutMillisecondsFromSeconds(value: unknown) {
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return null
   return Math.min(Math.ceil(value * 1000), MAX_TIMER_DELAY_MS)
-}
-
-function registerDesktopCommand(config: Config, commandName: string) {
-  config.command ??= {}
-  if (config.command[commandName]) return
-  config.command[commandName] = {
-    description: "Set or view the long-running session goal",
-    template: goalCommandTemplate(commandName),
-  }
 }
 
 function textFromPart(part: unknown): string {
@@ -354,7 +357,10 @@ async function sendContinuation(client: Parameters<Plugin>[0]["client"], session
   } catch {
     model = undefined
   }
-  await client.session.promptAsync({
+  // The SDK does NOT throw on a non-2xx response: without `throwOnError` it resolves to a result
+  // tuple carrying `error`. The result must therefore be inspected, or a failed dispatch is
+  // indistinguishable from a successful one.
+  const result = await client.session.promptAsync({
     path: { id: sessionID },
     body: {
       ...(agent ? { agent } : {}),
@@ -363,6 +369,20 @@ async function sendContinuation(client: Parameters<Plugin>[0]["client"], session
       parts: [{ type: "text", text: prompt }],
     },
   })
+  const failure = (result as { error?: unknown } | undefined)?.error
+  if (failure) {
+    throw new Error(`continuation prompt was rejected: ${errorDetail(failure)}`)
+  }
+}
+
+function errorDetail(value: unknown) {
+  if (typeof value === "string") return value
+  if (value instanceof Error) return value.message
+  try {
+    return JSON.stringify(value)
+  } catch {
+    return String(value)
+  }
 }
 
 function isIdleEvent(event: { type?: string; properties?: Record<string, unknown> }) {
@@ -408,6 +428,12 @@ async function fetchLatestAssistant(client: Parameters<Plugin>[0]["client"], ses
   const result = await client.session.messages({ path: { id: sessionID }, query: { limit: 20 } })
   const data = Array.isArray(result.data) ? result.data : []
   return latestAssistantMessage(data as { info?: unknown; role?: unknown; id?: unknown; parts?: unknown[] }[])
+}
+
+async function fetchSessionTokens(client: Parameters<Plugin>[0]["client"], sessionID: string) {
+  const result = await client.session.messages({ path: { id: sessionID } })
+  const data = Array.isArray(result.data) ? result.data : []
+  return tokensFromMessages(data as { info?: unknown; parts?: unknown[] }[])
 }
 
 class TaskTracker {
@@ -515,6 +541,10 @@ class TaskTracker {
     let childIDs: string[]
     try {
       const result = await client.session.children({ path: { id: parentSessionID } })
+      // The SDK resolves non-2xx as a result tuple carrying `error` rather than throwing, so the
+      // `catch` below does not cover HTTP failures. Treating an error as "no children" would call
+      // markAbsentRunningChildren with an empty set and force-clear tasks that are still running.
+      if ((result as { error?: unknown } | undefined)?.error) return
       const data = Array.isArray(result.data) ? result.data : []
       childIDs = data.flatMap((child) => (isRecord(child) && typeof child.id === "string" ? [child.id] : []))
     } catch {
@@ -525,6 +555,7 @@ class TaskTracker {
     let statuses: Record<string, { type?: unknown }>
     try {
       const result = await client.session.status()
+      if ((result as { error?: unknown } | undefined)?.error) return
       statuses = isRecord(result.data) ? (result.data as Record<string, { type?: unknown }>) : {}
     } catch {
       return
@@ -674,6 +705,40 @@ function mergeSystemReminder(output: { system: string[] }, reminder: string) {
   output.system[0] = `${output.system[0]}\n\n${reminder}`
 }
 
+/**
+ * Runs goal bookkeeping without ever propagating its failure. Goal state lives in a
+ * user-writable file, so a decode, permission, or disk error must degrade to "goal tracking
+ * unavailable" and never fail the prompt, abort a session, or raise an unhandled rejection.
+ */
+async function goalBookkeeping<T>(operation: string, run: () => Promise<T>): Promise<T | null> {
+  try {
+    return await run()
+  } catch (error) {
+    console.warn(`[goal] ${operation} failed: ${error instanceof Error ? error.message : String(error)}`)
+    return null
+  }
+}
+
+/** Detects the compaction summarizer request, which must not receive goal-continuation instructions. */
+function isCompactionRequest(system: string[] | undefined) {
+  if (!Array.isArray(system)) return false
+  return system.some((block) => {
+    if (typeof block !== "string") return false
+    const lowered = block.toLowerCase()
+    return lowered.includes("compacting agent") || lowered.includes("summarize the conversation")
+  })
+}
+
+/** Detects the compaction transform, whose message array is a partial history rather than the full one. */
+function isCompactionTransform(messages: unknown[]) {
+  return messages.some((message) => {
+    const info = (message as { info?: unknown } | undefined)?.info
+    if (!isRecord(info)) return false
+    if (info.summary === true) return true
+    return info.mode === "compaction" || info.agent === "compaction"
+  })
+}
+
 const server: Plugin = async ({ client }, options?: Options) => {
   const autoContinue = options?.auto_continue ?? true
   const deferWhileTasksActive = options?.defer_while_tasks_active ?? true
@@ -681,8 +746,6 @@ const server: Plugin = async ({ client }, options?: Options) => {
   const minInterval = positiveIntegerOrNull(options?.min_continue_interval_seconds) ?? DEFAULT_CONTINUE_INTERVAL_SECONDS
   const maxTurnTimeMs = timeoutMillisecondsFromSeconds(options?.max_turn_time)
   const maxPromptFailures = positiveIntegerOrNull(options?.max_prompt_failures) ?? DEFAULT_MAX_PROMPT_FAILURES
-  const registerCommand = options?.register_command ?? true
-  const commandName = commandNameFromOptions(options)
   const taskTracker = new TaskTracker()
   const taskDeferredSessions = new Set<string>()
   const scheduledContinuations = new Map<string, ReturnType<typeof setTimeout>>()
@@ -693,14 +756,14 @@ const server: Plugin = async ({ client }, options?: Options) => {
 
   async function createGoalFromTool(input: CreateGoalArgs, context: { sessionID: string; agent?: string }) {
     const planningOnly = isPlanAgent(context.agent)
+    const sessionTokensAtCreation = await fetchSessionTokens(client, context.sessionID).catch(() => null)
     const goal = await createGoal(context.sessionID, input.objective, {
-      tokenBudget: input.token_budget ?? options?.default_token_budget ?? null,
-      maxAutoTurns: input.max_auto_turns ?? null,
-      maxDurationSeconds: input.max_duration_seconds ?? options?.max_goal_duration_seconds ?? null,
+      ...resolveCreateGoalLimits(input, options),
       noProgressTokenThreshold: options?.no_progress_token_threshold ?? null,
       maxNoProgressTurns: options?.max_no_progress_turns ?? null,
       agent: typeof context.agent === "string" ? context.agent : null,
       initialStatus: planningOnly ? "paused" : "active",
+      sessionTokensAtCreation,
     })
     return JSON.stringify(planningOnly ? { goal, plan_mode_notice: PLAN_MODE_CREATE_NOTICE } : { goal }, null, 2)
   }
@@ -751,10 +814,20 @@ const server: Plugin = async ({ client }, options?: Options) => {
       if (current?.status !== "active" || isPlanAgent(current.lastPromptAgent) || activeContinuations.has(sessionID)) return
 
       turnWatchdogs.delete(sessionID)
-      activeContinuations.add(sessionID)
+      if (!claimContinuation(sessionID)) return
       claimedContinuation = true
       await sendContinuation(client, sessionID, continuationPrompt(current), current.lastPromptAgent ?? latestTurnAgent ?? null)
+      // A watchdog continuation is a real continuation: it must feed the same failure accounting
+      // so repeated rejections trip the circuit breaker instead of failing silently forever.
+      await recordContinuationResult(sessionID, "success", maxPromptFailures)
     } catch (error) {
+      if (claimedContinuation) {
+        try {
+          await recordContinuationResult(sessionID, "failure", maxPromptFailures)
+        } catch {
+          // accounting is best-effort here; never mask the original failure
+        }
+      }
       try {
         await client.app?.log?.({
           body: {
@@ -768,7 +841,7 @@ const server: Plugin = async ({ client }, options?: Options) => {
         return
       }
     } finally {
-      if (claimedContinuation) activeContinuations.delete(sessionID)
+      if (claimedContinuation) releaseContinuation(sessionID)
       if (turnWatchdogs.get(sessionID) === watchdog) turnWatchdogs.delete(sessionID)
     }
   }
@@ -786,15 +859,18 @@ const server: Plugin = async ({ client }, options?: Options) => {
 
   async function runAutoContinue(sessionID: string, fromTaskDeferral = false) {
     if (busySessions.has(sessionID)) return
-    if (activeContinuations.has(sessionID)) return
-    activeContinuations.add(sessionID)
+    if (!claimContinuation(sessionID)) return
+    let reserved = false
     try {
       const latestAssistant = await fetchLatestAssistant(client, sessionID)
       taskTracker.observeAssistantMessage(sessionID, latestAssistant)
       const taskStatus = await taskBlockStatus(sessionID)
       if (taskStatus && taskStatus.blocked) {
         taskDeferredSessions.add(sessionID)
-        if (taskStatus.retryAt != null) scheduleSettledContinuation(sessionID, taskStatus.retryAt - Date.now())
+        // A running task has no retryAt. Without a bounded poll the deferral is dropped entirely:
+        // the only re-entry is the CHILD session's idle event, which resolves to a different
+        // sessionID and therefore no-ops. The parent would never resume auto-continue.
+        scheduleSettledContinuation(sessionID, taskStatus.retryAt != null ? taskStatus.retryAt - Date.now() : TASK_SETTLE_DELAY_MS)
         return
       }
       if (busySessions.has(sessionID)) return
@@ -814,6 +890,7 @@ const server: Plugin = async ({ client }, options?: Options) => {
       taskDeferredSessions.delete(sessionID)
       const goal = await reserveContinuation(sessionID, maxAutoTurns, minInterval)
       if (!goal) return
+      reserved = true
       await sendContinuation(
         client,
         sessionID,
@@ -822,17 +899,30 @@ const server: Plugin = async ({ client }, options?: Options) => {
       )
       await recordContinuationResult(sessionID, "success", maxPromptFailures)
     } catch (error) {
-      await recordContinuationResult(sessionID, "failure", maxPromptFailures)
-      await client.app?.log?.({
-        body: {
-          service: "opencode-goal-plugin",
-          level: "error",
-          message: "Auto-continue failed",
-          extra: { error: error instanceof Error ? error.message : String(error) },
-        },
-      })
+      // Only charge the failure ladder once a continuation was actually reserved. A failure while
+      // merely observing state (e.g. a transient `session.children` error) is not a failed
+      // continuation, and charging it would pause healthy goals.
+      if (reserved) {
+        try {
+          await recordContinuationResult(sessionID, "failure", maxPromptFailures)
+        } catch {
+          // best-effort accounting must never mask the original failure
+        }
+      }
+      try {
+        await client.app?.log?.({
+          body: {
+            service: "opencode-goal-plugin",
+            level: "error",
+            message: "Auto-continue failed",
+            extra: { error: error instanceof Error ? error.message : String(error) },
+          },
+        })
+      } catch {
+        // logging must never replace the original error
+      }
     } finally {
-      activeContinuations.delete(sessionID)
+      releaseContinuation(sessionID)
     }
   }
 
@@ -842,12 +932,7 @@ const server: Plugin = async ({ client }, options?: Options) => {
       scheduledContinuations.clear()
       for (const watchdog of turnWatchdogs.values()) clearTimeout(watchdog.timer)
       turnWatchdogs.clear()
-    },
-    async config(config) {
-      if (!registerCommand) return
-      registerDesktopCommand(config, commandName)
-    },
-    tool: {
+    },    tool: {
       get_goal: {
         description:
           "Get the current goal for this OpenCode session, including status, observed token usage, elapsed-time usage, budgets, checkpoints, and history.",
@@ -866,12 +951,12 @@ const server: Plugin = async ({ client }, options?: Options) => {
       },
       create_goal: {
         description:
-          "Create a goal only when explicitly requested by the user or system/developer instructions; do not infer goals from ordinary tasks. Fails if a non-complete goal exists. While the session is in Plan mode, the goal is recorded as paused and execution requires the user to switch to Build mode.",
+          "Create a goal only when explicitly requested by the user or system/developer instructions; do not infer goals from ordinary tasks. Fails if a non-complete goal exists. Limits are unlimited by default: omitting a limit arg (or passing null) means no token budget, no auto-continue cap, and no duration cap, so only pass numbers the user explicitly asked for. While the session is in Plan mode, the goal is recorded as paused and execution requires the user to switch to Build mode.",
         args: {
           objective: z.string().min(1).max(4000).describe("The concrete objective to start pursuing."),
-          token_budget: z.number().int().positive().nullable().optional().describe("Optional positive token budget."),
-          max_auto_turns: z.number().int().positive().nullable().optional().describe("Optional per-goal auto-continue limit."),
-          max_duration_seconds: z.number().int().positive().nullable().optional().describe("Optional per-goal duration limit."),
+          token_budget: z.number().int().positive().nullable().optional().describe("Optional positive token budget. Omit or pass null for unlimited."),
+          max_auto_turns: z.number().int().positive().nullable().optional().describe("Optional per-goal auto-continue limit. Omit or pass null for unlimited."),
+          max_duration_seconds: z.number().int().positive().nullable().optional().describe("Optional per-goal duration limit. Omit or pass null for unlimited."),
         },
         async execute(args, context) {
           return createGoalFromTool(args as CreateGoalArgs, context)
@@ -879,12 +964,12 @@ const server: Plugin = async ({ client }, options?: Options) => {
       },
       set_goal: {
         description:
-          "Set a new goal when the user explicitly asks the agent to formulate and set its own goal. The model should write the objective itself based on the user's explicit request. Fails if a non-complete goal exists. While the session is in Plan mode, the goal is recorded as paused and execution requires the user to switch to Build mode.",
+          "Set a new goal when the user explicitly asks the AGENT to formulate and set its own goal (the model writes the objective itself). Prefer create_goal when passing the user's own words. Fails if a non-complete goal exists. Limits are unlimited by default: omitting a limit arg (or passing null) means no token budget, no auto-continue cap, and no duration cap, so only pass numbers the user explicitly asked for. While the session is in Plan mode, the goal is recorded as paused and execution requires the user to switch to Build mode.",
         args: {
           objective: z.string().min(1).max(4000).describe("The model-formulated concrete objective to start pursuing."),
-          token_budget: z.number().int().positive().nullable().optional().describe("Optional positive token budget."),
-          max_auto_turns: z.number().int().positive().nullable().optional().describe("Optional per-goal auto-continue limit."),
-          max_duration_seconds: z.number().int().positive().nullable().optional().describe("Optional per-goal duration limit."),
+          token_budget: z.number().int().positive().nullable().optional().describe("Optional positive token budget. Omit or pass null for unlimited."),
+          max_auto_turns: z.number().int().positive().nullable().optional().describe("Optional per-goal auto-continue limit. Omit or pass null for unlimited."),
+          max_duration_seconds: z.number().int().positive().nullable().optional().describe("Optional per-goal duration limit. Omit or pass null for unlimited."),
         },
         async execute(args, context) {
           return createGoalFromTool(args as CreateGoalArgs, context)
@@ -938,6 +1023,39 @@ const server: Plugin = async ({ client }, options?: Options) => {
           return JSON.stringify({ goal, unmet_report: report }, null, 2)
         },
       },
+      extend_goal: {
+        description:
+          "Explicitly extend the budgets of a goal that stopped at a token, turn, or duration limit. Requires at least one higher limit or a deliberate null for token/duration; preserves usage and history. Closed and ordinary active goals are rejected.",
+        args: {
+          token_budget: z.number().int().positive().nullable().optional().describe("Higher token budget, or null for no token limit."),
+          max_auto_turns: z
+            .number()
+            .int()
+            .positive()
+            .nullable()
+            .optional()
+            .describe("Higher auto-continue limit, or null for no auto-continue limit."),
+          max_duration_seconds: z.number().int().positive().nullable().optional().describe("Higher duration limit, or null for no duration limit."),
+        },
+        async execute(args, context) {
+          if (isPlanAgent(context.agent)) {
+            throw new Error("cannot extend or reactivate the goal while the session is in Plan mode; switch to Build mode first")
+          }
+          const input = args as ExtendGoalArgs
+          // Pass the SAME configured turn default that runtime enforcement uses, so extension
+          // reactivation eligibility can never disagree with enforcement.
+          const goal = await extendGoal(
+            context.sessionID,
+            {
+              tokenBudget: input.token_budget,
+              maxAutoTurns: input.max_auto_turns,
+              maxDurationSeconds: input.max_duration_seconds,
+            },
+            maxAutoTurns,
+          )
+          return JSON.stringify({ goal }, null, 2)
+        },
+      },
       update_goal_status: {
         description:
           "Pause or resume the current OpenCode goal when the user explicitly asks to pause or resume it. Resuming is not allowed while the session is in Plan mode; the user must switch to Build mode first.",
@@ -976,7 +1094,7 @@ const server: Plugin = async ({ client }, options?: Options) => {
       const sessionID = typeof input?.sessionID === "string" ? input.sessionID : output.message?.sessionID
       const agent = typeof input?.agent === "string" && input.agent.trim() ? input.agent : output.message?.agent
       if (typeof sessionID !== "string" || typeof agent !== "string" || !agent.trim()) return
-      await recordPromptAgent(sessionID, agent)
+      await goalBookkeeping("recordPromptAgent", () => recordPromptAgent(sessionID, agent))
     },
     async "experimental.chat.messages.transform"(input, output) {
       taskTracker.observeMessages(output.messages)
@@ -985,25 +1103,47 @@ const server: Plugin = async ({ client }, options?: Options) => {
           ? input.sessionID
           : output.messages.find((message) => typeof message.info.sessionID === "string")?.info.sessionID
       if (!sessionID) return
-      await accountUsage(sessionID, tokensFromMessages(output.messages))
-      await recordAssistantMessage(sessionID, latestAssistantMessage(output.messages), options ?? {})
+      // This hook runs inside the LLM step loop. A state read/write failure (unwritable
+      // XDG_DATA_HOME, read-only volume) must not fail the user's prompt.
+      await goalBookkeeping("accountUsage", () => accountUsage(sessionID, tokensFromMessages(output.messages)))
+      // On compaction this hook receives only the compacted-away PREFIX, not the full history.
+      // Charging that partial total would corrupt the token cursor and make the next full call
+      // charge the entire retained context as fresh usage.
+      if (isCompactionTransform(output.messages)) return
+      await goalBookkeeping("recordAssistantMessage", () =>
+        recordAssistantMessage(sessionID, latestAssistantMessage(output.messages), options ?? {}),
+      )
     },
     async "experimental.chat.system.transform"(input, output) {
       if (typeof input.sessionID !== "string") return
-      const goal = await getGoal(input.sessionID)
+      const goal = await goalBookkeeping("getGoal", () => getGoal(input.sessionID as string))
+      // The compaction summarizer is a synthetic LLM request. Injecting goal-continuation
+      // instructions into it degrades the summary exactly when context is scarcest.
+      if (isCompactionRequest(output.system)) return
       mergeSystemReminder(output, systemReminder(goal, { planningOnly: isPlanAgent(goal?.lastPromptAgent) }))
     },
     async "experimental.session.compacting"(input, output) {
-      const goal = await getGoal(input.sessionID)
+      const goal = await goalBookkeeping("getGoal", () => getGoal(input.sessionID))
       if (!goal) return
       output.context.push(compactionContext(goal))
     },
     async "experimental.compaction.autocontinue"(input, output) {
-      const goal = await getGoal(input.sessionID)
+      const goal = await goalBookkeeping("getGoal", () => getGoal(input.sessionID))
       if (goal?.status === "active") output.enabled = false
     },
     async event({ event }) {
-      const sessionID = sessionIDFromEvent(event as never)
+      try {
+        await handleEvent(event)
+      } catch (error) {
+        // The plugin loader dispatches this hook with no rejection handler
+        // (`void hook.event?.(...)`), so any throw becomes an unhandled rejection.
+        console.warn(`[goal] event handling failed: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    },
+  }
+
+  async function handleEvent(event: unknown) {
+    const sessionID = sessionIDFromEvent(event as never)
       const eventType = (event as { type?: string }).type
       if (eventType === "session.created") {
         taskTracker.observeSessionCreated(event as { properties?: Record<string, unknown> })
@@ -1041,17 +1181,25 @@ const server: Plugin = async ({ client }, options?: Options) => {
           | { info?: unknown; role?: unknown; id?: unknown; time?: unknown; parts?: unknown[] }
           | undefined
         taskTracker.observeAssistantMessage(sessionID, message)
-        await recordAssistantMessage(sessionID, message, options ?? {})
+        // This hook is dispatched fire-and-forget by the plugin loader with no rejection handler,
+        // so a throw here becomes an unhandled rejection. Also: only assistant messages may advance
+        // the continuation baseline, or a user/compaction message ID corrupts no-progress detection.
+        if (assistantMarker(message ?? {})) {
+          await goalBookkeeping("recordAssistantMessage", () =>
+            recordAssistantMessage(sessionID, message, options ?? {}),
+          )
+        }
       }
 
       if (!autoContinue || !isIdleEvent(event as never)) return
       if (!sessionID) return
       await runAutoContinue(sessionID)
-    },
   }
 }
 
+export const GOAL_PLUGIN_ID = "local.goal-mode.server"
+
 export default {
-  id: "local.goal-mode.server",
+  id: GOAL_PLUGIN_ID,
   server,
 }

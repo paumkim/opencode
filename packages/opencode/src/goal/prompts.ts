@@ -1,9 +1,7 @@
 import type { GoalSnapshot } from "./schema"
-import { formatGoal } from "./impl"
+import { escapePromptText, formatGoal } from "./impl"
 
-function escapeXmlText(input: string) {
-  return input.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
-}
+const escapeXmlText = escapePromptText
 
 function budgetLines(goal: GoalSnapshot) {
   return [

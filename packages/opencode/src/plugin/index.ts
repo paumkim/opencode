@@ -22,7 +22,7 @@ import { DigitalOceanAuthPlugin } from "./digitalocean"
 import { XaiAuthPlugin } from "./xai"
 import { CerebrasPlugin } from "./cerebras"
 import { SnowflakeCortexAuthPlugin } from "./snowflake-cortex"
-import goalPlugin from "./goal/server"
+import goalPlugin, { GOAL_PLUGIN_ID } from "./goal/server"
 import { Effect, Layer, Context } from "effect"
 import { EffectBridge } from "@/effect/bridge"
 import { InstanceState } from "@/effect/instance-state"
@@ -64,26 +64,48 @@ export function experimentalWebSocketsEnabled(input: { enabled: boolean; channel
   return input.enabled || ["local", "dev", "beta"].includes(input.channel ?? InstallationChannel)
 }
 
-// Built-in plugins that are directly imported (not installed from npm)
-function internalPlugins(flags: RuntimeFlags.Info): PluginInstance[] {
+/** Exposed for tests: the ids of the built-in plugins registered at runtime. */
+export function internalPluginIds(flags: RuntimeFlags.Info) {
+  return internalPlugins(flags).map((entry) => entry.id)
+}
+
+/**
+ * Resolves the options argument for an internal plugin. Without this, an internal plugin's
+ * Options type is unreachable because internal plugins are invoked without a second argument.
+ * Exposed for tests.
+ */
+export function internalPluginOptions(
+  pluginOptions: Record<string, Record<string, unknown>> | undefined,
+  id: string,
+) {
+  return pluginOptions?.[id]
+}
+
+// Built-in plugins that are directly imported (not installed from npm). Each entry is paired with
+// its plugin id so `config.plugin_options[<id>]` can be forwarded as the plugin's options
+// argument; without this an internal plugin's Options type is unreachable.
+function internalPlugins(flags: RuntimeFlags.Info): { id: string; plugin: PluginInstance }[] {
   return [
     // Temporary rollout: pre-release builds use WebSockets by default; releases require explicit opt-in.
-    (input) =>
-      CodexAuthPlugin(input, {
-        experimentalWebSockets: experimentalWebSocketsEnabled({ enabled: flags.experimentalWebSockets }),
-      }),
-    CopilotAuthPlugin,
-    ModalPlugin,
-    GitlabAuthPlugin,
-    PoeAuthPlugin,
-    CloudflareWorkersAuthPlugin,
-    CloudflareAIGatewayAuthPlugin,
-    AzureAuthPlugin,
-    DigitalOceanAuthPlugin,
-    SnowflakeCortexAuthPlugin,
-    XaiAuthPlugin,
-    CerebrasPlugin,
-    goalPlugin.server,
+    {
+      id: "local.openai.codex",
+      plugin: (input) =>
+        CodexAuthPlugin(input, {
+          experimentalWebSockets: experimentalWebSocketsEnabled({ enabled: flags.experimentalWebSockets }),
+        }),
+    },
+    { id: "local.github-copilot", plugin: CopilotAuthPlugin },
+    { id: "local.modal", plugin: ModalPlugin },
+    { id: "local.gitlab", plugin: GitlabAuthPlugin },
+    { id: "local.poe", plugin: PoeAuthPlugin },
+    { id: "local.cloudflare-workers", plugin: CloudflareWorkersAuthPlugin },
+    { id: "local.cloudflare-ai-gateway", plugin: CloudflareAIGatewayAuthPlugin },
+    { id: "local.azure", plugin: AzureAuthPlugin },
+    { id: "local.digitalocean", plugin: DigitalOceanAuthPlugin },
+    { id: "local.snowflake-cortex", plugin: SnowflakeCortexAuthPlugin },
+    { id: "local.xai", plugin: XaiAuthPlugin },
+    { id: "local.cerebras", plugin: CerebrasPlugin },
+    { id: GOAL_PLUGIN_ID, plugin: goalPlugin.server },
   ]
 }
 
@@ -169,9 +191,14 @@ const layer = Layer.effect(
           $: typeof Bun === "undefined" ? undefined : Bun.$,
         }
 
-        for (const plugin of flags.disableDefaultPlugins ? [] : internalPlugins(flags)) {
+        for (const { id, plugin } of flags.disableDefaultPlugins ? [] : internalPlugins(flags)) {
+          // Forward config-supplied options so an internal plugin's Options type is reachable.
+          const options = internalPluginOptions(
+            cfg.plugin_options as Record<string, Record<string, unknown>> | undefined,
+            id,
+          )
           const init = yield* Effect.tryPromise({
-            try: () => plugin(input),
+            try: () => (options ? plugin(input, options) : plugin(input)),
             catch: errorMessage,
           }).pipe(
             Effect.tapError((error) => Effect.logError("failed to load internal plugin", { name: plugin.name, error })),

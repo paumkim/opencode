@@ -127,6 +127,31 @@ export const Info = Schema.Struct({
   layout: Schema.optional(ConfigLayoutV1.Layout).annotate({ description: "@deprecated Always uses stretch layout." }),
   permission: Schema.optional(ConfigPermissionV1.Info),
   tools: Schema.optional(Schema.Record(Schema.String, Schema.Boolean)),
+  /**
+   * Options for built-in ("internal") plugins, keyed by plugin id. Without this surface an
+   * internal plugin's Options type is unreachable, because internal plugins are invoked without a
+   * second argument.
+   */
+  plugin_options: Schema.optional(
+    Schema.Record(
+      Schema.String,
+      Schema.Struct({
+        auto_continue: Schema.optional(Schema.Boolean),
+        defer_while_tasks_active: Schema.optional(Schema.Boolean),
+        allow_goal_execution_from_plan: Schema.optional(Schema.Boolean),
+        max_auto_turns: Schema.optional(Schema.NullOr(Schema.Number)),
+        default_token_budget: Schema.optional(Schema.NullOr(Schema.Number)),
+        max_goal_duration_seconds: Schema.optional(Schema.NullOr(Schema.Number)),
+        min_continue_interval_seconds: Schema.optional(Schema.Number),
+        max_turn_time: Schema.optional(Schema.String),
+        max_prompt_failures: Schema.optional(Schema.Number),
+        no_progress_token_threshold: Schema.optional(Schema.Number),
+        max_no_progress_turns: Schema.optional(Schema.Number),
+        restricted_agents: Schema.optional(Schema.Array(Schema.String)),
+        command_name: Schema.optional(Schema.String),
+      }),
+    ),
+  ).annotate({ description: "Options for built-in plugins, keyed by plugin id" }),
   attachment: Schema.optional(ConfigAttachmentV1.Info).annotate({
     description: "Attachment processing configuration, including image size limits and resizing behavior",
   }),

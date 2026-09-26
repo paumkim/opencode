@@ -1,10 +1,10 @@
-import { readFileSync } from "node:fs"
 import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import { homedir } from "node:os"
 import type {
   AssistantProgressInput,
   CreateGoalOptions,
+  ExtendGoalOptions,
   Goal,
   GoalHistoryType,
   GoalSnapshot,
@@ -13,6 +13,7 @@ import type {
 import {
   GOAL_CHECKPOINT_CHAR_LIMIT,
   GOAL_DEFAULT_MAX_NO_PROGRESS_TURNS,
+  GOAL_DEFAULT_MAX_AUTO_TURNS,
   GOAL_DEFAULT_NO_PROGRESS_TOKEN_THRESHOLD,
   GOAL_HISTORY_LIMIT,
   GOAL_CHECKPOINT_LIMIT,
@@ -50,6 +51,25 @@ function isMissingStateFile(error: unknown) {
   return typeof error === "object" && error !== null && (error as NodeJS.ErrnoException).code === "ENOENT"
 }
 
+/**
+ * Moves an unreadable state file aside so goal state can recover instead of failing forever.
+ * A corrupt/partial file must never permanently disable goals for every session: without this,
+ * the only recovery is manually deleting the file by hand.
+ */
+function quarantineStateFile(reason: string) {
+  const file = statePath()
+  const stamp = Date.now()
+  const target = `${file}.corrupt-${stamp}`
+  rename(file, target).then(
+    () => {
+      console.warn(`[goal] state file was unreadable (${reason}); moved to ${target} and started from empty state`)
+    },
+    () => {
+      console.warn(`[goal] state file was unreadable (${reason}) and could not be moved aside at ${target}`)
+    },
+  )
+}
+
 function mutableState(state: Schema.Schema.Type<typeof StateSchema>): State {
   return JSON.parse(JSON.stringify(state)) as State
 }
@@ -58,7 +78,7 @@ function decodeState(value: unknown) {
   return Schema.decodeUnknownEffect(StateSchema)(value).pipe(
     Effect.map(mutableState),
     Effect.map(normalizeState),
-    Effect.mapError((cause) => new StateReadError({ cause })),
+    Effect.mapError((cause) => new StateDecodeError({ cause })),
   )
 }
 
@@ -74,8 +94,17 @@ function readStateEffect() {
     })
     return yield* decodeState(parsed)
   }).pipe(
+    // A missing file is simply "no goals yet".
     Effect.catchTag("StateReadError", (error) =>
       isMissingStateFile(error.cause) ? Effect.succeed(emptyState()) : Effect.fail(error),
+    ),
+    // A corrupt or schema-violating file is recoverable: quarantine it and start clean rather
+    // than disabling goal state for every session until someone deletes the file by hand.
+    Effect.catchTag("StateDecodeError", (error) =>
+      Effect.suspend(() => {
+        quarantineStateFile("decode failed")
+        return Effect.succeed(emptyState())
+      }),
     ),
   )
 }
@@ -96,16 +125,6 @@ function writeStateEffect(state: State) {
 
 export async function readState(): Promise<State> {
   return Effect.runPromise(readStateEffect())
-}
-
-function readStateSync(): State {
-  try {
-    const raw = readFileSync(statePath(), "utf8")
-    return normalizeState(mutableState(Schema.decodeUnknownSync(StateSchema)(JSON.parse(raw) as unknown)))
-  } catch (error) {
-    if (isMissingStateFile(error)) return emptyState()
-    throw error
-  }
 }
 
 let mutationQueue: Promise<void> = Promise.resolve()
@@ -165,6 +184,15 @@ function normalizeGoal(goal: Goal) {
   goal.continuationBaselineMessageID ??= ""
   goal.continuationBaselineSummary ??= ""
   goal.noProgressTurns = nonNegativeInteger(goal.noProgressTurns, 0)
+  goal.tokensUsed = nonNegativeInteger(goal.tokensUsed, 0)
+  // Every field that participates in arithmetic MUST be normalized here. A missing field would
+  // otherwise produce NaN (e.g. `undefined + 1`), which silently disables guards that compare it
+  // and then serializes to `null` via JSON.stringify, failing decode for every session.
+  goal.continuationFailures = nonNegativeInteger(goal.continuationFailures, 0)
+  goal.autoTurns = nonNegativeInteger(goal.autoTurns, 0)
+  goal.timeUsedSeconds = nonNegativeInteger(goal.timeUsedSeconds, 0)
+  goal.createdAt = nonNegativeInteger(goal.createdAt, 0)
+  goal.updatedAt = nonNegativeInteger(goal.updatedAt, 0)
   goal.maxAutoTurns = positiveIntegerOrNull(goal.maxAutoTurns)
   goal.maxDurationSeconds = positiveIntegerOrNull(goal.maxDurationSeconds)
   goal.tokenBudget = positiveIntegerOrNull(goal.tokenBudget)
@@ -187,8 +215,42 @@ function isClosed(status: Goal["status"]) {
   return status === "complete" || status === "unmet"
 }
 
+/**
+ * Resolves the auto-continue cap actually enforced for a goal. A goal-level `maxAutoTurns` wins;
+ * otherwise the caller's configured default applies. 0 (or less) means unbounded, which is what
+ * "omit or pass null for unlimited" resolves to.
+ */
+function effectiveAutoTurnLimit(goal: Goal, defaultMaxAutoTurns: number) {
+  return goal.maxAutoTurns ?? defaultMaxAutoTurns ?? GOAL_DEFAULT_MAX_AUTO_TURNS
+}
+
+/**
+ * True when the goal has not yet consumed its auto-continue allowance under the SAME limit that
+ * runtime enforcement uses. Extension reactivation must never disagree with enforcement here.
+ */
+function hasAutoTurnHeadroom(goal: Goal, defaultMaxAutoTurns: number) {
+  const limit = effectiveAutoTurnLimit(goal, defaultMaxAutoTurns)
+  return limit <= 0 || goal.autoTurns < limit
+}
+
 function canContinue(status: Goal["status"]) {
   return status === "active"
+}
+
+/**
+ * Shared reactivation bookkeeping. Every path that moves a goal back to `active` must reset the
+ * failure and no-progress counters, otherwise a goal resumed via one path behaves differently
+ * from the same goal resumed via another.
+ */
+function reactivate(goal: Goal) {
+  goal.continuationFailures = 0
+  goal.noProgressTurns = 0
+  goal.awaitingContinuationProgress = false
+  goal.budgetWrapupSent = false
+  // The observed assistant message predates the pause, so it is not a valid progress baseline for
+  // the first turn after resuming. Clear it so the resumed turn is not judged against stale text.
+  goal.continuationBaselineMessageID = ""
+  goal.continuationBaselineSummary = ""
 }
 
 function remainingTokens(goal: Goal) {
@@ -244,12 +306,6 @@ export async function getGoal(sessionID: string) {
   return goal ? snapshot(goal) : null
 }
 
-export function getGoalSync(sessionID: string) {
-  const state = readStateSync()
-  const goal = state.goals[sessionID]
-  return goal ? snapshot(goal) : null
-}
-
 export async function createGoal(
   sessionID: string,
   objective: string,
@@ -270,6 +326,8 @@ export async function createGoal(
       status: normalizedOptions.initialStatus,
       tokenBudget: normalizedOptions.tokenBudget,
       tokensUsed: 0,
+      sessionTokensAtCreation: normalizedOptions.sessionTokensAtCreation ?? undefined,
+      lastSessionTokens: normalizedOptions.sessionTokensAtCreation ?? undefined,
       timeUsedSeconds: 0,
       createdAt: now,
       updatedAt: now,
@@ -317,6 +375,10 @@ export async function updateGoalObjective(
   return mutate((state) => {
     const goal = state.goals[sessionID]
     if (!goal) throw new GoalError({ message: "cannot update goal because this session has no goal" })
+    if (isClosed(goal.status)) throw new GoalError({ message: "cannot reopen a closed goal" })
+    if (status === "active" && (goal.status === "budgetLimited" || goal.status === "usageLimited")) {
+      throw new GoalError({ message: "goal is limited; explicitly extend its limits before resuming" })
+    }
     accountWallClock(goal)
     goal.objective = value
     goal.status = planModePause ? "paused" : status
@@ -326,7 +388,7 @@ export async function updateGoalObjective(
     goal.blocker = planModePause ? "Goal execution is paused while the session is in Plan mode. Switch to Build mode and resume the goal to continue." : null
     goal.closedAt = null
     goal.stopReason = planModePause ? "plan mode" : null
-    goal.budgetWrapupSent = false
+    if (goal.status === "active") reactivate(goal)
     if (agent) goal.lastPromptAgent = agent
     goal.lastStatus = planModePause
       ? "Goal objective updated; execution paused while the session is in Plan mode."
@@ -373,18 +435,98 @@ export async function setGoalStatus(sessionID: string, status: "active" | "pause
   return mutate((state) => {
     const goal = state.goals[sessionID]
     if (!goal) throw new GoalError({ message: "cannot update goal because this session has no goal" })
+    if (isClosed(goal.status)) throw new GoalError({ message: "cannot reopen a closed goal" })
+    if (status === "active" && (goal.status === "budgetLimited" || goal.status === "usageLimited")) {
+      throw new GoalError({ message: "goal is limited; explicitly extend its limits before resuming" })
+    }
+    // A repeated "/goal pause" must not churn history or restate a transition that did not happen.
+    if (goal.status === status) return snapshot(goal)
     accountWallClock(goal)
+    if (status === "active") {
+      // Re-check every limit before reactivating, not just the turn cap, so a goal that has since
+      // exhausted its token budget or duration cannot be resumed and then corrected a turn later.
+      const now = Math.floor(Date.now() / 1000)
+      if (goal.tokenBudget != null && goal.tokensUsed >= goal.tokenBudget) {
+        maybeStopForBudget(goal)
+        throw new GoalError({ message: "goal is limited; explicitly extend its limits before resuming" })
+      }
+      if (goal.maxDurationSeconds != null && goal.timeUsedSeconds >= goal.maxDurationSeconds) {
+        maybeStopForUsageLimit(goal, GOAL_DEFAULT_MAX_AUTO_TURNS, now)
+        throw new GoalError({ message: "goal is limited; explicitly extend its limits before resuming" })
+      }
+    }
     goal.status = status
     goal.updatedAt = Math.floor(Date.now() / 1000)
     goal.lastAccountedAt = status === "active" ? goal.updatedAt : null
-    goal.continuationFailures = status === "active" ? 0 : goal.continuationFailures
-    goal.noProgressTurns = status === "active" ? 0 : goal.noProgressTurns
+    if (status === "active") reactivate(goal)
     goal.stopReason = status === "active" ? null : "paused"
-    goal.budgetWrapupSent = status === "active" ? false : goal.budgetWrapupSent
     goal.blocker = status === "active" ? null : goal.blocker
     if (agentValue) goal.lastPromptAgent = agentValue
     goal.lastStatus = status === "active" ? "Goal resumed." : "Goal paused."
     pushHistory(goal, status === "active" ? "resumed" : "paused", goal.lastStatus)
+    return snapshot(goal)
+  })
+}
+
+export async function extendGoal(
+  sessionID: string,
+  options: ExtendGoalOptions,
+  defaultMaxAutoTurns: number = GOAL_DEFAULT_MAX_AUTO_TURNS,
+) {
+  const fields = [
+    ["tokenBudget", options.tokenBudget],
+    ["maxAutoTurns", options.maxAutoTurns],
+    ["maxDurationSeconds", options.maxDurationSeconds],
+  ] as const
+  if (!fields.some(([, value]) => value !== undefined)) {
+    throw new GoalError({ message: "goal extension must explicitly change at least one limit" })
+  }
+  for (const [name, value] of fields) {
+    if (value === undefined || value === null) continue
+    if (!Number.isSafeInteger(value) || value <= 0) {
+      throw new GoalError({ message: `${name} must be a positive integer or null` })
+    }
+  }
+  return mutate((state) => {
+    const goal = state.goals[sessionID]
+    if (!goal) throw new GoalError({ message: "cannot extend goal because this session has no goal" })
+    if (isClosed(goal.status)) throw new GoalError({ message: "cannot extend a closed goal" })
+    if (goal.status !== "budgetLimited" && goal.status !== "usageLimited") {
+      throw new GoalError({ message: "only a limited goal can be explicitly extended" })
+    }
+    accountWallClock(goal)
+    const changes: string[] = []
+    for (const [name, value] of fields) {
+      if (value === undefined) continue
+      if (value !== null) {
+        const current = goal[name]
+        if (current !== null && value <= current) {
+          throw new GoalError({ message: `${name} extension must be higher than the current limit (${current})` })
+        }
+      }
+      goal[name] = value
+      changes.push(`${name}=${value === null ? "default/no limit" : value}`)
+    }
+    const now = Math.floor(Date.now() / 1000)
+    const eligible =
+      (goal.tokenBudget == null || goal.tokensUsed < goal.tokenBudget) &&
+      (goal.maxDurationSeconds == null || goal.timeUsedSeconds < goal.maxDurationSeconds) &&
+      hasAutoTurnHeadroom(goal, defaultMaxAutoTurns)
+    if (eligible) {
+      goal.status = "active"
+      goal.lastAccountedAt = now
+      goal.stopReason = null
+      goal.blocker = null
+      reactivate(goal)
+      goal.lastContinuationAt = null
+      goal.continuationBaselineMessageID = ""
+      goal.continuationBaselineSummary = ""
+      goal.lastStatus = "Goal limits extended; execution reactivated."
+    } else {
+      goal.lastStatus = "Goal limits extended, but cumulative usage still exceeds a limit."
+    }
+    goal.updatedAt = now
+    pushHistory(goal, "extended", `Goal limits extended (${changes.join(", ")}); ${goal.lastStatus}`)
     return snapshot(goal)
   })
 }
@@ -398,6 +540,7 @@ export async function closeGoal(
   return mutate((state) => {
     const goal = state.goals[sessionID]
     if (!goal) throw new GoalError({ message: "cannot update goal because this session has no goal" })
+    if (isClosed(goal.status)) throw new GoalError({ message: "cannot close a goal that is already closed" })
     accountWallClock(goal)
     const now = Math.floor(Date.now() / 1000)
     goal.status = input.status
@@ -439,10 +582,27 @@ export async function clearGoal(sessionID: string) {
 export async function accountUsage(sessionID: string, tokensUsed?: number) {
   return mutate((state) => {
     const goal = state.goals[sessionID]
-    if (!goal) return null
+    // Closed goals are immutable: a completion audit must report stable, reproducible numbers.
+    if (!goal || isClosed(goal.status)) return goal ? snapshot(goal) : null
     accountWallClock(goal)
     if (typeof tokensUsed === "number" && Number.isFinite(tokensUsed)) {
-      goal.tokensUsed = Math.max(goal.tokensUsed, Math.max(0, Math.ceil(tokensUsed)))
+      const cumulative = Math.max(0, Math.ceil(tokensUsed))
+      if (goal.lastSessionTokens != null) {
+        // Session totals can fall after compaction. Keep goal usage monotonic and charge only
+        // positive growth since the latest observed total.
+        goal.tokensUsed += Math.max(0, cumulative - goal.lastSessionTokens)
+        goal.lastSessionTokens = cumulative
+      } else if (goal.sessionTokensAtCreation == null) {
+        // If creation-time usage was unavailable, anchor a new zero-usage goal now. For a legacy
+        // goal, preserve its already-accounted usage while establishing the same cursor.
+        goal.sessionTokensAtCreation = cumulative
+        goal.lastSessionTokens = cumulative
+        if (goal.tokensUsed !== 0) goal.tokensUsed = Math.max(goal.tokensUsed, cumulative)
+      } else {
+        // The creation total was persisted but the observation cursor was not.
+        goal.tokensUsed += Math.max(0, cumulative - goal.sessionTokensAtCreation)
+        goal.lastSessionTokens = cumulative
+      }
     }
     maybeStopForBudget(goal)
     goal.updatedAt = Math.floor(Date.now() / 1000)
@@ -476,7 +636,10 @@ export async function recordAssistantProgress(sessionID: string, input: Assistan
       messageID !== goal.continuationBaselineMessageID
     if (continuationTurnCompleted) {
       goal.awaitingContinuationProgress = false
-      const lowOutput = outputTokens > 0 && outputTokens < (threshold ?? GOAL_DEFAULT_NO_PROGRESS_TOKEN_THRESHOLD)
+      // A turn that produced no output at all is the most degenerate no-progress case, so it must
+      // NOT be scored as progress. Previously `outputTokens > 0 &&` made a zero-token turn reset
+      // the counter, silently disabling stall detection for providers that report no step tokens.
+      const lowOutput = outputTokens < (threshold ?? GOAL_DEFAULT_NO_PROGRESS_TOKEN_THRESHOLD)
       const changedSinceContinuation = Boolean(summary && summary !== goal.continuationBaselineSummary)
       if (lowOutput && !changedSinceContinuation) {
         goal.noProgressTurns += 1
@@ -541,7 +704,10 @@ export async function recordContinuationResult(sessionID: string, result: "succe
     goal.awaitingContinuationProgress = false
     goal.lastStatus = `Auto-continue failed ${goal.continuationFailures} time(s).`
     pushHistory(goal, "error", goal.lastStatus)
-    if (goal.continuationFailures >= maxFailures) {
+    // Only an ACTIVE goal may be auto-paused here. A limited goal must keep its limited status and
+    // its stopReason: rewriting it to `paused` would bypass the "extend before resuming" guard,
+    // because setGoalStatus only rejects budgetLimited/usageLimited.
+    if (goal.continuationFailures >= maxFailures && goal.status === "active") {
       accountWallClock(goal, now)
       goal.status = "paused"
       goal.lastAccountedAt = null
@@ -575,7 +741,7 @@ function maybeStopForBudget(goal: Goal) {
 
 function maybeStopForUsageLimit(goal: Goal, defaultMaxAutoTurns: number, now = Math.floor(Date.now() / 1000)) {
   if (goal.status !== "active") return false
-  const effectiveMaxAutoTurns = goal.maxAutoTurns ?? defaultMaxAutoTurns
+  const effectiveMaxAutoTurns = effectiveAutoTurnLimit(goal, defaultMaxAutoTurns)
   if (effectiveMaxAutoTurns > 0 && goal.autoTurns >= effectiveMaxAutoTurns) {
     goal.status = "usageLimited"
     goal.lastAccountedAt = null
@@ -608,7 +774,10 @@ function accountWallClock(goal: Goal, now = Math.floor(Date.now() / 1000)) {
 
 function recordCheckpoint(goal: Goal, summary: string) {
   const checkpoint = { summary: summarizeText(summary), timestamp: Math.floor(Date.now() / 1000) }
-  if (!checkpoint.summary || goal.lastCheckpoint?.summary === checkpoint.summary) return
+  if (!checkpoint.summary) return
+  // Dedupe against the whole retained window, not just the latest checkpoint, so an A→B→A
+  // oscillation does not spend the checkpoint and history budgets on a repeat.
+  if (goal.checkpoints.some((existing) => existing.summary === checkpoint.summary)) return
   goal.lastCheckpoint = checkpoint
   goal.checkpoints = [...goal.checkpoints, checkpoint].slice(-GOAL_CHECKPOINT_LIMIT)
   pushHistory(goal, "checkpoint", checkpoint.summary)
@@ -632,17 +801,27 @@ function goalLimitSummary(goal: Goal) {
     goal.maxAutoTurns == null ? null : `${goal.maxAutoTurns} auto-continue limit`,
     goal.maxDurationSeconds == null ? null : `${goal.maxDurationSeconds}s duration limit`,
   ].filter(Boolean)
-  return limits.length ? `Goal set with ${limits.join(", ")}.` : "Goal set with default continuation limits."
+  return limits.length ? `Goal set with ${limits.join(", ")}.` : "Goal set with no limits (unlimited tokens, turns, and duration)."
 }
 
 export function estimateTokensFromText(text: string) {
   return Math.ceil(text.length / 4)
 }
 
+/**
+ * Escapes untrusted text before it is interpolated into a prompt. Model-authored fields
+ * (objective, blocker, evidence, lastStatus, stopReason) all reach prompt templates, so escaping
+ * must be applied consistently rather than on only one of the paths that embed them.
+ */
+export function escapePromptText(input: string) {
+  return input.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
+}
+
 export function formatGoal(goal: GoalSnapshot | null) {
   if (!goal) return "No goal is set for this session."
+  const safe = escapePromptText
   const lines = [
-    `Objective: ${goal.objective}`,
+    `Objective: ${safe(goal.objective)}`,
     `Status: ${goal.status}`,
     `Time used: ${goal.timeUsedSeconds}s`,
     `Tokens used: ${goal.tokensUsed}${goal.tokenBudget == null ? "" : `/${goal.tokenBudget}`}`,
@@ -651,11 +830,11 @@ export function formatGoal(goal: GoalSnapshot | null) {
   if (goal.remainingTokens != null) lines.push(`Tokens remaining: ${goal.remainingTokens}`)
   if (goal.maxDurationSeconds != null) lines.push(`Duration limit: ${goal.maxDurationSeconds}s`)
   if (goal.noProgressTurns > 0) lines.push(`No-progress turns: ${goal.noProgressTurns}`)
-  if (goal.lastCheckpoint) lines.push(`Latest checkpoint: ${goal.lastCheckpoint.summary}`)
-  if (goal.lastStatus) lines.push(`Last status: ${goal.lastStatus}`)
-  if (goal.stopReason) lines.push(`Stop reason: ${goal.stopReason}`)
-  if (goal.completionEvidence) lines.push(`Completion evidence: ${goal.completionEvidence}`)
-  if (goal.blocker) lines.push(`Blocker: ${goal.blocker}`)
+  if (goal.lastCheckpoint) lines.push(`Latest checkpoint: ${safe(goal.lastCheckpoint.summary)}`)
+  if (goal.lastStatus) lines.push(`Last status: ${safe(goal.lastStatus)}`)
+  if (goal.stopReason) lines.push(`Stop reason: ${safe(goal.stopReason)}`)
+  if (goal.completionEvidence) lines.push(`Completion evidence: ${safe(goal.completionEvidence)}`)
+  if (goal.blocker) lines.push(`Blocker: ${safe(goal.blocker)}`)
   return lines.join("\n")
 }
 
@@ -675,6 +854,7 @@ function normalizeCreateOptions(input?: number | null | CreateGoalOptions): Requ
       maxNoProgressTurns: GOAL_DEFAULT_MAX_NO_PROGRESS_TURNS,
       agent: null,
       initialStatus: "active",
+      sessionTokensAtCreation: null,
     }
   }
   return {
@@ -685,5 +865,9 @@ function normalizeCreateOptions(input?: number | null | CreateGoalOptions): Requ
     maxNoProgressTurns: positiveIntegerOrNull(input?.maxNoProgressTurns) ?? GOAL_DEFAULT_MAX_NO_PROGRESS_TURNS,
     agent: typeof input?.agent === "string" && input.agent.trim() ? input.agent.trim() : null,
     initialStatus: input?.initialStatus === "paused" ? "paused" : "active",
+    sessionTokensAtCreation:
+      typeof input?.sessionTokensAtCreation === "number" && Number.isSafeInteger(input.sessionTokensAtCreation)
+        ? Math.max(0, input.sessionTokensAtCreation)
+        : null,
   }
 }

@@ -1,0 +1,22 @@
+OpenCode goal mode command "/goal" was invoked.
+
+Arguments:
+<goal_command_arguments>
+$ARGUMENTS
+</goal_command_arguments>
+
+Use the goal tools to handle this command:
+
+- If the arguments are empty, call get_goal and briefly report the current goal state.
+- If the arguments are "status", "show", or "current", call get_goal and briefly report the current goal state.
+- If the arguments are "history", call get_goal_history and briefly report the current goal history.
+- If the arguments are "clear", "stop", "off", "reset", "none", or "cancel", call clear_goal and report whether a goal was cleared.
+- If the arguments are "pause", pause the current goal by calling update_goal_status with status "paused" and report the result.
+- If the arguments are "resume", resume a paused goal by calling update_goal_status with status "active" and continue working toward it. A limited goal must be extended first; do not claim resume bypasses a limit.
+- If the arguments start with "extend ", explicitly extend a limited goal by calling extend_goal with the higher limits named in the arguments. Pass null for every limit the user did not name, so an extended goal is unlimited unless the user gives real numbers. Extending reactivates the goal only when the new limits actually admit its recorded usage; if it reports that usage still exceeds a limit, tell the user which limit is still exhausted instead of claiming the goal resumed.
+- If the arguments start with "edit ", update the current goal objective by calling update_goal_objective with the remaining text.
+- If the arguments start with "complete " or "done ", perform a completion audit against real artifacts and command output. Call update_goal with status "complete" only if the goal is achieved, using concise evidence from the audit.
+- If the arguments start with "unmet ", "blocked ", or "blocker ", call update_goal with status "unmet" only when the goal cannot be achieved or needs external input, using the remaining arguments as the blocker.
+- Otherwise, create a new goal with create_goal. Use the full arguments as the objective. Goals are unlimited by default: when the user does not name explicit numbers, pass token_budget: null, max_auto_turns: null, and max_duration_seconds: null to create_goal, where null means no cap at all. Only pass a number for a limit the user actually asked for; if the user includes explicit budget instructions in words, pass the matching limit to create_goal rather than leaving those words in the objective. If the user asks you to formulate the goal yourself rather than giving you the wording, use set_goal instead.
+
+Create a goal only from these explicit command arguments. Do not infer a goal from unrelated session context. After create_goal succeeds, continue working toward the new goal.
