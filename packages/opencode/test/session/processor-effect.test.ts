@@ -27,7 +27,8 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
-import { LLMEvent } from "@opencode-ai/llm"
+import { LLMEvent, Usage } from "@opencode-ai/llm"
+import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 
 const summary = Layer.succeed(
   SessionSummary.Service,
@@ -177,6 +178,9 @@ const root = LayerNode.group([
   EventV2Bridge.node,
   SessionStatus.node,
   CrossSpawnSpawner.node,
+  // Exposed so a test can answer a permission ask the processor raises, which is the only
+  // observable signal that the doom-loop detector fired.
+  Permission.node,
 ])
 const replacements = [
   [SessionSummary.node, summary],
@@ -391,6 +395,22 @@ function textTurn(text: string): LLMEvent[] {
   ]
 }
 
+// A text block that streams real bytes and then goes quiet. Providers emit empty text deltas for
+// keep-alives, role-only chunks, and tool-call chunks interleaved into a text block, and neither
+// the AI SDK adapter nor the native lifecycle filters them out.
+function stalledTextTurn(text: string): LLMEvent[] {
+  return [
+    LLMEvent.stepStart({ index: 0 }),
+    LLMEvent.textStart({ id: "text-1" }),
+    LLMEvent.textDelta({ id: "text-1", text }),
+    LLMEvent.textDelta({ id: "text-1", text: "" }),
+    LLMEvent.textDelta({ id: "text-1", text: "" }),
+    LLMEvent.textEnd({ id: "text-1" }),
+    LLMEvent.stepFinish({ index: 0, reason: "stop" }),
+    LLMEvent.finish({ reason: "stop" }),
+  ]
+}
+
 function toolTurn(name: string, input: Record<string, unknown>): LLMEvent[] {
   return [
     LLMEvent.stepStart({ index: 0 }),
@@ -400,6 +420,23 @@ function toolTurn(name: string, input: Record<string, unknown>): LLMEvent[] {
     LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }),
     LLMEvent.finish({ reason: "tool-calls" }),
   ]
+}
+
+// One turn that calls the same tool several times. The doom-loop detector compares the last
+// DOOM_LOOP_THRESHOLD parts of the CURRENT assistant message, so all the calls have to be in a
+// single turn for it to fire.
+function repeatedToolTurn(name: string, inputs: Record<string, unknown>[]): LLMEvent[] {
+  const events: LLMEvent[] = [LLMEvent.stepStart({ index: 0 })]
+  for (const [index, input] of inputs.entries()) {
+    const id = `call-${index}`
+    events.push(
+      LLMEvent.toolInputStart({ id, name }),
+      LLMEvent.toolInputEnd({ id, name }),
+      LLMEvent.toolCall({ id, name, input, providerExecuted: false }),
+    )
+  }
+  events.push(LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }), LLMEvent.finish({ reason: "tool-calls" }))
+  return events
 }
 
 const boot = Effect.fn("test.boot")(function* () {
@@ -1487,6 +1524,118 @@ itNoEdit.instance(
   { config: cfg },
 )
 
+itNoEdit.instance(
+  "session.processor counts the no-edit streak across the per-step handles the loop really creates",
+  () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const { processors, session, provider } = yield* boot()
+
+      const chat = yield* session.create({})
+      const parent = yield* user(chat.id, "no edit loop across handles")
+      const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+
+      const input = {
+        user: {
+          id: parent.id,
+          sessionID: chat.id,
+          role: "user" as const,
+          time: parent.time,
+          agent: parent.agent,
+          model: { providerID: ref.providerID, modelID: ref.modelID },
+        } satisfies SessionV1.User,
+        sessionID: chat.id,
+        model: mdl,
+        agent: agent(),
+        system: [],
+        messages: [{ role: "user" as const, content: "no edit loop" }],
+        tools: {},
+      }
+
+      // The step loop calls `create()` INSIDE its `while (true)`, so every step is a FRESH handle
+      // with a fresh `ctx`. `noEditStreak` therefore resets to 0 on every step in production and
+      // can only ever report 0 or 1 - the cross-turn streak its name, the `no_edit` loop reason and
+      // `specs/subagent-failover.md` all describe is unreachable. The three sibling repetition
+      // detectors were hoisted out of `ctx` for exactly this reason (see the comment above
+      // `textLoop`); this one was left behind.
+      //
+      // The test above instead drives one handle through three `process()` calls, a shape the loop
+      // never produces, so it observed a streak of 2 while the production value stayed at 1.
+      const streaks: number[] = []
+      const reasons: string[] = []
+      for (const label of ["first", "second", "third"]) {
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(test.directory))
+        const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: mdl })
+        // Distinct text per step: repeated text would trip the runaway detector and abort the
+        // turn, which would hide the streak this test is about.
+        pushLLM(textTurn(`reading files ${label}`))
+        const result = yield* handle.process(input)
+        streaks.push(result.noEditStreak)
+        reasons.push(handle.loopReason)
+      }
+
+      expect(streaks).toEqual([1, 2, 3])
+      // No edit-free streak is a loop on its own: read-only investigation, planning and research
+      // are all legitimate consecutive turns, and aborting here would break them. A reason is
+      // therefore never invented for a healthy turn.
+      expect(reasons).toEqual(["none", "none", "none"])
+    }),
+  { config: cfg },
+)
+
+
+itNoEdit.instance(
+  "session.processor runaway text detection does not fire on a stream that stalls without repeating",
+  () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const { processors, session, provider } = yield* boot()
+
+      const chat = yield* session.create({})
+      const parent = yield* user(chat.id, "stalled stream")
+      const msg = yield* assistant(chat.id, parent.id, path.resolve(test.directory))
+      const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+      const handle = yield* processors.create({
+        assistantMessage: msg,
+        sessionID: chat.id,
+        model: mdl,
+      })
+
+      const input = {
+        user: {
+          id: parent.id,
+          sessionID: chat.id,
+          role: "user" as const,
+          time: parent.time,
+          agent: parent.agent,
+          model: { providerID: ref.providerID, modelID: ref.modelID },
+        } satisfies SessionV1.User,
+        sessionID: chat.id,
+        model: mdl,
+        agent: agent(),
+        system: [],
+        messages: [{ role: "user" as const, content: "stalled stream" }],
+        tools: {},
+      }
+
+      // The cumulative text is identical across the two empty deltas, but the model is not
+      // repeating itself - it has stopped producing bytes. The detector is about repeated OUTPUT,
+      // so an empty delta carries no evidence of repetition and must not be counted as one.
+      // Before the fix this aborted a healthy turn, discarding its output and forcing a retry.
+      pushLLM(stalledTextTurn("real work happened"))
+      expect(yield* handle.process(input)).toEqual({ result: "continue", noEditStreak: 1, runaway: false })
+      expect(handle.loopDetected).toBe(false)
+      expect(handle.message.error).toBeUndefined()
+
+      const parts = yield* MessageV2.parts(msg.id)
+      expect(parts.filter((part) => part.type === "text").map((part) => part.text)).toEqual([
+        "real work happened",
+      ])
+      expect(parts.filter((part) => part.type === "step-finish")).toHaveLength(1)
+    }),
+  { config: cfg },
+)
+
 const reasoningQueues: LLMEvent[][] = []
 function pushReasoningLLM(events: LLMEvent[]) {
   reasoningQueues.push(events)
@@ -1904,6 +2053,282 @@ itNoEdit.instance(
 
       expect(value.result).toBe("continue")
       expect(handle.loopDetected).toBe(false)
+    }),
+  { config: cfg },
+)
+
+itNoEdit.instance(
+  "session.processor doom-loop detection is not defeated by tool-argument key order",
+  () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const { processors, session, provider } = yield* boot()
+      const events = yield* EventV2Bridge.Service
+      const permission = yield* Permission.Service
+
+      // Answer every doom_loop ask so the turn is never left waiting on a permission nobody replies
+      // to, and count them so the detector itself is observable.
+      let asks = 0
+      const release = yield* events.listen((event) => {
+        if (event.type !== Permission.Event.Asked.type) return Effect.void
+        const info = event.data as { id: PermissionV1.ID; permission: string }
+        if (info.permission !== "doom_loop") return Effect.void
+        asks += 1
+        // orDie, not ignore: a failed reply leaves the turn blocked on the permission deferred
+        // forever, so surfacing it as a defect beats a silent hang.
+        return permission.reply({ requestID: info.id, reply: "once" }).pipe(Effect.orDie)
+      })
+      yield* Effect.addFinalizer(() => release)
+
+      const run = (inputs: Record<string, unknown>[]) => {
+        pushLLM(repeatedToolTurn("write", inputs))
+        return handle.process(input)
+      }
+
+      const chat = yield* session.create({})
+      const parent = yield* user(chat.id, "loop please")
+      const msg = yield* assistant(chat.id, parent.id, path.resolve(test.directory))
+      const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+      const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: mdl })
+
+      const input = {
+        user: {
+          id: parent.id,
+          sessionID: chat.id,
+          role: "user" as const,
+          time: parent.time,
+          agent: parent.agent,
+          model: { providerID: ref.providerID, modelID: ref.modelID },
+        } satisfies SessionV1.User,
+        sessionID: chat.id,
+        model: mdl,
+        agent: agent(),
+        system: [],
+        messages: [{ role: "user" as const, content: "loop please" }],
+        tools: {},
+      }
+
+      // Control: three byte-identical calls. The detector must ask, which proves the harness is
+      // wired to observe it. Note the doom path does not set `loopDetected` - it asks for permission
+      // and lets the answer decide - so the ask itself is the signal.
+      yield* run([{ path: "a.txt", content: "x" }, { path: "a.txt", content: "x" }, { path: "a.txt", content: "x" }])
+      expect(asks).toBe(1)
+
+      // Now the same call three times with the object keys in a different order - which is a real
+      // shape, because a provider re-serializes its tool arguments and key order is not stable
+      // across turns. The detector compared `JSON.stringify(input)`, so the reordered calls never
+      // compared equal and the loop went unnoticed: an unattended run could re-run the same failing
+      // tool call forever without ever being told to stop.
+      asks = 0
+      const reordered = yield* processors.create({
+        assistantMessage: yield* assistant(chat.id, parent.id, path.resolve(test.directory)),
+        sessionID: chat.id,
+        model: mdl,
+      })
+      pushLLM(
+        repeatedToolTurn("write", [
+          { path: "a.txt", content: "x" },
+          { content: "x", path: "a.txt" },
+          { content: "x", path: "a.txt" },
+        ]),
+      )
+      yield* reordered.process(input)
+      expect(asks).toBe(1)
+
+      // Boundary: canonicalization must sort object KEYS only. Array order carries meaning, so
+      // reordered array elements are genuinely different calls and must not be reported as a loop.
+      asks = 0
+      const arrays = yield* processors.create({
+        assistantMessage: yield* assistant(chat.id, parent.id, path.resolve(test.directory)),
+        sessionID: chat.id,
+        model: mdl,
+      })
+      pushLLM(
+        repeatedToolTurn("write", [
+          { path: "a.txt", steps: ["one", "two"] },
+          { steps: ["two", "one"], path: "a.txt" },
+          { steps: ["two", "one"], path: "a.txt" },
+        ]),
+      )
+      yield* arrays.process(input)
+      expect(asks).toBe(0)
+    }),
+  { config: cfg },
+)
+
+// A turn whose tool takes real time to return: the tool result lands well after the tool call.
+// `selfWatch` reports the session STALLED once `experimental.stall_threshold` seconds pass with no
+// progress event, so this is the shape that exposes a gap in the stall-timer reset list.
+const slowToolLLM = Layer.succeed(
+  LLM.Service,
+  LLM.Service.of({
+    stream: () =>
+      Stream.fromIterable([
+        LLMEvent.stepStart({ index: 0 }),
+        LLMEvent.textStart({ id: "text-1" }),
+        LLMEvent.textDelta({ id: "text-1", text: "working" }),
+        LLMEvent.textEnd({ id: "text-1" }),
+        LLMEvent.toolInputStart({ id: "call-1", name: "read" }),
+        LLMEvent.toolInputEnd({ id: "call-1", name: "read" }),
+        LLMEvent.toolCall({ id: "call-1", name: "read", input: { filePath: "a.txt" }, providerExecuted: true }),
+      ]).pipe(
+        Stream.concat(
+          Stream.fromEffect(
+            Effect.sleep("3 seconds").pipe(
+              Effect.as(
+                LLMEvent.toolResult({
+                  id: "call-1",
+                  name: "read",
+                  result: { type: "text", value: "contents" },
+                  providerExecuted: true,
+                }),
+              ),
+            ),
+          ),
+        ),
+        Stream.concat(Stream.make(LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }), LLMEvent.finish({ reason: "tool-calls" }))),
+      ),
+  }),
+)
+const slowToolEnv = LayerNode.compile(root, [...replacements, [LLM.node, slowToolLLM]])
+const itSlowTool = testEffect(slowToolEnv)
+
+itSlowTool.instance(
+  "session.processor a tool completing counts as turn progress, not a stall",
+  () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const { processors, session, provider } = yield* boot()
+
+      const chat = yield* session.create({})
+      const parent = yield* user(chat.id, "run a slow tool")
+      const msg = yield* assistant(chat.id, parent.id, path.resolve(test.directory))
+      const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+      const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: mdl })
+
+      yield* handle.process({
+        user: parent, sessionID: chat.id, model: mdl, agent: agent(), system: [],
+        messages: [{ role: "user", content: "run a slow tool" }], tools: {},
+      })
+
+      // A tool that takes a minute - a build, a test run - emits no deltas while it runs, so the
+      // stall timer must be reset by the tool RESULT landing. The reset list covered every
+      // progress event except `tool-result`/`tool-error`, so a legitimately working session was
+      // reported STALLED for the whole duration of a long tool - exactly the unattended build the
+      // detector exists to let through.
+      const results = yield* handle.watch()
+      expect(results.length).toBeGreaterThan(0)
+      expect(results.map((result) => result.status)).not.toContain("STALLED")
+    }),
+  // `stall_threshold` must be a positive int, so it is 1 and the tool sleeps 3s: the unfixed
+  // `lastDelta` is 3s stale, which floors to 3 and trips the threshold, while the fixed one is
+  // reset by the tool result and floors to 0. The assertion is about the reset list, not timing.
+  { config: { ...cfg, experimental: { stall_threshold: 1 } } as never },
+)
+
+// Control for the test above: a turn that produces no progress event at all must still be reported
+// stalled, so that test cannot pass just because the Watcher stopped reporting stalls.
+const silentLLM = Layer.succeed(
+  LLM.Service,
+  LLM.Service.of({
+    stream: () =>
+      Stream.make(LLMEvent.stepStart({ index: 0 }), LLMEvent.stepFinish({ index: 0, reason: "stop" }), LLMEvent.finish({ reason: "stop" })),
+  }),
+)
+const silentEnv = LayerNode.compile(root, [...replacements, [LLM.node, silentLLM]])
+const itSilent = testEffect(silentEnv)
+
+itSilent.instance(
+  "session.processor a turn that produces nothing at all is still reported stalled",
+  () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const { processors, session, provider } = yield* boot()
+
+      const chat = yield* session.create({})
+      const parent = yield* user(chat.id, "say nothing")
+      const msg = yield* assistant(chat.id, parent.id, path.resolve(test.directory))
+      const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+      const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: mdl })
+
+      // A prior text part on the message, so `hasContent` is satisfied and the only thing that can
+      // make this STALLED is the elapsed time.
+      yield* session.updatePart({
+        id: PartID.ascending(), messageID: msg.id, sessionID: chat.id, type: "text", text: "prior content",
+      })
+
+      yield* handle.process({
+        user: parent, sessionID: chat.id, model: mdl, agent: agent(), system: [],
+        messages: [{ role: "user", content: "say nothing" }], tools: {},
+      })
+      // 2.5s so `Math.floor((now - lastDelta) / 1000)` is 2 and clears the threshold of 1.
+      yield* Effect.sleep("2500 millis")
+
+      const results = yield* handle.watch()
+      expect(results.length).toBeGreaterThan(0)
+      expect(results.map((result) => result.status)).toContain("STALLED")
+    }),
+  { config: { ...cfg, experimental: { stall_threshold: 1 } } as never },
+)
+
+// A turn with two provider steps: the normal shape for a tool-calling agent, where step 1 issues a
+// tool call and step 2 delivers the answer. `cost` is summed across steps on the message, so the
+// token fields must be too.
+function twoStepTurn(name: string, first: Usage, second: Usage): LLMEvent[] {
+  return [
+    LLMEvent.stepStart({ index: 0 }),
+    LLMEvent.textStart({ id: "text-1" }),
+    LLMEvent.textDelta({ id: "text-1", text: "working" }),
+    LLMEvent.textEnd({ id: "text-1" }),
+    LLMEvent.toolInputStart({ id: "call-1", name }),
+    LLMEvent.toolInputEnd({ id: "call-1", name }),
+    LLMEvent.toolCall({ id: "call-1", name, input: { filePath: "a.txt" }, providerExecuted: true }),
+    LLMEvent.stepFinish({ index: 0, reason: "tool-calls", usage: first }),
+    LLMEvent.toolResult({ id: "call-1", name, result: { type: "text", value: "contents" }, providerExecuted: true }),
+    LLMEvent.stepStart({ index: 1 }),
+    LLMEvent.textStart({ id: "text-2" }),
+    LLMEvent.textDelta({ id: "text-2", text: "done" }),
+    LLMEvent.textEnd({ id: "text-2" }),
+    LLMEvent.stepFinish({ index: 1, reason: "stop", usage: second }),
+    LLMEvent.finish({ reason: "stop" }),
+  ]
+}
+
+itNoEdit.instance(
+  "session.processor a multi-step message reports the sum of its steps' tokens, not the last one",
+  () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const { processors, session, provider } = yield* boot()
+
+      const chat = yield* session.create({})
+      const parent = yield* user(chat.id, "two steps")
+      const msg = yield* assistant(chat.id, parent.id, path.resolve(test.directory))
+      const base = yield* provider.getModel(ref.providerID, ref.modelID)
+      // A non-zero price so the cost side is observable too.
+      const mdl = { ...base, cost: { input: 1_000_000, output: 2_000_000, cache: { read: 0, write: 0 } } }
+      const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: mdl })
+
+      const first = new Usage({ inputTokens: 1_000, outputTokens: 100, totalTokens: 1_100 })
+      const second = new Usage({ inputTokens: 1_200, outputTokens: 300, totalTokens: 1_500 })
+      pushLLM(twoStepTurn("read", first, second))
+
+      yield* handle.process({
+        user: parent, sessionID: chat.id, model: mdl, agent: agent(), system: [],
+        messages: [{ role: "user", content: "two steps" }], tools: {},
+      })
+
+      // The consumer contract: `session.ts` writes these per message to tokens_input/tokens_output
+      // columns, `cli/cmd/stats.ts` accumulates them per message into model usage, and
+      // `acp/usage.ts` recomputes totalTokens from them. Reporting only the last step under-reports
+      // every multi-step turn in all three, while `cost` - summed on the very next line - is right.
+      expect(handle.message.tokens.input).toBe(2_200)
+      expect(handle.message.tokens.output).toBe(400)
+      expect(handle.message.tokens.total).toBe(2_600)
+      // Control: the cost of both steps was ALREADY accumulated, which is what makes the
+      // asymmetry above a bug rather than a choice. Price is per million tokens:
+      // step 1 = 1000*1 + 100*2 = 1200, step 2 = 1200*1 + 300*2 = 1800.
+      expect(handle.message.cost).toBeCloseTo(3_000, 6)
     }),
   { config: cfg },
 )

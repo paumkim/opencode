@@ -66,6 +66,32 @@ describe("session.retry.delay", () => {
     expect(d).toBeLessThanOrEqual(20000)
   })
 
+  test("a negative retry hint can never produce a negative delay", () => {
+    // Both numeric header paths passed the parsed value straight through to `cap`, which only had
+    // an upper bound. `Retry-After-Ms: -5000` therefore yielded -5000 and `Retry-After: -30`
+    // yielded -30000. `policy` then publishes `next: now + wait` - a retry time already in the past
+    // - and schedules `Duration.millis(wait)` with a negative duration, so the backoff collapsed to
+    // nothing and the rate-limited provider was hit immediately, up to RETRY_MAX_RETRIES times. The
+    // HTTP-date path already refused a past date (`parsed > 0`); these two did not, so one
+    // malformed header was enough to defeat the backoff entirely.
+    expect(SessionRetry.delay(1, apiError({ "retry-after-ms": "-5000" }))).toBe(0)
+    expect(SessionRetry.delay(1, apiError({ "retry-after": "-30" }))).toBe(0)
+    // ...including when the negative hint sits alongside a legitimate one: the explicit millisecond
+    // header wins the lookup, so a negative value there must not fall through to the other branch.
+    expect(SessionRetry.delay(1, apiError({ "retry-after-ms": "-1", "retry-after": "5" }))).toBe(0)
+    // Sub-millisecond and malformed values are likewise floored, never passed through.
+    expect(SessionRetry.delay(1, apiError({ "retry-after-ms": "-0.5" }))).toBe(0)
+    expect(SessionRetry.delay(1, apiError({ "retry-after-ms": "-Infinity" }))).toBe(0)
+  })
+
+  test("a zero retry hint stays a legitimate immediate retry", () => {
+    // The lower bound must not turn "retry now" into a wait. `Retry-After: 0` is a real instruction,
+    // and the exponential fallback is not always an acceptable substitute for a provider that is
+    // telling us precisely when it will be ready.
+    expect(SessionRetry.delay(1, apiError({ "retry-after-ms": "0" }))).toBe(0)
+    expect(SessionRetry.delay(1, apiError({ "retry-after": "0" }))).toBe(0)
+  })
+
   test("ignores invalid retry hints", () => {
     const error = apiError({ "retry-after": "not-a-number" })
     expect(SessionRetry.delay(1, error, 0)).toBe(2000)

@@ -41,8 +41,23 @@ const RETRYABLE_MESSAGE_PATTERNS = [
   /\[stealth\]|stealth\/|union-alpha|rate-limited upstream|temporarily|capacity/i,
 ]
 
+/**
+ * Clamps a provider-supplied wait into `[0, RETRY_MAX_DELAY]`.
+ *
+ * The upper bound is what `setTimeout` needs. The lower bound is a correctness requirement: the
+ * header paths pass the parsed value straight through, and a provider (or an intermediary) that
+ * sends a negative `Retry-After` / `Retry-After-Ms` otherwise produces a NEGATIVE delay. That
+ * publishes a retry status whose `next` is already in the past and schedules a negative duration,
+ * so the backoff collapses to nothing and the rate-limited provider is hammered immediately - the
+ * exact opposite of what the header asked for. The HTTP-date path already rejected a past date
+ * explicitly; these two did not, so a single malformed header was enough.
+ *
+ * Zero is deliberately still allowed: `Retry-After: 0` is a legitimate "retry now", and it is
+ * also what an unparseable value must fall back to rather than to a negative number.
+ */
 function cap(ms: number) {
-  return Math.min(ms, RETRY_MAX_DELAY)
+  if (!Number.isFinite(ms)) return 0
+  return Math.max(0, Math.min(ms, RETRY_MAX_DELAY))
 }
 
 export function delay(attempt: number, error?: SessionV1.APIError, random = Math.random()) {

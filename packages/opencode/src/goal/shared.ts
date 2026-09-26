@@ -1,7 +1,7 @@
 import { createOpencodeClient } from "@opencode-ai/sdk"
 import type { Plugin } from "@opencode-ai/plugin"
 import { Effect } from "effect"
-import { estimateTokensFromText } from "@/goal/impl"
+import { positiveIntegerOrNull } from "@/goal/schema"
 import { ServerAuth } from "@/server/auth"
 
 export type Client = Parameters<Plugin>[0]["client"]
@@ -69,10 +69,6 @@ export function restrictedAgentSet(options?: Options) {
   return new Set(names.map((name) => (typeof name === "string" ? name.trim().toLowerCase() : "")).filter(Boolean))
 }
 
-export function positiveIntegerOrNull(value: unknown) {
-  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null
-}
-
 export function resolveCreateGoalLimits(input: CreateGoalArgs, options?: Options) {
   return {
     tokenBudget: Object.hasOwn(input, "token_budget")
@@ -121,10 +117,6 @@ export function textFromMessage(message: { parts?: unknown[] }) {
   return (message.parts ?? []).map(textFromPart).filter(Boolean).join("\n").trim()
 }
 
-function estimateMessages(messages: { parts?: unknown[] }[]) {
-  return messages.reduce<number>((sum, message) => sum + estimateTokensFromText(textFromMessage(message)), 0)
-}
-
 function tokensFromRecord(value: unknown): number | undefined {
   if (!value || typeof value !== "object") return undefined
   const tokens = value as Record<string, unknown>
@@ -153,7 +145,19 @@ function exactTokensFromMessage(message: { info?: unknown; parts?: unknown[] }) 
   return undefined
 }
 
+/**
+ * Cumulative session tokens, from the provider's own accounting only.
+ *
+ * A text estimate is deliberately NOT substituted when the provider reports nothing. `accountUsage`
+ * differences each observation against the previous one, so the cursor is a running total, and an
+ * estimate and a provider count are not the same unit: seeding the cursor with an estimate and
+ * then differencing the first real count against it charges `max(0, real - estimate)`, which is 0
+ * whenever the estimate is the larger of the two. A turn that really spent tokens was charged
+ * nothing, so a budget goal silently under-counted and never reached its limit. Only assistant
+ * messages carry a step-finish part, so the first observation of a session was exactly the
+ * estimated one and every later one was exact - making that transition the common case, not an edge
+ * case. A provider that reports no usage now reports none to the goal, which is honest.
+ */
 export function tokensFromMessages(messages: { info?: unknown; parts?: unknown[] }[]) {
-  const exactTotal = messages.reduce<number>((sum, message) => sum + (exactTokensFromMessage(message) ?? 0), 0)
-  return exactTotal > 0 ? exactTotal : estimateMessages(messages)
+  return messages.reduce<number>((sum, message) => sum + (exactTokensFromMessage(message) ?? 0), 0)
 }

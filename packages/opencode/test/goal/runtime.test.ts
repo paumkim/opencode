@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { createGoal, getGoal, statePath } from "@/goal/impl"
+import { createGoal, getGoal, markGoalUnmet, setGoalStatus, statePath, completeGoal } from "@/goal/impl"
 import { createGoalRuntime, staleAllContinuationClaims } from "@/goal/driver"
 
 let stateDir: string | undefined
@@ -21,7 +21,7 @@ afterEach(async () => {
 })
 
 type ClientOverrides = {
-  promptAsync?: () => unknown
+  promptAsync?: (input?: { body?: Record<string, unknown> }) => unknown
   children?: () => unknown
   status?: () => unknown
   messages?: () => unknown
@@ -291,6 +291,51 @@ describe("H9: the compaction summarizer is not given goal continuation instructi
   })
 })
 
+describe("H22: a closed goal stops reminding the model to keep working", () => {
+  // `systemReminder` is the only thing standing between a finished goal and an infinite
+  // "Continue working toward the active session goal" injection, and this is the one branch of it
+  // that no test covered: a completed or unmet goal must contribute nothing at all. A regression
+  // here is not a cosmetic extra system block - the continuation prompt is what drives the
+  // auto-continue loop, so a closed goal that still got one would be resumed indefinitely.
+  for (const status of ["complete", "unmet"] as const) {
+    test(`an ${status} goal injects no reminder and leaves the system prompt untouched`, async () => {
+      const sessionID = `h22-${status}`
+      await createGoal(sessionID, "finish this and stop", { maxAutoTurns: 100 })
+      const h = await hooks()
+      const base = "You are opencode, an interactive CLI agent."
+
+      // Control: while active the reminder IS merged, so a silent pass below is the status
+      // closing the goal and not the hook never running.
+      const active = { system: [base] }
+      await h["experimental.chat.system.transform"]?.({ sessionID } as never, active as never)
+      expect(active.system.join("\n")).toContain("OpenCode goal mode")
+
+      if (status === "complete") await completeGoal(sessionID, "verified in the worktree")
+      else await markGoalUnmet(sessionID, "the upstream API does not exist")
+
+      const closed = { system: [base] }
+      await h["experimental.chat.system.transform"]?.({ sessionID } as never, closed as never)
+      // Exactly the original system prompt: not an empty block appended, not a partial reminder.
+      expect(closed.system).toEqual([base])
+    })
+  }
+
+  test("a paused goal still reports its state instead of a continuation prompt", async () => {
+    // A paused goal must not be told to continue, but unlike a closed one it still has state
+    // worth surfacing, and losing that would leave the user with no way to see why it stopped.
+    const sessionID = "h22-paused"
+    await createGoal(sessionID, "paused work", { maxAutoTurns: 100 })
+    const h = await hooks()
+    await setGoalStatus(sessionID, "paused")
+
+    const output = { system: ["You are opencode, an interactive CLI agent."] }
+    await h["experimental.chat.system.transform"]?.({ sessionID } as never, output as never)
+    const joined = output.system.join("\n")
+    expect(joined).toContain("OpenCode goal mode")
+    expect(joined).not.toContain("Continue working toward the active session goal")
+  })
+})
+
 describe("H8: configured plugin options are applied", () => {
   test("max_auto_turns from plugin options is enforced", async () => {
     const sessionID = "h8-opts"
@@ -310,5 +355,285 @@ describe("H8: configured plugin options are applied", () => {
     const h = await hooks({ promptAsync: () => ({ data: undefined }) }, { auto_continue: false })
     await h.event?.({ event: idleEvent(sessionID) } as never)
     expect((await getGoal(sessionID))?.autoTurns).toBe(0)
+  })
+})
+
+describe("H23: deleting a session releases the tool-call credit it left behind", () => {
+  // `TaskTracker` keeps five session-keyed maps. `observeSessionDeleted` released three of them
+  // (`tasks`, `latestAssistantBySession`, the snapshot-idle holds) but not `toolCallsBySession` or
+  // `pendingTaskCalls`, so a deleted session's bookkeeping outlived it for the life of the process -
+  // the exact leak the session processor fixed with an explicit `forgetSession` for the same reason.
+  //
+  // This got worse when tool-call accounting was fixed to be consumed only by the scoring call:
+  // before that, `message.updated` and the messages-transform hook also drained the map, and after
+  // it they deliberately do not. A deleted session is precisely the case where nothing ever drains
+  // it again.
+  //
+  // The cost is not only memory. A stale count is read as PROGRESS: `recordAssistantProgress`
+  // scores any turn with `toolCalls > 0` as work done, so a session ID that is deleted and then
+  // reused silently has its first stall check waived by a tool call from the previous life.
+  test("a tool call made before deletion does not credit a later turn in the same session ID", async () => {
+    const sessionID = "h23-stale"
+    await createGoal(sessionID, "work that will stall", { maxAutoTurns: 0 })
+
+    let latest: { data: unknown[] } = { data: [] }
+    const h = await hooks(
+      { messages: () => latest, promptAsync: () => ({ data: undefined }) },
+      // One low-progress turn is enough to pause, so the assertion below is unambiguous.
+      { min_continue_interval_seconds: 1, max_no_progress_turns: 1 },
+    )
+
+    // A turn runs a tool. Nothing scores it, so the count stays parked in `toolCallsBySession`.
+    await h.event?.({ event: idleEvent(sessionID) } as never)
+    await h["tool.execute.before"]?.({ tool: "edit", sessionID, callID: "c-before-delete" } as never, {} as never)
+
+    // The session goes away.
+    await h.event?.({ event: { type: "session.deleted", properties: { sessionID } } } as never)
+
+    // The same session ID comes back and the next turn is genuinely silent: no tools, no prose.
+    latest = { data: [{ info: { id: "turn-after", role: "assistant", sessionID, tokens: { output: 40 } }, parts: [] }] }
+    await h.event?.({ event: idleEvent(sessionID) } as never)
+    await h.event?.({
+      event: {
+        type: "message.updated",
+        properties: { sessionID, info: { id: "turn-after", role: "assistant", sessionID, time: { completed: Date.now() } } },
+      },
+    } as never)
+
+    // The stale credit made `workedWithTools` true, so the stall was never recorded.
+    const goal = await getGoal(sessionID)
+    expect(goal?.stopReason).toBe("no progress")
+    expect(goal?.status).toBe("paused")
+  })
+})
+
+describe("H12: tool activity reaches the turn that is actually scored", () => {
+  // An unattended agent doing a refactor or an investigation narrates almost nothing: each turn is
+  // nothing but tool calls. Scoring on prose alone paused it after two turns, calling real work a
+  // stall - so `recordAssistantProgress` treats a turn with tool calls as progress. That only
+  // works if the tool-call count survives until the scoring call.
+  //
+  // It did not. `TaskTracker.takeToolCalls` reads AND deletes, and three call sites consume it:
+  // `runAutoContinue` (the only one that actually scores) plus `message.updated` and
+  // `experimental.chat.messages.transform` (neither of which scores). Both of the latter fire
+  // while the turn is still running, so the count was always gone by the time the turn was judged
+  // and the "tool-only turn counts as progress" rule was dead in production.
+  test("a turn that only ran tools is not scored as a stall", async () => {
+    const sessionID = "h12-tools"
+    await createGoal(sessionID, "long refactor", { maxAutoTurns: 0 })
+
+    let latest: { data: unknown[] } = { data: [] }
+    const h = await hooks(
+      {
+        messages: () => latest,
+        promptAsync: () => ({ data: undefined }),
+      },
+      { min_continue_interval_seconds: 1 },
+    )
+
+    for (const id of ["turn-a", "turn-b", "turn-c"]) {
+      // A continuation is dispatched and the model starts working.
+      await h.event?.({ event: idleEvent(sessionID) } as never)
+      // It runs a tool and narrates nothing.
+      await h["tool.execute.before"]?.({ tool: "edit", sessionID, callID: `c-${id}` } as never, {} as never)
+      latest = {
+        data: [{ info: { id, role: "assistant", sessionID, tokens: { output: 40 } }, parts: [] }],
+      }
+      await h.event?.({
+        event: {
+          type: "message.updated",
+          properties: {
+            sessionID,
+            info: { id, role: "assistant", sessionID, time: { completed: Date.now() } },
+          },
+        },
+      } as never)
+      // Past the continuation throttle, so the next dispatch is not refused.
+      await new Promise((resolve) => setTimeout(resolve, 1_100))
+    }
+
+    const goal = await getGoal(sessionID)
+    // Three silent-but-working turns must not read as a stall.
+    expect(goal?.noProgressTurns).toBe(0)
+    expect(goal?.status).toBe("active")
+    expect(goal?.stopReason).toBeNull()
+  })
+
+  test("a turn with no tools and no text is still a stall", async () => {
+    // Control: the counter is not simply being ignored. A genuinely silent turn must still count.
+    const sessionID = "h12-silent"
+    await createGoal(sessionID, "stalled out", { maxAutoTurns: 0 })
+
+    let latest: { data: unknown[] } = { data: [] }
+    const h = await hooks(
+      {
+        messages: () => latest,
+        promptAsync: () => ({ data: undefined }),
+      },
+      { min_continue_interval_seconds: 1 },
+    )
+
+    for (const id of ["turn-a", "turn-b", "turn-c"]) {
+      await h.event?.({ event: idleEvent(sessionID) } as never)
+      latest = {
+        data: [{ info: { id, role: "assistant", sessionID, tokens: { output: 40 } }, parts: [] }],
+      }
+      await h.event?.({
+        event: {
+          type: "message.updated",
+          properties: {
+            sessionID,
+            info: { id, role: "assistant", sessionID, time: { completed: Date.now() } },
+          },
+        },
+      } as never)
+      await new Promise((resolve) => setTimeout(resolve, 1_100))
+    }
+
+    const goal = await getGoal(sessionID)
+    expect(goal?.status).toBe("paused")
+    expect(goal?.stopReason).toBe("no progress")
+  })
+})
+
+describe("H16: a continuation inherits the session's model variant on every path", () => {
+  // A continuation must run on the same model, with the same variant, as the session it continues.
+  // `prompt.ts` already resolves that shape correctly (`current.model.variant` unless it is
+  // "default"). The driver has its own copy of that lookup for the continuation, and the copy
+  // dropped the variant on its fallback path - the message-based lookup used when `session.get`
+  // fails. The `void variant` in that function shows the omission was noticed and silenced rather
+  // than fixed, so an unattended continuation after a transient `session.get` failure silently ran
+  // the same model with different parameters.
+  const promptBodies: Record<string, unknown>[] = []
+
+  const capture = (overrides: ClientOverrides) => {
+    promptBodies.length = 0
+    return hooks({
+      ...overrides,
+      promptAsync: (input) => {
+        promptBodies.push((input?.body ?? {}) as Record<string, unknown>)
+        return { data: undefined }
+      },
+    })
+  }
+
+  const userMessageModel = (variant: string) => ({
+    data: [{ info: { role: "user", model: { id: "test-model", providerID: "test", variant } } }],
+  })
+
+  test("the session-get path already carries the variant", async () => {
+    const sessionID = "h16-primary"
+    await createGoal(sessionID, "inherit model", { maxAutoTurns: 10 })
+    const h = await capture({
+      get: () => ({ data: { info: { model: { id: "test-model", providerID: "test", variant: "high" } } } }),
+    })
+
+    await h.event?.({ event: idleEvent(sessionID) } as never)
+    expect(promptBodies.at(-1)?.model).toMatchObject({ providerID: "test", modelID: "test-model" })
+    expect(promptBodies.at(-1)?.variant).toBe("high")
+  })
+
+  test("the message-lookup fallback carries the variant too", async () => {
+    const sessionID = "h16-fallback"
+    await createGoal(sessionID, "inherit model", { maxAutoTurns: 10 })
+    const h = await capture({
+      // A transient failure here is what pushes resolution onto the message-based fallback.
+      get: () => {
+        throw new Error("session lookup failed")
+      },
+      messages: () => userMessageModel("high"),
+    })
+
+    await h.event?.({ event: idleEvent(sessionID) } as never)
+    expect(promptBodies.at(-1)?.model).toMatchObject({ providerID: "test", modelID: "test-model" })
+    expect(promptBodies.at(-1)?.variant).toBe("high")
+  })
+
+  test("the default variant is not sent, matching the session-get path", async () => {
+    // "default" means "no variant chosen". Sending it would pin the model to a variant the session
+    // is not using, so both paths must drop it.
+    const sessionID = "h16-default"
+    await createGoal(sessionID, "inherit model", { maxAutoTurns: 10 })
+    const h = await capture({
+      get: () => {
+        throw new Error("session lookup failed")
+      },
+      messages: () => userMessageModel("default"),
+    })
+
+    await h.event?.({ event: idleEvent(sessionID) } as never)
+    expect(promptBodies.at(-1)?.model).toMatchObject({ providerID: "test", modelID: "test-model" })
+    expect(promptBodies.at(-1)?.variant).toBeUndefined()
+  })
+})
+
+describe("H21: a compaction transform must not move the token cursor", () => {
+  // `accountUsage` differences each observation against `lastSessionTokens`, so the cursor must
+  // track a monotonically growing total. The compaction transform receives only the compacted-away
+  // PREFIX, whose total is SMALLER than the cursor. Charging it leaves the delta at zero but still
+  // rewinds the cursor, and the next full transform then charges the entire retained context as
+  // fresh usage - on every compaction. The guard for this existed, but sat after the charging call
+  // instead of before it, so it protected only the assistant-progress call below it.
+  const sessionID = "h21-compaction"
+
+  const fullHistory = (total: number) => [
+    { info: { role: "user", sessionID }, parts: [] },
+    { info: { role: "assistant", sessionID }, parts: [{ type: "step-finish", tokens: { total } }] },
+  ]
+
+  const transform = async (messages: unknown[]) => {
+    const h = await hooks()
+    await h["experimental.chat.messages.transform"]?.({ sessionID } as never, { messages } as never)
+  }
+
+  test("compacting does not charge the retained context as new usage", async () => {
+    await createGoal(sessionID, "bounded work", { tokenBudget: 1_000_000, sessionTokensAtCreation: 50_000 })
+
+    await transform(fullHistory(50_000))
+    expect((await getGoal(sessionID))?.tokensUsed).toBe(0)
+
+    // Compaction: the hook sees only the prefix, so its total is far below the cursor.
+    await transform([
+      {
+        info: { role: "assistant", sessionID, summary: true },
+        parts: [{ type: "step-finish", tokens: { total: 12_000 } }],
+      },
+    ])
+
+    // The next real step sees the full history again, now smaller because compaction removed
+    // content. No new tokens were spent, so nothing may be charged.
+    await transform(fullHistory(45_000))
+
+    const goal = await getGoal(sessionID)
+    expect(goal?.tokensUsed).toBe(0)
+    expect(goal?.status).toBe("active")
+  })
+
+  test("genuine growth after a compaction is still charged", async () => {
+    // Control: the assertion above must not pass merely because nothing is ever charged.
+    await createGoal("h21-control", "bounded work", { tokenBudget: 1_000_000, sessionTokensAtCreation: 50_000 })
+    const h = await hooks()
+    const send = (messages: unknown[]) =>
+      h["experimental.chat.messages.transform"]?.({ sessionID: "h21-control" } as never, { messages } as never)
+
+    await send(
+      fullHistory(50_000).map((message) => ({ ...message, info: { ...message.info, sessionID: "h21-control" } })),
+    )
+    await send([
+      {
+        info: { role: "assistant", sessionID: "h21-control", summary: true },
+        parts: [{ type: "step-finish", tokens: { total: 12_000 } }],
+      },
+    ])
+    // The session then really does spend more than the pre-compaction cursor: 2,000 fresh tokens.
+    await send([
+      { info: { role: "user", sessionID: "h21-control" }, parts: [] },
+      {
+        info: { role: "assistant", sessionID: "h21-control" },
+        parts: [{ type: "step-finish", tokens: { total: 52_000 } }],
+      },
+    ])
+
+    expect((await getGoal("h21-control"))?.tokensUsed).toBe(2_000)
   })
 })

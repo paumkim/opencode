@@ -3011,3 +3011,125 @@ unixNoLLMServer(
   { config: { ...cfg, shell: "bash" } },
   30_000,
 )
+
+// The overflow check in the run loop measures CONTEXT, not spend. `message.tokens` is the spend
+// total across the message's steps (see `accumulateTokens` in the processor), and every step
+// re-sends the whole history - so summing counts the conversation once per step. A three-step turn
+// therefore reports roughly three times the context it actually leaves behind, and feeding that to
+// `isOverflow` compacts while the context still fits. The last step's `step-finish` part is where
+// the real context size is recorded.
+it.instance(
+  "does not auto-compact for a multi-step turn whose spend total overflows but whose context fits",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+
+      const chat = yield* sessions.create({ title: "MultiStep" })
+      const u1 = yield* user(chat.id, "hello")
+      const a1 = yield* sessions.updateMessage({
+        id: MessageID.ascending(),
+        role: "assistant",
+        parentID: u1.id,
+        sessionID: chat.id,
+        mode: "build",
+        agent: "build",
+        cost: 0,
+        path: { cwd: "/tmp", root: "/tmp" },
+        // The spend total: three steps, each re-sending the history. Over the 90,000 usable window.
+        tokens: {
+          total: 90_000,
+          input: 85_000,
+          output: 5_000,
+          reasoning: 0,
+          cache: { read: 0, write: 0 },
+        },
+        modelID: ref.modelID,
+        providerID: ref.providerID,
+        time: { created: Date.now() },
+        finish: "end_turn",
+      })
+      for (const total of [30_000, 30_000, 1_000]) {
+        yield* sessions.updatePart({
+          id: PartID.ascending(),
+          messageID: a1.id,
+          sessionID: chat.id,
+          type: "step-finish",
+          reason: "tool-calls",
+          cost: 0,
+          tokens: { total, input: total, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        })
+      }
+
+      // One LLM call: the build agent answering. A compaction agent call would be a second.
+      yield* llm.push(reply().text("final answer").stop().item())
+
+      yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        parts: [{ type: "text", text: "current" }],
+      })
+
+      const messages = yield* sessions.messages({ sessionID: chat.id })
+      expect(messages.some((message) => message.parts.some((part) => part.type === "compaction"))).toBe(false)
+      expect(
+        messages.some((message) => message.info.role === "assistant" && message.info.finish === "stop"),
+      ).toBe(true)
+    }),
+  { config: cfg },
+)
+
+// A model that emits its tool call as TEXT rather than as a tool call is a real provider failure
+// mode. `processor.ts` recovers those calls: it parses the markup, keeps only names in a registry
+// allowlist (so echoed third-party content cannot smuggle an arbitrary call), and creates a running
+// tool part - with the comment "so downstream execution still happens". The allowlist only makes
+// sense if allowlisted calls actually run, so the recovered part must reach `completed`.
+it.instance.skip(
+  // KNOWN BUG: a pseudo tool call recovered from text never runs. The processor parses the markup
+  // and creates a running tool part - with the comment "so downstream execution still happens" -
+  // but the processor has no tool-execution capability: the AI SDK executes tools, and only for
+  // calls that arrived on the provider's tool-call channel. A call parsed out of a text delta
+  // therefore never executes, and `cleanup()` abandons the part as "Tool execution aborted". The
+  // markup is stripped from the visible text at the same time, so the model sees a failed tool call
+  // and the transcript hides the request that produced it.
+  //
+  // The allowlist that gates the recovery only makes sense if allowlisted calls run, so this is a
+  // real defect rather than a deliberate no-op. It is NOT fixed here because both resolutions are
+  // owner decisions, not minimal fixes: (a) give the processor the tool registry, agent and
+  // permission context so it can execute - which adds a second tool-execution path that must
+  // independently enforce permissions and the doom-loop guard, or (b) drop the recovery so the
+  // markup stays visible and no phantom part is fabricated. `OPENCODE_PSEUDO_TOOL_CALL=0` already
+  // disables the feature today.
+  //
+  // Kept as a skipped test so the evidence is recorded and re-runnable the moment it is fixed.
+  "a pseudo tool call recovered from text actually runs the tool",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const session = yield* sessions.create({ title: "PseudoToolCall" })
+
+      yield* prompt.prompt({
+        sessionID: session.id,
+        agent: "build",
+        noReply: true,
+        parts: [{ type: "text", text: "find text files" }],
+      })
+
+      // The whole call arrives as a text delta: no tool-call channel at all.
+      yield* llm.text('trying\n<tool_call name="glob">pattern=**/*.txt</tool_call>')
+
+      yield* prompt.loop({ sessionID: session.id })
+
+      const msgs = yield* MessageV2.filterCompactedEffect(session.id)
+      const pseudo = msgs
+        .flatMap((message) => message.parts)
+        .find((part): part is SessionV1.ToolPart => part.type === "tool" && part.tool === "glob")
+
+      // Today this is `error: "Tool execution aborted"`.
+      expect(pseudo?.state.status === "error" ? pseudo.state.error : pseudo?.state.status).toBe("completed")
+    }),
+  { config: cfg },
+)
