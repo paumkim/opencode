@@ -12,6 +12,12 @@ export type Options = {
   max_auto_turns?: number
   min_continue_interval_seconds?: number
   max_turn_time?: number
+  /**
+   * How long an ACTIVE goal may sit with no activity before the driver re-arms it. Covers every way
+   * a turn can end without an idle event - an aborted turn, a dropped connection, a lost event - so
+   * an unattended run cannot sit `active` and idle forever.
+   */
+  max_stall_before_continue?: number
   max_prompt_failures?: number
   default_token_budget?: number
   max_goal_duration_seconds?: number
