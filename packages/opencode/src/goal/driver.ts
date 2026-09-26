@@ -847,15 +847,17 @@ export function createGoalRuntime(input: { client: Client; options?: Options }):
         () => null,
       )
       const info = (session as { data?: { info?: unknown } } | null)?.data?.info
-      if (!info || typeof (info as { id?: unknown }).id !== "string") {
-        console.warn(
-          `[goal] cannot confirm session ${sessionID} from this project; leaving its stalled goal alone ` +
-            "(goal state is global, so it may belong to another project)",
-        )
-        continue
-      }
+      // No console output here. The sweep visits EVERY active goal in the global state file on
+      // every tick, so a line per goal is a line every few seconds on the user's TUI - noise that
+      // looks alarming and reports nothing actionable, since the outcome is deliberately "do
+      // nothing". Whether each goal's session is alive is observable via get_goal when it matters.
+      if (!info || typeof (info as { id?: unknown }).id !== "string") continue
 
-      console.warn(`[goal] active goal idle for ${now - goal.updatedAt}s with no idle event; re-arming`)
+      // Deliberately NOT logged to the console. This runs on every sweep for every active goal,
+      // and a per-sweep line on the TUI is alarming noise that says nothing the goal state does not
+      // already record - `runAutoContinue` writes the reservation to `lastStatus` and history.
+      // Only the retirement below is worth interrupting the user for, because it changes what a
+      // goal claims about itself.
       await runAutoContinue(sessionID)
     }
   }
