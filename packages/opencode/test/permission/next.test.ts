@@ -1,5 +1,5 @@
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
-import { test, expect } from "bun:test"
+import { afterAll, beforeAll, test, expect } from "bun:test"
 import os from "os"
 import { Cause, Deferred, Effect, Exit, Fiber, Layer } from "effect"
 import { EventV2Bridge } from "../../src/event-v2-bridge"
@@ -14,6 +14,19 @@ import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 
 const noopBootstrap = Layer.succeed(InstanceBootstrap.Service, InstanceBootstrap.Service.of({ run: Effect.void }))
+
+// `unrestricted()` is read from the environment at call time, and plenty of shells export
+// OPENCODE_UNRESTRICTED=1. Inherited here it silently bypasses every check below, so the deny
+// and reject tests stop testing anything and fail for reasons that have nothing to do with the
+// permission service. Pin it off for this file and hand the developer's value back afterwards.
+const priorUnrestricted = process.env.OPENCODE_UNRESTRICTED
+beforeAll(() => {
+  delete process.env.OPENCODE_UNRESTRICTED
+})
+afterAll(() => {
+  if (priorUnrestricted === undefined) delete process.env.OPENCODE_UNRESTRICTED
+  else process.env.OPENCODE_UNRESTRICTED = priorUnrestricted
+})
 const env = AppNodeBuilder.build(
   LayerNode.group([Permission.node, EventV2Bridge.node, CrossSpawnSpawner.node, InstanceStore.node]),
   [[InstanceStore.bootstrapNode, noopBootstrap]],
