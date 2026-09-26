@@ -374,3 +374,77 @@ function flags() {
     pure: false,
   } as never
 }
+
+describe("overnight tolerance: a goal may opt out of the interactive self-pause defaults", () => {
+  test("a raised maxPromptFailures survives failures that would otherwise pause the goal", async () => {
+    const sessionID = "overnight-failures"
+    // Default plugin tolerance is 3; this goal asks to ride out 8 transient failures.
+    await createGoal(sessionID, "keep working overnight", { maxAutoTurns: 0, maxPromptFailures: 8 })
+    expect((await getGoal(sessionID))?.maxPromptFailures).toBe(8)
+
+    for (let i = 0; i < 7; i++) await recordContinuationResult(sessionID, "failure", 3)
+    const survivor = await getGoal(sessionID)
+    expect(survivor?.status).toBe("active")
+    expect(survivor?.continuationFailures).toBe(7)
+
+    // Only the goal's own limit stops it.
+    await recordContinuationResult(sessionID, "failure", 3)
+    const stopped = await getGoal(sessionID)
+    expect(stopped?.status).toBe("paused")
+    expect(stopped?.stopReason).toBe("auto-continue failures")
+  })
+
+  test("a goal without an override still uses the plugin default", async () => {
+    const sessionID = "supervised"
+    await createGoal(sessionID, "supervised work", { maxAutoTurns: 0 })
+    expect((await getGoal(sessionID))?.maxPromptFailures).toBeNull()
+    for (let i = 0; i < 3; i++) await recordContinuationResult(sessionID, "failure", 3)
+    expect((await getGoal(sessionID))?.status).toBe("paused")
+  })
+
+  test("a raised maxNoProgressTurns tolerates quiet turns a long build produces", async () => {
+    const sessionID = "overnight-stall"
+    await createGoal(sessionID, "run the full suite", { maxAutoTurns: 0, maxNoProgressTurns: 6 })
+    expect((await getGoal(sessionID))?.maxNoProgressTurns).toBe(6)
+
+    // The first turn only primes the continuation baseline, so it does not score. Five turns
+    // therefore yield four counted stalls: twice the default of 2, and the goal must still be
+    // running. Under the default it would already have paused here.
+    for (const id of ["a", "b", "c", "d", "e"]) {
+      await reserveContinuation(sessionID, 0, 0)
+      await recordContinuationResult(sessionID, "success", 3)
+      await recordAssistantProgress(sessionID, { messageID: id, text: "same", outputTokens: 1, evaluateContinuation: true })
+    }
+    const running = await getGoal(sessionID)
+    expect(running?.status).toBe("active")
+    expect(running?.noProgressTurns).toBe(4)
+
+    // It still stops at its own limit rather than running forever.
+    for (const id of ["f", "g"]) {
+      await reserveContinuation(sessionID, 0, 0)
+      await recordContinuationResult(sessionID, "success", 3)
+      await recordAssistantProgress(sessionID, { messageID: id, text: "same", outputTokens: 1, evaluateContinuation: true })
+    }
+    const stopped = await getGoal(sessionID)
+    expect(stopped?.status).toBe("paused")
+    expect(stopped?.noProgressTurns).toBe(6)
+  })
+
+  test("a null or non-positive override falls back to the default rather than disabling the guard", async () => {
+    const sessionID = "bad-override"
+    await createGoal(sessionID, "guarded", { maxAutoTurns: 0, maxPromptFailures: 0, maxNoProgressTurns: -3 })
+    const goal = await getGoal(sessionID)
+    expect(goal?.maxPromptFailures).toBeNull()
+    expect(goal?.maxNoProgressTurns).toBe(2)
+    for (let i = 0; i < 3; i++) await recordContinuationResult(sessionID, "failure", 3)
+    expect((await getGoal(sessionID))?.status).toBe("paused")
+  })
+
+  test("a resumed overnight goal still records its own tolerance", async () => {
+    const sessionID = "overnight-resume"
+    await createGoal(sessionID, "long haul", { maxAutoTurns: 0, maxPromptFailures: 9 })
+    await setGoalStatus(sessionID, "paused")
+    const resumed = await setGoalStatus(sessionID, "active")
+    expect(resumed.maxPromptFailures).toBe(9)
+  })
+})

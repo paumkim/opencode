@@ -72,6 +72,12 @@ export type Goal = {
   maxDurationSeconds: number | null
   noProgressTokenThreshold: number | null
   maxNoProgressTurns: number | null
+  /**
+   * Per-goal cap on consecutive failed auto-continue prompts. Kept on the goal so a long
+   * unattended run can tolerate transient provider/network failures instead of self-pausing
+   * after the plugin-wide default. `null` means "use the plugin option".
+   */
+  maxPromptFailures: number | null
   noProgressTurns: number
   budgetWrapupSent: boolean
   stopReason: string | null
@@ -106,6 +112,7 @@ export type CreateGoalOptions = {
   maxDurationSeconds?: number | null
   noProgressTokenThreshold?: number | null
   maxNoProgressTurns?: number | null
+  maxPromptFailures?: number | null
   agent?: string | null
   initialStatus?: MutableGoalStatus
   /** Cumulative session tokens observed immediately before creating the goal. */
@@ -181,6 +188,9 @@ const GoalSchema = Schema.Struct({
   maxDurationSeconds: NullableNumber,
   noProgressTokenThreshold: NullableNumber,
   maxNoProgressTurns: NullableNumber,
+  // Optional so goals persisted before this field existed still decode; normalizeGoal
+  // fills the null fallback on the next mutate.
+  maxPromptFailures: Schema.optional(NullableNumber),
   noProgressTurns: Schema.optional(Schema.Number),
   budgetWrapupSent: Schema.optional(Schema.Boolean),
   stopReason: NullableString,

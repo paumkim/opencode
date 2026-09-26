@@ -40,6 +40,9 @@ type CreateGoalArgs = {
   token_budget?: number | null
   max_auto_turns?: number | null
   max_duration_seconds?: number | null
+  no_progress_token_threshold?: number | null
+  max_no_progress_turns?: number | null
+  max_prompt_failures?: number | null
 }
 
 type ExtendGoalArgs = {
@@ -759,8 +762,12 @@ const server: Plugin = async ({ client }, options?: Options) => {
     const sessionTokensAtCreation = await fetchSessionTokens(client, context.sessionID).catch(() => null)
     const goal = await createGoal(context.sessionID, input.objective, {
       ...resolveCreateGoalLimits(input, options),
-      noProgressTokenThreshold: options?.no_progress_token_threshold ?? null,
-      maxNoProgressTurns: options?.max_no_progress_turns ?? null,
+      // A per-call value wins over the plugin default. The defaults are tuned for interactive
+      // use and self-pause an unattended run quickly, so a caller that asks for a tolerant goal
+      // must not be silently downgraded to them.
+      noProgressTokenThreshold: input.no_progress_token_threshold ?? options?.no_progress_token_threshold ?? null,
+      maxNoProgressTurns: input.max_no_progress_turns ?? options?.max_no_progress_turns ?? null,
+      maxPromptFailures: input.max_prompt_failures ?? null,
       agent: typeof context.agent === "string" ? context.agent : null,
       initialStatus: planningOnly ? "paused" : "active",
       sessionTokensAtCreation,
@@ -957,6 +964,33 @@ const server: Plugin = async ({ client }, options?: Options) => {
           token_budget: z.number().int().positive().nullable().optional().describe("Optional positive token budget. Omit or pass null for unlimited."),
           max_auto_turns: z.number().int().positive().nullable().optional().describe("Optional per-goal auto-continue limit. Omit or pass null for unlimited."),
           max_duration_seconds: z.number().int().positive().nullable().optional().describe("Optional per-goal duration limit. Omit or pass null for unlimited."),
+          no_progress_token_threshold: z
+            .number()
+            .int()
+            .positive()
+            .nullable()
+            .optional()
+            .describe(
+              "Optional per-goal minimum output tokens for a continuation turn to count as progress. Raise it only to tolerate genuinely long-running single turns.",
+            ),
+          max_no_progress_turns: z
+            .number()
+            .int()
+            .positive()
+            .nullable()
+            .optional()
+            .describe(
+              "Optional consecutive low-progress turns tolerated before auto-pausing. Raise for unattended/overnight runs; the default (2) pauses quickly.",
+            ),
+          max_prompt_failures: z
+            .number()
+            .int()
+            .positive()
+            .nullable()
+            .optional()
+            .describe(
+              "Optional consecutive failed auto-continue prompts tolerated before auto-pausing. Raise for unattended runs so transient provider/network failures do not stop the goal.",
+            ),
         },
         async execute(args, context) {
           return createGoalFromTool(args as CreateGoalArgs, context)
@@ -970,6 +1004,33 @@ const server: Plugin = async ({ client }, options?: Options) => {
           token_budget: z.number().int().positive().nullable().optional().describe("Optional positive token budget. Omit or pass null for unlimited."),
           max_auto_turns: z.number().int().positive().nullable().optional().describe("Optional per-goal auto-continue limit. Omit or pass null for unlimited."),
           max_duration_seconds: z.number().int().positive().nullable().optional().describe("Optional per-goal duration limit. Omit or pass null for unlimited."),
+          no_progress_token_threshold: z
+            .number()
+            .int()
+            .positive()
+            .nullable()
+            .optional()
+            .describe(
+              "Optional per-goal minimum output tokens for a continuation turn to count as progress. Raise it only to tolerate genuinely long-running single turns.",
+            ),
+          max_no_progress_turns: z
+            .number()
+            .int()
+            .positive()
+            .nullable()
+            .optional()
+            .describe(
+              "Optional consecutive low-progress turns tolerated before auto-pausing. Raise for unattended/overnight runs; the default (2) pauses quickly.",
+            ),
+          max_prompt_failures: z
+            .number()
+            .int()
+            .positive()
+            .nullable()
+            .optional()
+            .describe(
+              "Optional consecutive failed auto-continue prompts tolerated before auto-pausing. Raise for unattended runs so transient provider/network failures do not stop the goal.",
+            ),
         },
         async execute(args, context) {
           return createGoalFromTool(args as CreateGoalArgs, context)

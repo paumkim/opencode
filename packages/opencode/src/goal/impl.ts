@@ -198,6 +198,10 @@ function normalizeGoal(goal: Goal) {
   goal.tokenBudget = positiveIntegerOrNull(goal.tokenBudget)
   goal.noProgressTokenThreshold = positiveIntegerOrNull(goal.noProgressTokenThreshold) ?? GOAL_DEFAULT_NO_PROGRESS_TOKEN_THRESHOLD
   goal.maxNoProgressTurns = positiveIntegerOrNull(goal.maxNoProgressTurns) ?? GOAL_DEFAULT_MAX_NO_PROGRESS_TURNS
+  // Stays null unless the goal asked for a different tolerance; the plugin option is the
+  // fallback applied at the call site, so null must survive normalization rather than
+  // collapsing to the default here.
+  goal.maxPromptFailures = positiveIntegerOrNull(goal.maxPromptFailures)
   goal.budgetWrapupSent = goal.budgetWrapupSent === true
   goal.stopReason ??= null
   return goal
@@ -281,6 +285,7 @@ export function snapshot(goal: Goal): GoalSnapshot {
     maxDurationSeconds: goal.maxDurationSeconds,
     noProgressTokenThreshold: goal.noProgressTokenThreshold,
     maxNoProgressTurns: goal.maxNoProgressTurns,
+    maxPromptFailures: goal.maxPromptFailures,
     noProgressTurns: goal.noProgressTurns,
     budgetWrapupSent: goal.budgetWrapupSent,
     stopReason: goal.stopReason,
@@ -343,6 +348,7 @@ export async function createGoal(
       maxDurationSeconds: normalizedOptions.maxDurationSeconds,
       noProgressTokenThreshold: normalizedOptions.noProgressTokenThreshold,
       maxNoProgressTurns: normalizedOptions.maxNoProgressTurns,
+      maxPromptFailures: normalizedOptions.maxPromptFailures,
       noProgressTurns: 0,
       budgetWrapupSent: false,
       stopReason: paused ? "plan mode" : null,
@@ -704,10 +710,13 @@ export async function recordContinuationResult(sessionID: string, result: "succe
     goal.awaitingContinuationProgress = false
     goal.lastStatus = `Auto-continue failed ${goal.continuationFailures} time(s).`
     pushHistory(goal, "error", goal.lastStatus)
+    // A goal-level tolerance wins over the plugin-wide default so an unattended run can ride out
+    // transient provider failures; without it three blips pause the goal while nobody is watching.
+    const effectiveMaxFailures = goal.maxPromptFailures ?? maxFailures
     // Only an ACTIVE goal may be auto-paused here. A limited goal must keep its limited status and
     // its stopReason: rewriting it to `paused` would bypass the "extend before resuming" guard,
     // because setGoalStatus only rejects budgetLimited/usageLimited.
-    if (goal.continuationFailures >= maxFailures && goal.status === "active") {
+    if (goal.continuationFailures >= effectiveMaxFailures && goal.status === "active") {
       accountWallClock(goal, now)
       goal.status = "paused"
       goal.lastAccountedAt = null
@@ -852,6 +861,7 @@ function normalizeCreateOptions(input?: number | null | CreateGoalOptions): Requ
       maxDurationSeconds: null,
       noProgressTokenThreshold: GOAL_DEFAULT_NO_PROGRESS_TOKEN_THRESHOLD,
       maxNoProgressTurns: GOAL_DEFAULT_MAX_NO_PROGRESS_TURNS,
+      maxPromptFailures: null,
       agent: null,
       initialStatus: "active",
       sessionTokensAtCreation: null,
@@ -863,6 +873,7 @@ function normalizeCreateOptions(input?: number | null | CreateGoalOptions): Requ
     maxDurationSeconds: positiveIntegerOrNull(input?.maxDurationSeconds),
     noProgressTokenThreshold: positiveIntegerOrNull(input?.noProgressTokenThreshold) ?? GOAL_DEFAULT_NO_PROGRESS_TOKEN_THRESHOLD,
     maxNoProgressTurns: positiveIntegerOrNull(input?.maxNoProgressTurns) ?? GOAL_DEFAULT_MAX_NO_PROGRESS_TURNS,
+    maxPromptFailures: positiveIntegerOrNull(input?.maxPromptFailures),
     agent: typeof input?.agent === "string" && input.agent.trim() ? input.agent.trim() : null,
     initialStatus: input?.initialStatus === "paused" ? "paused" : "active",
     sessionTokensAtCreation:
