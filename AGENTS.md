@@ -9,6 +9,7 @@
   `systemd-run --user --scope -p MemoryMax=6G -p MemorySwapMax=0 -- <command>`
   This terminates the process cleanly at the cap. **`ulimit -v` is actively harmful for Bun commands** and must not be used here — see "Bun reserves address space" below. Verified: a 4G cgroup SIGTERMs typecheck cleanly, 6G lets it finish.
 - **Watch RSS on long runs.** For stress or soak runs, sample `ps -o rss` periodically and abort if it crosses ~6GB. Prefer short, targeted runs repeated over one huge run.
+- **Known exception: `test/cli/run/run-process.test.ts` needs `-p MemoryMax=12G`.** All 11 tests are concurrent and each spawns a full `opencode run` subprocess. At 6G it does not fail, it *hangs* with no test completing. Verified 13 pass / 0 fail at 12G. A hang there is this, not a wedged machine.
 - **When delegating**, state the memory rule in the task prompt explicitly. A subagent asked to "run the tests" will otherwise run the full suite and exhaust RAM.
 - If a task appears to require the full suite, STOP and ask the user for permission first. The default answer is no.
 
