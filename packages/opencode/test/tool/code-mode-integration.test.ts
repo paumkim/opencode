@@ -4,6 +4,7 @@ import { McpCatalog } from "@/mcp/catalog"
 import { Agent } from "@/agent/agent"
 import { MCP } from "@/mcp"
 import { Plugin } from "@/plugin"
+import { GoalDriver } from "@/goal/driver"
 import { Session } from "@/session/session"
 import { Tool } from "@/tool/tool"
 import * as Truncate from "@/tool/truncate"
@@ -139,6 +140,7 @@ async function buildTool() {
   }
 
   const layer = Layer.mergeAll(
+    Layer.mock(GoalDriver.Service, { trigger: () => Effect.void }),
     Layer.mock(Plugin.Service, {
       trigger: ((_name: unknown, _input: unknown, output: unknown) =>
         Effect.succeed(output)) as Plugin.Interface["trigger"],

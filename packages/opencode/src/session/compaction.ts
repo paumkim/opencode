@@ -9,6 +9,7 @@ import { Token } from "@/util/token"
 import { SessionProcessor } from "./processor"
 import { Agent } from "@/agent/agent"
 import { Plugin } from "@/plugin"
+import { GoalDriver } from "@/goal/driver"
 import { Config } from "@/config/config"
 import { NotFoundError } from "@/storage/storage"
 
@@ -197,6 +198,10 @@ const layer = Layer.effect(
     const session = yield* Session.Service
     const agents = yield* Agent.Service
     const plugin = yield* Plugin.Service
+    // Goal mode is core, not a plugin. Its hooks are dispatched directly at each core call site,
+    // before the external plugin hooks, matching the ordering from when the goal plugin was
+    // registered first.
+    const goal = yield* GoalDriver.Service
     const processors = yield* SessionProcessor.Service
     const provider = yield* Provider.Service
     const events = yield* EventV2Bridge.Service
@@ -376,13 +381,14 @@ const layer = Layer.effect(
         model,
       })
       // Allow plugins to inject context or replace compaction prompt.
-      const compacting = yield* plugin.trigger(
-        "experimental.session.compacting",
-        { sessionID: input.sessionID },
-        { context: [], prompt: undefined },
-      )
+      const compactingInput = { sessionID: input.sessionID }
+      const compactingOutput = { context: [], prompt: undefined }
+      yield* goal.trigger("experimental.session.compacting", compactingInput, compactingOutput)
+      const compacting = yield* plugin.trigger("experimental.session.compacting", compactingInput, compactingOutput)
       const msgs = structuredClone(selected.head)
-      yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
+      const transformOutput = { messages: msgs }
+      yield* goal.trigger("experimental.chat.messages.transform", {}, transformOutput)
+      yield* plugin.trigger("experimental.chat.messages.transform", {}, transformOutput)
       const conversation = msgs.map(serialize).filter(Boolean).join("\n\n")
       const nextPrompt =
         compacting.prompt ??
@@ -503,26 +509,26 @@ const layer = Layer.effect(
 
         if (!replay) {
           const info = yield* provider.getProvider(userMessage.model.providerID)
-          if (
-            (yield* plugin.trigger(
-              "experimental.compaction.autocontinue",
-              {
-                sessionID: input.sessionID,
-                agent: userMessage.agent,
-                model: yield* provider
-                  .getModel(userMessage.model.providerID, userMessage.model.modelID)
-                  .pipe(Effect.orDie),
-                provider: {
-                  source: info.source,
-                  info,
-                  options: info.options,
-                },
-                message: userMessage,
-                overflow: input.overflow === true,
-              },
-              { enabled: true },
-            )).enabled
-          ) {
+          const autocontinueInput = {
+            sessionID: input.sessionID,
+            agent: userMessage.agent,
+            model: yield* provider.getModel(userMessage.model.providerID, userMessage.model.modelID).pipe(Effect.orDie),
+            provider: {
+              source: info.source,
+              info,
+              options: info.options,
+            },
+            message: userMessage,
+            overflow: input.overflow === true,
+          }
+          const autocontinueOutput = { enabled: true }
+          yield* goal.trigger("experimental.compaction.autocontinue", autocontinueInput, autocontinueOutput)
+          const autocontinue = yield* plugin.trigger(
+            "experimental.compaction.autocontinue",
+            autocontinueInput,
+            autocontinueOutput,
+          )
+          if (autocontinue.enabled) {
             const continueMsg = yield* session.updateMessage({
               id: MessageID.ascending(),
               role: "user",
@@ -615,6 +621,7 @@ export const node = LayerNode.make({
     Session.node,
     Agent.node,
     Plugin.node,
+    GoalDriver.node,
     SessionProcessor.node,
     Provider.node,
     EventV2Bridge.node,

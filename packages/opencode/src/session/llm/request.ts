@@ -13,6 +13,7 @@ import { ProviderIdentity } from "@opencode-ai/core/installation/provider-identi
 import { Effect, Record } from "effect"
 import { jsonSchema, tool as aiTool, type ModelMessage, type Tool } from "ai"
 import type { Plugin } from "@/plugin"
+import { GoalDriver } from "@/goal/driver"
 import { mergeDeep } from "remeda"
 
 // The User-Agent is resolved per provider at request time, because providers do
@@ -69,11 +70,14 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
   ]
 
   const header = system[0]
-  yield* input.plugin.trigger(
-    "experimental.chat.system.transform",
-    { sessionID: input.sessionID, model: input.model },
-    { system },
-  )
+  // Goal mode is core, not a plugin. Its hooks are dispatched directly at each core call site,
+  // before the external plugin hooks, matching the ordering from when the goal plugin was
+  // registered first.
+  const goal = yield* GoalDriver.Service
+  const systemTransformInput = { sessionID: input.sessionID, model: input.model }
+  const systemTransformOutput = { system }
+  yield* goal.trigger("experimental.chat.system.transform", systemTransformInput, systemTransformOutput)
+  yield* input.plugin.trigger("experimental.chat.system.transform", systemTransformInput, systemTransformOutput)
   if (system.length > 2 && system[0] === header) {
     const rest = system.slice(1)
     system.length = 0

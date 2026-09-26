@@ -15,6 +15,7 @@ import { mergeDeep, pipe, sortBy, values } from "remeda"
 import { Global } from "@opencode-ai/core/global"
 import path from "path"
 import { Plugin } from "@/plugin"
+import { GoalDriver } from "@/goal/driver"
 import { Skill } from "../skill"
 import { Effect, Context, Layer, Schema } from "effect"
 import { InstanceState } from "@/effect/instance-state"
@@ -98,6 +99,10 @@ const layer = Layer.effect(
     const config = yield* Config.Service
     const auth = yield* Auth.Service
     const plugin = yield* Plugin.Service
+    // Goal mode is core, not a plugin. Its hooks are dispatched directly at each core call site,
+    // before the external plugin hooks, matching the ordering from when the goal plugin was
+    // registered first.
+    const goal = yield* GoalDriver.Service
     const skill = yield* Skill.Service
     const provider = yield* Provider.Service
     const locations = yield* LocationServiceMap.Service
@@ -389,7 +394,9 @@ const layer = Layer.effect(
           : undefined
 
         const system: string[] = [yield* Effect.promise(() => loadPromptGenerate())]
-        yield* plugin.trigger("experimental.chat.system.transform", { model: resolved }, { system })
+        const systemTransformOutput = { system }
+        yield* goal.trigger("experimental.chat.system.transform", { model: resolved }, systemTransformOutput)
+        yield* plugin.trigger("experimental.chat.system.transform", { model: resolved }, systemTransformOutput)
         const existing = yield* InstanceState.useEffect(state, (s) => s.list())
 
         // TODO: clean this up so provider specific logic doesnt bleed over
@@ -458,7 +465,7 @@ const locationServiceMapNode = LayerNode.make({
 export const node = LayerNode.make({
   service: Service,
   layer: layer,
-  deps: [Config.node, Auth.node, Plugin.node, Skill.node, Provider.node, locationServiceMapNode],
+  deps: [Config.node, Auth.node, Plugin.node, GoalDriver.node, Skill.node, Provider.node, locationServiceMapNode],
 })
 
 export * as Agent from "./agent"

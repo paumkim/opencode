@@ -16,6 +16,7 @@ import { SessionCompaction } from "./compaction"
 import { SystemPrompt } from "./system"
 import { Instruction } from "./instruction"
 import { Plugin } from "../plugin"
+import { GoalDriver } from "@/goal/driver"
 import { MAX_STEPS_PROMPT } from "@opencode-ai/core/session/runner/max-steps"
 import { ToolRegistry } from "@/tool/registry"
 import { MCP } from "../mcp"
@@ -129,6 +130,10 @@ const layer = Layer.effect(
     const processor = yield* SessionProcessor.Service
     const compaction = yield* SessionCompaction.Service
     const plugin = yield* Plugin.Service
+    // Goal mode is core, not a plugin. Its hooks are dispatched directly at each core call site,
+    // before the external plugin hooks, matching the ordering from when the goal plugin was
+    // registered first.
+    const goal = yield* GoalDriver.Service
     const commands = yield* Command.Service
     const config = yield* Config.Service
     const permission = yield* Permission.Service
@@ -315,6 +320,7 @@ const layer = Layer.effect(
         subagent_type: task.agent,
         command: task.command,
       }
+      yield* goal.trigger("tool.execute.before", { tool: TaskTool.id, sessionID, callID: part.id }, { args: taskArgs })
       yield* plugin.trigger(
         "tool.execute.before",
         { tool: TaskTool.id, sessionID, callID: part.id },
@@ -397,6 +403,11 @@ const layer = Layer.effect(
         messageID: assistantMessage.id,
       }))
 
+      yield* goal.trigger(
+        "tool.execute.after",
+        { tool: TaskTool.id, sessionID, callID: part.id, args: taskArgs },
+        result,
+      )
       yield* plugin.trigger(
         "tool.execute.after",
         { tool: TaskTool.id, sessionID, callID: part.id, args: taskArgs },
@@ -1093,17 +1104,16 @@ const layer = Layer.effect(
         Effect.map((x) => x.flat().map(assign)),
       )
 
-      yield* plugin.trigger(
-        "chat.message",
-        {
-          sessionID: input.sessionID,
-          agent: input.agent,
-          model: input.model,
-          messageID: input.messageID,
-          variant: input.variant,
-        },
-        { message: info, parts: resolvedParts },
-      )
+      const messageInput = {
+        sessionID: input.sessionID,
+        agent: input.agent,
+        model: input.model,
+        messageID: input.messageID,
+        variant: input.variant,
+      }
+      const messageOutput = { message: info, parts: resolvedParts }
+      yield* goal.trigger("chat.message", messageInput, messageOutput)
+      yield* plugin.trigger("chat.message", messageInput, messageOutput)
 
       const parts = yield* Effect.forEach(resolvedParts, (part) =>
         part.type === "file" && part.mime.startsWith("image/")
@@ -1451,6 +1461,7 @@ const layer = Layer.effect(
               promptOps,
             }).pipe(
               Effect.provideService(Plugin.Service, plugin),
+              Effect.provideService(GoalDriver.Service, goal),
               Effect.provideService(Permission.Service, permission),
               Effect.provideService(ToolRegistry.Service, registry),
               Effect.provideService(MCP.Service, mcp),
@@ -1470,7 +1481,9 @@ const layer = Layer.effect(
             if (step === 1)
               yield* summary.summarize({ sessionID, messageID: lastUser.id }).pipe(Effect.ignore, Effect.forkIn(scope))
 
-            yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
+            const transformOutput = { messages: msgs }
+            yield* goal.trigger("experimental.chat.messages.transform", {}, transformOutput)
+            yield* plugin.trigger("experimental.chat.messages.transform", {}, transformOutput)
 
             const minimalContext = agent.context === "minimal"
             const [skills, env, mcpInstructions, modelMsgs] = yield* Effect.all([
@@ -1949,6 +1962,7 @@ export const node = LayerNode.make({
     SessionProcessor.node,
     SessionCompaction.node,
     Plugin.node,
+    GoalDriver.node,
     Command.node,
     Config.node,
     Permission.node,
