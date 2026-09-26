@@ -1304,6 +1304,25 @@ describe("H35: the system-reminder and compaction surfaces are covered at the so
     // Same fix, so the same report is the state block for the plan-mode and current-state reminders.
     expect(formatGoal(goal)).toContain("added the ledger regression test")
   })
+
+  test("the compaction preserve list names the completed ledger, not just the checkpoint", async () => {
+    await goalFor("h35-preserve-list")
+    for (const item of ["fixed the goal path migration", "unified the limit contract"])
+      await recordGoalCompletion("h35-preserve-list", item)
+
+    const context = compactionContext((await getGoal("h35-preserve-list"))!)
+    const preserve = context.split("\n").find((line) => line.startsWith("Preserve the goal objective"))
+
+    // The remaining half of the compaction gap. The ledger is now rendered into this text, but the
+    // sentence that tells the summariser what to KEEP still enumerated only the objective, status,
+    // elapsed time, budget usage, latest checkpoint and evidence/blocker. The summariser rewrites
+    // the conversation and keeps what it is told to - so the ledger was in the prompt, visible, and
+    // then dropped anyway, which lands the post-compaction context exactly where the fix above
+    // found it. "Latest checkpoint" is not a substitute: it is a capped 8-entry prose window, and
+    // only the newest completion ever reaches it.
+    expect(preserve).toBeDefined()
+    expect(preserve!.toLowerCase()).toContain("completed")
+  })
 })
 
 describe("H34: the tool layer hands the resume guard the cap it actually enforces", () => {
