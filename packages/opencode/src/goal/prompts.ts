@@ -11,6 +11,23 @@ function budgetLines(goal: GoalSnapshot) {
     `- Tokens remaining: ${goal.remainingTokens ?? "unbounded"}`,
     `- Auto-continues used: ${goal.autoTurns}${goal.maxAutoTurns == null ? "" : `/${goal.maxAutoTurns}`}`,
     `- Duration limit: ${goal.maxDurationSeconds == null ? "none" : `${goal.maxDurationSeconds} seconds`}`,
+    // The two guards that can END this run, and the only two the block did not report. A goal one
+    // quiet turn from the no-progress pause, or one provider blip from the failure ladder, was told
+    // neither - and the continuation prompt is the single prompt an unattended turn actually reads,
+    // so the model could not act on a limit it could not see, nor tell the user it was near one.
+    // `formatGoal` already reported the stall counter in the other three prompts, so the block that
+    // replaced it here was strictly the less informative one. Shown only when live: a zero counter
+    // is noise on the prompt every turn pays for, and the moment it matters it appears.
+    ...(goal.noProgressTurns > 0
+      ? [
+          `- Low-progress turns: ${goal.noProgressTurns}${
+            goal.maxNoProgressTurns == null ? "" : `/${goal.maxNoProgressTurns} (the goal auto-pauses at this many)`
+          }`,
+        ]
+      : []),
+    ...(goal.continuationFailures > 0
+      ? [`- Failed auto-continues: ${goal.continuationFailures} (the goal auto-pauses when these keep repeating)`]
+      : []),
   ].join("\n")
 }
 

@@ -258,6 +258,9 @@ export function goalTools(deps: Deps): Record<string, Tool.Def<Schema.Decoder<un
           {
             agent: typeof context.agent === "string" ? context.agent : null,
             planModePause: planningOnly,
+            // Editing the objective resumes, so this path needs the same configured turn default the
+            // resume guard and runtime enforcement share.
+            defaultMaxAutoTurns: maxAutoTurns,
           },
         )
         return JSON.stringify(planningOnly ? { goal, plan_mode_notice: PLAN_MODE_CREATE_NOTICE } : { goal }, null, 2)
@@ -360,6 +363,9 @@ export function goalTools(deps: Deps): Record<string, Tool.Def<Schema.Decoder<un
           context.sessionID,
           input.status,
           typeof context.agent === "string" ? context.agent : null,
+          // Same reason as `extend_goal` above: the resume guard must resolve the cap the runtime
+          // actually enforces, or it re-admits a goal whose turn allowance is already spent.
+          maxAutoTurns,
         )
         return JSON.stringify({ goal }, null, 2)
       },

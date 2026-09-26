@@ -244,6 +244,58 @@ describe("H4: a deferral for a running task is never dropped", () => {
     expect((await getGoal(sessionID))?.autoTurns).toBeGreaterThan(0)
     await h.dispose?.()
   })
+
+  // The poll above is load-bearing - it is the only re-entry once a running task finishes, because
+  // the child session's own idle event resolves to the CHILD's sessionID and no-ops for the parent.
+  // But a FIXED 25ms cadence made waiting cost linear in the task's duration: a subagent running for
+  // twenty minutes was 48,000 deferral polls, each doing three HTTP round trips
+  // (`session.messages`, `session.children`, `session.status`) against the local server. This is the
+  // unattended shape goal mode exists for, so it is the shape that made the bug expensive.
+  test("a deferral that keeps waiting backs off instead of polling at a fixed rate", async () => {
+    const sessionID = "h4-backoff"
+    await createGoal(sessionID, "deferred", { maxAutoTurns: 100 })
+
+    let childrenCalls = 0
+    let promptCalls = 0
+    // The child never finishes, so the deferral is the only thing that can re-enter.
+    const h = await hooks(
+      {
+        children: () => {
+          childrenCalls += 1
+          return { data: [{ id: "task_1" }] }
+        },
+        status: () => ({ data: { task_1: { type: "busy" } } }),
+        promptAsync: () => {
+          promptCalls += 1
+          return { data: undefined }
+        },
+      },
+      { min_continue_interval_seconds: 1 },
+    )
+
+    await h["tool.execute.before"]?.({ tool: "task", sessionID, callID: "c1" } as never, {} as never)
+    await h["tool.execute.after"]?.(
+      { tool: "task", sessionID, callID: "c1" } as never,
+      { output: "task_id: task_1\nstate: running\n" } as never,
+    )
+
+    await h.event?.({ event: idleEvent(sessionID) } as never)
+    const atFirstDeferral = childrenCalls
+    expect(atFirstDeferral).toBe(1)
+
+    await new Promise((resolve) => setTimeout(resolve, 1_500))
+
+    // The bound, not an exact schedule: it must hold on a slow host too, where fewer polls happen.
+    // A fixed 25ms cadence would be ~60 calls over this window. The first poll still comes promptly
+    // (~TASK_SETTLE_DELAY_MS) so a task that settles immediately is picked up without a wait, and
+    // the count then grows geometrically to a ceiling rather than linearly with the task's duration.
+    expect(childrenCalls).toBeLessThanOrEqual(12)
+    // The bound must not come from giving up: the goal is still blocked, not resumed or abandoned.
+    expect(promptCalls).toBe(0)
+    expect((await getGoal(sessionID))?.autoTurns).toBe(0)
+
+    await h.dispose?.()
+  })
 })
 
 describe("H7: goal bookkeeping never fails a prompt", () => {
@@ -374,13 +426,16 @@ describe("H23: deleting a session releases the tool-call credit it left behind",
   // reused silently has its first stall check waived by a tool call from the previous life.
   test("a tool call made before deletion does not credit a later turn in the same session ID", async () => {
     const sessionID = "h23-stale"
-    await createGoal(sessionID, "work that will stall", { maxAutoTurns: 0 })
+    // One low-progress turn is enough to pause, so the assertion below is unambiguous. The
+    // tolerance is the goal's own: the plugin option of the same name is folded in at creation
+    // rather than consulted on every scored turn (see H32), so a goal created directly has to
+    // carry it.
+    await createGoal(sessionID, "work that will stall", { maxAutoTurns: 0, maxNoProgressTurns: 1 })
 
     let latest: { data: unknown[] } = { data: [] }
     const h = await hooks(
       { messages: () => latest, promptAsync: () => ({ data: undefined }) },
-      // One low-progress turn is enough to pause, so the assertion below is unambiguous.
-      { min_continue_interval_seconds: 1, max_no_progress_turns: 1 },
+      { min_continue_interval_seconds: 1 },
     )
 
     // A turn runs a tool. Nothing scores it, so the count stays parked in `toolCallsBySession`.
@@ -407,8 +462,81 @@ describe("H23: deleting a session releases the tool-call credit it left behind",
   })
 })
 
-describe("H12: tool activity reaches the turn that is actually scored", () => {
-  // An unattended agent doing a refactor or an investigation narrates almost nothing: each turn is
+describe("H32: a goal's own no-progress tolerance is not overridden by the plugin option", () => {
+  // Both `no_progress_token_threshold` and `max_no_progress_turns` exist twice: as a plugin option
+  // and as a per-goal tool argument. The tool documents the per-goal value as the one that must
+  // win - "a caller that asks for a tolerant goal must not be silently downgraded" - and the plugin
+  // option is the default folded in at creation.
+  //
+  // The scoring path contradicted that. `recordAssistantProgress` resolved
+  // `input.noProgressTurns ?? goal.maxNoProgressTurns`, and the driver's scoring call always passed
+  // the OPTION, so a configured option beat the goal's own value on every single scored turn. A goal
+  // created with `max_no_progress_turns: 8` for an overnight run self-paused after the option's 2,
+  // while `get_goal` reported 8 the whole time - the reported limit and the enforced one disagreed,
+  // which is the exact failure the option's own tolerance exists to prevent.
+  //
+  // `maxPromptFailures` already resolves the other way round (`goal.maxPromptFailures ?? maxFailures`),
+  // so this is the same conflict in the two knobs that must not disagree.
+  test("a per-goal max_no_progress_turns governs even when the plugin sets a stricter one", async () => {
+    const sessionID = "h32-goal-wins"
+    await createGoal(sessionID, "overnight haul", { maxAutoTurns: 0, maxNoProgressTurns: 8 })
+
+    let latest: { data: unknown[] } = { data: [] }
+    const h = await hooks(
+      { messages: () => latest, promptAsync: () => ({ data: undefined }) },
+      { min_continue_interval_seconds: 1, max_no_progress_turns: 1 },
+    )
+
+    // The first idle event with no assistant message yet reserves and delivers a continuation, which
+    // is what arms `awaitingContinuationProgress` - only an armed turn is scored.
+    await h.event?.({ event: idleEvent(sessionID) } as never)
+    expect((await getGoal(sessionID))?.awaitingContinuationProgress).toBe(true)
+
+    // A genuinely silent turn: no prose, no tool calls, well under the token threshold. Under the
+    // plugin option that single turn is enough to pause.
+    latest = { data: [{ info: { id: "turn-1", role: "assistant", sessionID, tokens: { output: 40 } }, parts: [] }] }
+    await h.event?.({ event: idleEvent(sessionID) } as never)
+
+    const afterFirst = await getGoal(sessionID)
+    expect(afterFirst?.noProgressTurns).toBe(1)
+    // The stall was counted - this is not the guard being disabled. The goal simply tolerates 8.
+    // H23 covers the other side of the same rule: a goal whose own tolerance is 1 still pauses
+    // after one stall, so nothing here has weakened the guard.
+    expect(afterFirst?.status).toBe("active")
+    expect(afterFirst?.stopReason).toBeNull()
+    // The enforced limit is the goal's, not the option's: `get_goal` and the pause decision must
+    // not read from two different sources, which is the defect this pins.
+    expect(afterFirst?.maxNoProgressTurns).toBe(8)
+
+    await h.dispose?.()
+  })
+
+  test("a per-goal no_progress_token_threshold governs over a stricter plugin option", async () => {
+    const sessionID = "h32-threshold-wins"
+    await createGoal(sessionID, "long build", { maxAutoTurns: 0, maxNoProgressTurns: 99, noProgressTokenThreshold: 5_000 })
+
+    let latest: { data: unknown[] } = { data: [] }
+    // The plugin would call anything above 100 output tokens progress; this goal asked for 5,000, so
+    // a 2,000-token quiet turn IS a low-progress turn for it.
+    const h = await hooks(
+      { messages: () => latest, promptAsync: () => ({ data: undefined }) },
+      { min_continue_interval_seconds: 1, no_progress_token_threshold: 100 },
+    )
+
+    await h.event?.({ event: idleEvent(sessionID) } as never)
+    latest = { data: [{ info: { id: "turn-1", role: "assistant", sessionID, tokens: { output: 2_000 } }, parts: [] }] }
+    await h.event?.({ event: idleEvent(sessionID) } as never)
+
+    const goal = await getGoal(sessionID)
+    expect(goal?.noProgressTurns).toBe(1)
+    // Still active only because this goal asked to tolerate 99 of them.
+    expect(goal?.status).toBe("active")
+
+    await h.dispose?.()
+  })
+})
+
+describe("H12: tool activity reaches the turn that is actually scored", () => {  // An unattended agent doing a refactor or an investigation narrates almost nothing: each turn is
   // nothing but tool calls. Scoring on prose alone paused it after two turns, calling real work a
   // stall - so `recordAssistantProgress` treats a turn with tool calls as progress. That only
   // works if the tool-call count survives until the scoring call.

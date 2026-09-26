@@ -249,6 +249,76 @@ describe("H15: the retained assistant text is bounded", () => {
   })
 })
 
+describe("H31: goal text is truncated on code-point boundaries, not UTF-16 code units", () => {
+  // Every truncation in the goal module has to agree with `withinCharacterLimit`, which counts code
+  // points because that is the unit the tool schema states its limit in. `String.slice` counts UTF-16
+  // code units instead, and an emoji is two of them, so a cut placed by unit index does two wrong
+  // things at once: it keeps about HALF the characters the limit allows, and it can end mid-pair and
+  // leave a LONE SURROGATE behind. The lone surrogate is not cosmetic - it is what
+  // `lastAssistantText` retains, and every checkpoint summary and continuation baseline is derived
+  // from that field, so the derived text stops matching the text it was derived from, and "did this
+  // turn say anything new" is exactly the comparison stall detection turns on.
+  //
+  // Astral text is the input that triggers both halves: the code points of an emoji alternate
+  // between the high and low surrogate at even and odd UNIT indices, so a unit-indexed cut lands on a
+  // high surrogate for one of every two possible cut points.
+  const ASTRAL = "\u{1f600}"
+
+  test("the retained assistant text keeps the character budget, and is a well-formed prefix", async () => {
+    const sessionID = "h31-retained"
+    await createGoal(sessionID, "truncation", { maxAutoTurns: 0 })
+
+    // An odd number of code units before the first emoji, so the unit-indexed cut at
+    // GOAL_MAX_RETAINED_TEXT falls in the middle of a pair.
+    const text = "a" + ASTRAL.repeat(GOAL_MAX_RETAINED_TEXT)
+    await recordAssistantProgress(sessionID, { messageID: "m1", text })
+
+    const retained = (await readState()).goals[sessionID].lastAssistantText
+    expect([...retained].length).toBe(GOAL_MAX_RETAINED_TEXT)
+    // A lone surrogate is not a character, it is half of one, and it renders as a replacement char.
+    expect(retained.isWellFormed()).toBe(true)
+    expect(text.startsWith(retained)).toBe(true)
+  })
+
+  test("a checkpoint summary cut mid-emoji stays well formed", async () => {
+    const sessionID = "h31-checkpoint"
+    await createGoal(sessionID, "truncation", { maxAutoTurns: 0 })
+
+    // Over the character limit, so the summary is actually cut - and a unit-indexed cut at
+    // GOAL_CHECKPOINT_CHAR_LIMIT - 1 lands on the high half of a pair for text like this.
+    await recordAssistantProgress(sessionID, {
+      messageID: "m1",
+      text: ASTRAL.repeat(GOAL_CHECKPOINT_CHAR_LIMIT + 20),
+    })
+
+    const summary = (await getGoal(sessionID))?.lastCheckpoint?.summary ?? ""
+    expect(summary).not.toBe("")
+    expect(summary.isWellFormed()).toBe(true)
+    // The character limit plus the truncation marker, matching the ASCII bound asserted above.
+    expect([...summary].length).toBeLessThanOrEqual(GOAL_CHECKPOINT_CHAR_LIMIT + 2)
+    expect(summary.endsWith("...")).toBe(true)
+  })
+
+  test("a history entry written from an astral objective stays well formed", async () => {
+    // `updateGoalObjective` summarizes at its own 400-character limit, so this covers the
+    // non-checkpoint path through `summarizeText` - and it is model-authored text, which is what
+    // reaches the next turn's context through `get_goal_history`.
+    const sessionID = "h31-history"
+    await createGoal(sessionID, "truncation", { maxAutoTurns: 0 })
+
+    await updateGoalObjective(sessionID, ASTRAL.repeat(500))
+
+    const history = (await readState()).goals[sessionID].history
+    const entry = history.find((item) => item.type === "updated")
+    expect(entry).toBeDefined()
+    expect(entry!.detail.isWellFormed()).toBe(true)
+    // The one history limit, plus the truncation marker. Asserting against the nested 400 this used
+    // to imply would have passed for a string that could never have been produced.
+    expect([...entry!.detail].length).toBeLessThanOrEqual(GOAL_CHECKPOINT_CHAR_LIMIT + 2)
+    expect(entry!.detail.endsWith("...")).toBe(true)
+  })
+})
+
 describe("H17: the wall-clock cursor is normalized like the token cursor", () => {
   // `lastAccountedAt` is the one remaining field that participates in arithmetic without being
   // normalized, and it is the duration limit's counterpart to the token cursor: `accountWallClock`

@@ -66,6 +66,13 @@ type TurnWatchdog = {
 
 const TASK_SETTLE_DELAY_MS = 25
 const SNAPSHOT_IDLE_HOLD_MS = 250
+// Ceiling for the deferral poll's backoff. Waiting for a subagent must not cost a fixed number of
+// round trips per second: each poll is three of them (`session.messages`, `session.children`,
+// `session.status`), so a task left running for twenty minutes was 48,000 polls against the local
+// server - precisely the unattended shape goal mode exists for. The ceiling bounds the wait between
+// polls at about one per second, which is well under the `min_continue_interval_seconds` the
+// continuation itself is throttled by, so the extra latency cannot delay a resumed turn in practice.
+const DEFERRAL_MAX_DELAY_MS = 1_000
 const MAX_TIMER_DELAY_MS = 2_147_483_647
 const TASK_TERMINAL_STATES = new Set<TaskState>(["completed", "error", "cancelled"])
 // Module-scoped so a session cannot be double-continued across instances, but bounded:
@@ -639,7 +646,6 @@ class TaskTracker {
 async function recordAssistantMessage(
   sessionID: string,
   message: { info?: unknown; role?: unknown; id?: unknown; parts?: unknown[] } | undefined,
-  options: Options,
   taskTracker: TaskTracker,
   evaluateContinuation = false,
 ) {
@@ -656,8 +662,6 @@ async function recordAssistantMessage(
     // after two turns of pure tool work. Deriving the count here rather than at each call site
     // keeps the two in step by construction.
     toolCalls: evaluateContinuation ? taskTracker.takeToolCalls(sessionID) : 0,
-    noProgressTokenThreshold: positiveIntegerOrNull(options.no_progress_token_threshold),
-    maxNoProgressTurns: positiveIntegerOrNull(options.max_no_progress_turns),
     evaluateContinuation,
   })
 }
@@ -729,6 +733,10 @@ export function createGoalRuntime(input: { client: Client; options?: Options }):
   const maxPromptFailures = positiveIntegerOrNull(options.max_prompt_failures) ?? GOAL_DEFAULT_MAX_PROMPT_FAILURES
   const taskTracker = new TaskTracker()
   const taskDeferredSessions = new Set<string>()
+  // Consecutive deferrals per session, for the poll backoff. Cleared as soon as the session is no
+  // longer blocked, so the next deferral starts at the settle delay again instead of inheriting a
+  // long wait from a previous, unrelated stall.
+  const deferralAttempts = new Map<string, number>()
   const scheduledContinuations = new Map<string, ReturnType<typeof setTimeout>>()
   const turnWatchdogs = new Map<string, TurnWatchdog>()
   const busySessions = new Set<string>()
@@ -842,18 +850,27 @@ export function createGoalRuntime(input: { client: Client; options?: Options }):
       taskTracker.observeAssistantMessage(sessionID, latestAssistant)
       const taskStatus = await taskBlockStatus(sessionID)
       if (taskStatus && taskStatus.blocked) {
-        taskDeferredSessions.add(sessionID)
         // A running task has no retryAt. Without a bounded poll the deferral is dropped entirely:
         // the only re-entry is the CHILD session's idle event, which resolves to a different
         // sessionID and therefore no-ops. The parent would never resume auto-continue.
+        //
+        // The poll's delay backs off across consecutive defersrals of the SAME session rather than
+        // staying at the settle delay, so the cost of waiting on a long task is bounded instead of
+        // linear in its duration. A snapshot-idle hold is a different case and keeps its own timing:
+        // one expires within SNAPSHOT_IDLE_HOLD_MS, so there is nothing to wait out.
+        const deferrals = (deferralAttempts.get(sessionID) ?? 0) + 1
+        deferralAttempts.set(sessionID, deferrals)
+        taskDeferredSessions.add(sessionID)
         scheduleSettledContinuation(
           sessionID,
-          taskStatus.retryAt != null ? taskStatus.retryAt - Date.now() : TASK_SETTLE_DELAY_MS,
+          taskStatus.retryAt != null
+            ? Math.max(taskStatus.retryAt - Date.now(), 0)
+            : Math.min(TASK_SETTLE_DELAY_MS * 2 ** (deferrals - 1), DEFERRAL_MAX_DELAY_MS),
         )
         return
       }
       if (busySessions.has(sessionID)) return
-      await recordAssistantMessage(sessionID, latestAssistant, options, taskTracker, true)
+      await recordAssistantMessage(sessionID, latestAssistant, taskTracker, true)
       const current = await getGoal(sessionID)
       if (!current) return
       const latestTurnAgent = agentFromMessage(latestAssistant)
@@ -867,6 +884,9 @@ export function createGoalRuntime(input: { client: Client; options?: Options }):
         return
       }
       taskDeferredSessions.delete(sessionID)
+      // Not blocked any more, so the next deferral of this session starts at the settle delay
+      // again rather than inheriting a long backoff from this stall.
+      deferralAttempts.delete(sessionID)
       const goal = await reserveContinuation(sessionID, maxAutoTurns, minInterval)
       if (!goal) return
       reserved = true
@@ -936,6 +956,7 @@ export function createGoalRuntime(input: { client: Client; options?: Options }):
       if (scheduled) clearTimeout(scheduled)
       scheduledContinuations.delete(sessionID)
       taskDeferredSessions.delete(sessionID)
+      deferralAttempts.delete(sessionID)
       taskTracker.observeSessionDeleted(sessionID)
     }
     if (sessionID && (event as { type?: string }).type === "message.updated") {
@@ -949,7 +970,7 @@ export function createGoalRuntime(input: { client: Client; options?: Options }):
       // the continuation baseline, or a user/compaction message ID corrupts no-progress detection.
       if (assistantMarker(message ?? {})) {
         await goalBookkeeping("recordAssistantMessage", () =>
-          recordAssistantMessage(sessionID, message, options, taskTracker),
+          recordAssistantMessage(sessionID, message, taskTracker),
         )
       }
     }
@@ -1005,7 +1026,7 @@ export function createGoalRuntime(input: { client: Client; options?: Options }):
       // XDG_DATA_HOME, read-only volume) must not fail the user's prompt.
       await goalBookkeeping("accountUsage", () => accountUsage(sessionID, tokensFromMessages(output.messages)))
       await goalBookkeeping("recordAssistantMessage", () =>
-        recordAssistantMessage(sessionID, latestAssistantMessage(output.messages), options, taskTracker),
+        recordAssistantMessage(sessionID, latestAssistantMessage(output.messages), taskTracker),
       )
     },
     async "experimental.chat.system.transform"(input, output) {

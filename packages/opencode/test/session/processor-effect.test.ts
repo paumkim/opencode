@@ -2332,3 +2332,46 @@ itNoEdit.instance(
     }),
   { config: cfg },
 )
+
+// The same two steps, but the LATER step omits `totalTokens`. `total` is optional per step, so the
+// addend's own total is missing and must be reconstructed from its parts BEFORE it is added - not
+// after. `getUsage` copies the provider's optional `totalTokens` straight through, so a provider that
+// reports it on one step and not the next is a real input, not a synthetic one.
+itNoEdit.instance(
+  "session.processor a step that omits totalTokens still contributes its share of the message total",
+  () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const { processors, session, provider } = yield* boot()
+
+      const chat = yield* session.create({})
+      const parent = yield* user(chat.id, "two steps")
+      const msg = yield* assistant(chat.id, parent.id, path.resolve(test.directory))
+      const base = yield* provider.getModel(ref.providerID, ref.modelID)
+      const mdl = { ...base, cost: { input: 1_000_000, output: 2_000_000, cache: { read: 0, write: 0 } } }
+      const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: mdl })
+
+      const first = new Usage({ inputTokens: 1_000, outputTokens: 100, totalTokens: 1_100 })
+      const second = new Usage({ inputTokens: 1_200, outputTokens: 300 })
+      pushLLM(twoStepTurn("read", first, second))
+
+      yield* handle.process({
+        user: parent, sessionID: chat.id, model: mdl, agent: agent(), system: [],
+        messages: [{ role: "user", content: "two steps" }], tools: {},
+      })
+
+      // The per-part columns are unaffected - they are summed unconditionally, so they are the
+      // control for the total below.
+      expect(handle.message.tokens.input).toBe(2_200)
+      expect(handle.message.tokens.output).toBe(400)
+      // 1100 (reported) + 1500 (reconstructed from the second step's own parts). Accumulating the
+      // reported totals first and reconstructing afterwards instead froze the total at the last
+      // step that HAD one: 1100, which is less than `input` alone - a message whose own parts
+      // already sum past its total.
+      expect(handle.message.tokens.total).toBe(2_600)
+      expect(handle.message.tokens.total).toBe(
+        handle.message.tokens.input + handle.message.tokens.output + handle.message.tokens.reasoning,
+      )
+    }),
+  { config: cfg },
+)

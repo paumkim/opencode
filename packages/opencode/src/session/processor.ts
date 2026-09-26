@@ -71,18 +71,26 @@ function canonicalJSON(value: unknown): string {
  * `total` is optional per step, so a missing value must not yield NaN. The fallback reconstructs
  * it the way the provider computes it: `getUsage` splits the provider's output into
  * `output + reasoning`, so the parts are summed including reasoning.
+ *
+ * Reconstruction is applied to the ADDEND, not to the running sum. `getUsage` copies the provider's
+ * optional `totalTokens` through unchanged, so a step can arrive without one, and treating that
+ * absence as 0 in the sum left the total frozen at the last step that DID report one: the sum stayed
+ * at that step's total while the parts around it kept accumulating, so the message ended up reporting
+ * a total below its own `input` alone. Reconstructing afterwards could not recover it, because the
+ * running total was non-zero and therefore won the `total || parts` fallback.
  */
 function accumulateTokens(current: SessionV1.Assistant["tokens"], add: SessionV1.Assistant["tokens"]) {
-  const next = {
-    total: (current.total ?? 0) + (add.total ?? 0),
+  return {
+    // The shared reconstruction decides what a missing total means, per step; see `totalTokens` in
+    // ./overflow for why it must include reasoning. Summing the reconstructed values keeps a turn
+    // whose steps agree with their own parts exact, and keeps a turn that mixed reported and
+    // reconstructed steps from dropping the latter.
+    total: totalTokens(current) + totalTokens(add),
     input: current.input + add.input,
     output: current.output + add.output,
     reasoning: current.reasoning + add.reasoning,
     cache: { read: current.cache.read + add.cache.read, write: current.cache.write + add.cache.write },
   }
-  // `total` is optional per step, so summing it can be 0. The shared reconstruction decides what a
-  // missing total means; see `totalTokens` in ./overflow for why it must include reasoning.
-  return { ...next, total: totalTokens(next) }
 }
 
 // Record a turn signature into the rolling per-session window and flag a
@@ -143,7 +151,14 @@ export interface Handle {
   readonly process: (streamInput: LLM.StreamInput) => Effect.Effect<ProcessResult>
   readonly loopDetected: boolean
   readonly noEditStreak: number
-  readonly loopReason: "doom" | "text" | "no_edit" | "churn" | "oscillation" | "reasoning" | "alternation" | "none"
+  /**
+   * Why a loop was reported, most specific first. Only the reasons a detector can actually raise
+   * are listed: the union used to advertise `no_edit`, `churn` and `oscillation` as well, and the
+   * getter cannot return any of them - `no_edit` is a session-level measurement that deliberately
+   * does not set `loopDetected`, and the other two have no detector at all. A consumer that branched
+   * on one of them was writing code the loop detector could never reach, and the type invited it.
+   */
+  readonly loopReason: "doom" | "text" | "reasoning" | "alternation" | "none"
   /** Self-watch: the session checks its own health + all child/subagent sessions. */
   readonly watch: () => Effect.Effect<WatchEntry[]>
 }
@@ -1210,7 +1225,7 @@ if (ctx.currentText.text.trim()) {
         get noEditStreak() {
           return ctx.noEditStreak
         },
-get loopReason() {
+        get loopReason() {
             if (!ctx.loopDetected) return "none"
             // Most specific detectors first: a model that is repeating
             // identical reasoning or text across turns is in a content loop,
