@@ -91,6 +91,14 @@ const cli = yargs(args)
 
     Heap.start()
 
+    // Keep the per-provider client versions current in the background. Header
+    // construction reads the resulting cache synchronously and never blocks on
+    // the network, so this only costs one small file read per request. Failures
+    // are swallowed so a registry outage cannot affect startup.
+    void import("@opencode-ai/core/installation/provider-identity")
+      .then((module) => module.ProviderIdentity.refreshStale())
+      .catch(() => {})
+
     process.env.AGENT = "1"
     process.env.OPENCODE = "1"
     process.env.OPENCODE_PID = String(process.pid)
