@@ -18,7 +18,7 @@ import {
   statePath,
 } from "@/goal/impl"
 import { internalPluginIds } from "@/plugin/index"
-import { GOAL_DEFAULT_MAX_AUTO_TURNS } from "@/goal/schema"
+import { GOAL_DEFAULT_MAX_AUTO_TURNS, GOAL_DEFAULT_NO_PROGRESS_TOKEN_THRESHOLD } from "@/goal/schema"
 import { GOAL_PROMPT } from "@opencode-ai/core/prompt/command"
 import { CONFIG_KEY, readGoalOptions } from "@/goal/shared"
 import { goalTools } from "@/goal/tools"
@@ -290,7 +290,7 @@ describe("M1/M2: resume paths behave identically and refresh progress state", ()
     await recordAssistantProgress(sessionID, {
       messageID: "z0",
       text: "same",
-      outputTokens: 500,
+      outputTokens: 900,
       evaluateContinuation: true,
     })
     expect((await getGoal(sessionID))?.noProgressTurns).toBe(0)
@@ -458,6 +458,48 @@ describe("overnight tolerance: a goal may opt out of the interactive self-pause 
     const stopped = await getGoal(sessionID)
     expect(stopped?.status).toBe("paused")
     expect(stopped?.stopReason).toBe("auto-continue failures")
+  })
+
+  test("a terse but productive continuation turn is not scored as no progress", async () => {
+    const sessionID = "terse-but-busy"
+    await createGoal(sessionID, "run one command and report", { maxAutoTurns: 0 })
+    // An overnight agent that runs a single command and answers in a sentence emits far less than
+    // the old 50-token floor. Pausing it was punishing efficiency, not detecting a stall.
+    expect((await getGoal(sessionID))?.noProgressTokenThreshold).toBe(
+      GOAL_DEFAULT_NO_PROGRESS_TOKEN_THRESHOLD,
+    )
+    await reserveContinuation(sessionID, 0, 0)
+    await recordContinuationResult(sessionID, "success", 3)
+    await recordAssistantProgress(sessionID, {
+      messageID: "t0",
+      text: "ran the suite, 3 failures in parser",
+      outputTokens: 120,
+      evaluateContinuation: true,
+    })
+    await reserveContinuation(sessionID, 0, 0)
+    await recordContinuationResult(sessionID, "success", 3)
+    // A productive turn says something new. Low output alone must not pause it.
+    await recordAssistantProgress(sessionID, {
+      messageID: "t1",
+      text: "fixed the parser, rerunning the suite",
+      outputTokens: 90,
+      evaluateContinuation: true,
+    })
+    const goal = await getGoal(sessionID)
+    expect(goal?.noProgressTurns).toBe(0)
+    expect(goal?.status).toBe("active")
+
+    // Repeating the same summary verbatim with no output is the real stall signal, and it is
+    // detected on the text, not the token count.
+    await reserveContinuation(sessionID, 0, 0)
+    await recordContinuationResult(sessionID, "success", 3)
+    await recordAssistantProgress(sessionID, {
+      messageID: "t2",
+      text: "fixed the parser, rerunning the suite",
+      outputTokens: 90,
+      evaluateContinuation: true,
+    })
+    expect((await getGoal(sessionID))?.noProgressTurns).toBe(1)
   })
 
   test("a goal without an override still uses the plugin default", async () => {
