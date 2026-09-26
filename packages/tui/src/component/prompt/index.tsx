@@ -970,7 +970,16 @@ export function Prompt(props: PromptProps) {
     }
     if (props.disabled) return false
     if (workspace.creating() || move.creating()) return false
-    if (auto()?.visible) return false
+    // A bare, fully-typed command deliberately keeps the autocomplete menu open (see
+    // Autocomplete `onInput`), so Enter is consumed by `prompt.autocomplete.select` and the
+    // command needs a second Enter to run. An exact match has nothing left to complete, so
+    // submit it directly; clearing the input at the end of this function closes the menu.
+    if (auto()?.visible) {
+      const typed = store.prompt.input.trim()
+      const exact =
+        typed.startsWith("/") && !/\s/.test(typed) && sync.data.command.some((x) => x.name === typed.slice(1))
+      if (!exact) return false
+    }
     if (!store.prompt.input) return false
     const agent = local.agent.current()
     if (!agent) return false
