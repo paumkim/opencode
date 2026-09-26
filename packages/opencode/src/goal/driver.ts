@@ -10,6 +10,7 @@ import {
   recordPromptAgent,
   readState,
   reserveContinuation,
+  setGoalStatus,
 } from "@/goal/impl"
 import { compactionContext, continuationPrompt, limitPrompt, systemReminder } from "@/goal/prompts"
 import { Config } from "@/config/config"
@@ -714,7 +715,32 @@ function isCompactionRequest(system: string[] | undefined) {
   })
 }
 
-/** Detects the compaction transform, whose message array is a partial history rather than the full one. */
+/**
+ * The call site declaring that this is the compaction transform. This is the only signal that
+ * actually works, and the scan in `isCompactionTransform` is not one:
+ *
+ * `SessionCompaction.process` hands the hook the compacted-away PREFIX, and it filters prior
+ * compaction summaries out of that prefix before the hook fires (`hidden` in `compaction.ts`).
+ * So the array a compaction transform receives normally contains no compaction marker at all, the
+ * scan returns false, and the prefix is charged as if it were the whole session. That is not
+ * self-correcting: the smaller total rewinds `lastSessionTokens`, so the next ordinary turn - which
+ * does see the full history - charges the entire retained context as fresh usage, on every
+ * compaction. A goal under a token budget therefore exhausted its budget after roughly one
+ * compaction no matter how little it had actually spent.
+ *
+ * Narrowed by hand rather than by widening the public plugin hook type: `Hooks` declares
+ * `input: {}`, and an additive optional field there would change the published SDK contract for
+ * every plugin to fix a problem only core has.
+ */
+function isCompactionTransformInput(input: unknown) {
+  return typeof input === "object" && input !== null && (input as { compaction?: unknown }).compaction === true
+}
+
+/**
+ * Fallback identification of a compaction transform by its contents, for a caller that does not
+ * pass the marker. Kept because it costs nothing and covers an array that does still carry a
+ * compaction message - but it must never be the only check, for the reason above.
+ */
 function isCompactionTransform(messages: unknown[]) {
   return messages.some((message) => {
     const info = (message as { info?: unknown } | undefined)?.info
@@ -797,6 +823,38 @@ export function createGoalRuntime(input: { client: Client; options?: Options }):
       if (activeContinuations.has(sessionID)) continue
       if (scheduledContinuations.has(sessionID)) continue
       if (now - goal.updatedAt < Math.floor(maxStallMs / 1000)) continue
+
+      // Whether the session is still alive matters: re-arming a goal whose session is gone is how a
+      // long-lived state file fills with live-looking goals that quietly burn an auto-turn every
+      // threshold forever, and a dispatch to a missing session is not recorded as a prompt failure,
+      // so the ladder never trips and the loop is self-sustaining.
+      //
+      // But a FAILED lookup is AMBIGUOUS, and must not be resolved destructively. The goal state
+      // file is GLOBAL - `statePath()` has no directory component - while this runtime's client is
+      // directory-scoped, and a goal carries no project identity of its own, so this sweep cannot
+      // tell its own goals from another project's. Every session belonging to another project 404s
+      // here exactly like a deleted one does. Retiring on that ambiguity means opening a second
+      // project can PAUSE a live unattended goal belonging to the first, silently, and precisely in
+      // the long runs where a spurious pause does the most damage.
+      //
+      // So an ambiguous lookup leaves the goal alone. The cost is that a genuinely dead session's
+      // goal is no longer auto-retired - the pre-existing behaviour, which merely leaves a stale
+      // entry that is visible and hand-clearable. Trading a silent pause of someone else's live goal
+      // for a stale row is the right way round. The real fix is to record the owning directory on
+      // each goal so the sweep can scope itself; that is a persisted-schema change and an owner's
+      // call, not a minimal fix.
+      const session = await Promise.resolve(client.session.get({ path: { id: sessionID } } as never)).catch(
+        () => null,
+      )
+      const info = (session as { data?: { info?: unknown } } | null)?.data?.info
+      if (!info || typeof (info as { id?: unknown }).id !== "string") {
+        console.warn(
+          `[goal] cannot confirm session ${sessionID} from this project; leaving its stalled goal alone ` +
+            "(goal state is global, so it may belong to another project)",
+        )
+        continue
+      }
+
       console.warn(`[goal] active goal idle for ${now - goal.updatedAt}s with no idle event; re-arming`)
       await runAutoContinue(sessionID)
     }
@@ -1084,8 +1142,9 @@ export function createGoalRuntime(input: { client: Client; options?: Options }):
       // compaction. The guard therefore has to come BEFORE `accountUsage`, which is the call that
       // moves the cursor. It also covers the assistant-progress call below, for the same reason: a
       // prefix is not the session's latest assistant message and must not become a progress
-      // baseline.
-      if (isCompactionTransform(output.messages)) return
+      // baseline. The marker the call site passes is the signal that works - the prefix has its
+      // compaction markers stripped, so the array itself cannot be trusted to identify this call.
+      if (isCompactionTransformInput(input) || isCompactionTransform(output.messages)) return
       // This hook runs inside the LLM step loop. A state read/write failure (unwritable
       // XDG_DATA_HOME, read-only volume) must not fail the user's prompt.
       await goalBookkeeping("accountUsage", () => accountUsage(sessionID, tokensFromMessages(output.messages)))

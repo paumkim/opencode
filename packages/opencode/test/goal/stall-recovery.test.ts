@@ -28,7 +28,7 @@ afterEach(async () => {
 function client() {
   return {
     session: {
-      get: () => ({ data: { id: "s" } }),
+      get: () => ({ data: { id: "s", info: { id: "s" } } }),
       messages: () => ({ data: [] }),
       children: () => ({ data: [] }),
       status: () => ({ data: {} }),
@@ -118,6 +118,60 @@ describe("the stall sweep re-arms a goal whose turn ended without an idle event"
     await rt.sweepStalledGoals()
 
     expect((await getGoal(sessionID))?.autoTurns).toBe(1)
+    await rt.dispose()
+  })
+
+  test("a session the sweep cannot confirm is left alone, not retired", async () => {
+    const sessionID = "stall-6"
+    await createGoal(sessionID, "keep going", { maxAutoTurns: 100 })
+    await backdate(sessionID, 600)
+
+    // The session 404s. This is also EXACTLY what a session belonging to a different project looks
+    // like: the goal state file is global (`statePath()` has no directory component) while this
+    // runtime's client is directory-scoped, and a goal records no project of its own, so the sweep
+    // cannot distinguish "deleted" from "someone else's". Both used to be retired, which meant
+    // opening a second project could pause a live unattended goal belonging to the first.
+    //
+    // So the ambiguous case is non-destructive: skip it. Re-arming on a 404 was the alternative
+    // concern (a dispatch to a missing session is not recorded as a prompt failure, so the ladder
+    // never trips) - but that produces a stale row in a JSON file that a human can clear, whereas
+    // retiring produces a silent pause of a run that may be hours old. A directory recorded on the
+    // goal would make this decidable; until then, not acting is the safe side of the ambiguity.
+    const rt = createGoalRuntime({
+      client: {
+        session: {
+          get: () => ({ error: { message: "not found" }, response: { status: 404 } }),
+          messages: () => ({ data: [] }),
+          children: () => ({ data: [] }),
+          status: () => ({ data: {} }),
+          promptAsync: () => ({ data: undefined }),
+        },
+        app: { log: () => ({ data: {} }) },
+      } as never,
+      options: { auto_continue: true, max_stall_before_continue: 60 } as never,
+    })
+    await rt.sweepStalledGoals()
+
+    const goal = await getGoal(sessionID)
+    // Untouched: not retired, and not re-armed into a dispatch to a session that may not be ours.
+    expect(goal?.status).toBe("active")
+    expect(goal?.autoTurns).toBe(0)
+    expect(goal?.stopReason).toBeNull()
+    await rt.dispose()
+  })
+
+  test("a goal whose session still exists is re-armed, not retired", async () => {
+    const sessionID = "stall-7"
+    await createGoal(sessionID, "keep going", { maxAutoTurns: 100 })
+    await backdate(sessionID, 600)
+
+    // The control for the test above: a real session must still be continued.
+    const rt = runtime()
+    await rt.sweepStalledGoals()
+
+    const goal = await getGoal(sessionID)
+    expect(goal?.status).toBe("active")
+    expect(goal?.autoTurns).toBe(1)
     await rt.dispose()
   })
 })
