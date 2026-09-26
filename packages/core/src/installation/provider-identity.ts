@@ -96,7 +96,7 @@ export function familyForProvider(
 // never await; refreshed in the background.
 
 const CACHE_FILE = "provider-versions.json"
-const DAY_MS = 24 * 60 * 60 * 1000
+export const DAY_MS = 24 * 60 * 60 * 1000
 
 interface CacheEntry {
   version: string

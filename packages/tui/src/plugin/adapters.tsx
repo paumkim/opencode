@@ -18,7 +18,7 @@ import * as Keymap from "../keymap"
 import { createCommandShim } from "./command-shim"
 import type { PluginRoutes } from "./api"
 import { formatVersionStamp } from "../util/version-stamp"
-import { familyForProvider, resolveCachedVersionSync } from "../util/provider-versions"
+import { familyForProvider, versionForSync } from "../util/provider-versions"
 export type { RouteMap } from "./api"
 export { createPluginRoutes, createTuiApi } from "./api"
 
@@ -178,14 +178,11 @@ function appApi(
         const providerID = opts?.local?.model?.current?.()?.providerID
         const managed = opts?.sync?.data.console_state.consoleManagedProviders ?? opts?.consoleManagedProviders
         const family = familyForProvider(providerID, managed)
-        const kvGet = (k: string, f?: unknown) => {
-          try {
-            return opts?.kv?.get(k, f)
-          } catch {
-            return f
-          }
-        }
-        const resolved = resolveCachedVersionSync(kvGet, family, version)
+        // Reads the same table the outbound User-Agent is built from, so the
+        // version shown in the footer cannot differ from the one a provider
+        // actually receives. No fetch here; the background refresh runs in
+        // app.tsx. Provider check happens before sending.
+        const resolved = versionForSync(family, version)
         return formatVersionStamp({ version: resolved, providerID, consoleManagedProviders: managed })
       } catch {
         return formatVersionStamp({ version })

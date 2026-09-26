@@ -538,8 +538,11 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
   const args = useArgs()
   onMount(() => {
     // First boot (and at most once/day per family): refresh live versions in
-    // background. First paint already used KV cache -> pinned, so never blocks.
-    void ensureProviderVersionsFresh({ kv }).catch(() => undefined)
+    // background. First paint already used cache -> pinned, so never blocks.
+    // Shares the provider-identity table and cache that build the outbound
+    // User-Agent, so the footer cannot show a different version than a provider
+    // actually receives.
+    void ensureProviderVersionsFresh().catch(() => undefined)
     batch(() => {
       if (args.agent) local.agent.set(args.agent)
       if (args.model) {

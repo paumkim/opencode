@@ -1,20 +1,24 @@
-// Single source of truth for the TUI version stamp.
+// Display formatting for the version stamp shown in the TUI.
 // Fast: pure + sync, no fetch, safe to call in a render getter.
-// Live versions come from provider-versions.ts KV cache (daily refresh);
-// PINNED_* below are fallbacks only, never the display when cache exists.
-export const PINNED_VERSION = "1.18.32"
-export const PINNED_KILO_VERSION = "7.7.6"
+//
+// Version resolution lives in @opencode-ai/core/installation/provider-identity,
+// which is also what builds the outbound User-Agent, so the footer and the wire
+// cannot disagree. This file only decides how a resolved version is rendered.
+import { ProviderIdentity } from "@opencode-ai/core/installation/provider-identity"
+
+export const PINNED_VERSION = ProviderIdentity.IDENTITIES.opencode.pinned
+export const PINNED_KILO_VERSION = ProviderIdentity.IDENTITIES.kilo.pinned
 
 export function normalizeVersion(raw: unknown): string {
-  if (typeof raw !== "string") return PINNED_VERSION
-  const v = raw.trim().replace(/^v/, "")
-  // Reject dev/preview stamps so the footer never reverts to generic.
-  // e.g. "0.0.0-dev-...", "0.0.0-", "local", "" -> pinned release.
-  if (!v || v === "local" || v.startsWith("0.0.0-") || v.startsWith("0.0.0_")) return PINNED_VERSION
-  return v
+  // Reject dev/preview stamps so the footer never reverts to generic, using the
+  // same guard the wire uses. e.g. "0.0.0-dev-...", "local", "" -> pinned release.
+  return ProviderIdentity.normalize(raw) ?? PINNED_VERSION
 }
 
-export function isConsoleProvider(providerID: string | undefined, consoleManaged: readonly string[] | ReadonlySet<string> | undefined): boolean {
+export function isConsoleProvider(
+  providerID: string | undefined,
+  consoleManaged: readonly string[] | ReadonlySet<string> | undefined,
+): boolean {
   if (!providerID) return false
   // opencode zen family: "opencode", "opencode-zen", "opencode/..." etc.
   if (providerID === "opencode" || providerID.startsWith("opencode")) return true
