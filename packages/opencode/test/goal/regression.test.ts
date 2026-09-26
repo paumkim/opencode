@@ -1408,6 +1408,35 @@ describe("H11: every model-facing goal report escapes the same way", () => {
     expect(summary).not.toContain("<system>")
   })
 
+  test("a history timestamp the Date range cannot represent does not throw", async () => {
+    const sessionID = "h11-bad-timestamp"
+    await createGoal(sessionID, "keep improving", { maxAutoTurns: 10 })
+
+    // The bug: `historyLine` formats the stamp with `new Date(ts * 1000).toISOString()`, and
+    // `toISOString` THROWS a RangeError on an invalid date rather than returning something
+    // printable. The state file is user-writable and `HistoryEntrySchema` types the stamp as a bare
+    // `Schema.Number`, which accepts 1e300 - so the value decodes fine and only explodes at render
+    // time. That throw escaped `formatGoalHistory` into `get_goal_history`, so the model got a failed
+    // tool call instead of a report: one corrupt stamp makes the goal's whole history unreadable,
+    // including the entries around it that are perfectly valid.
+    const state = JSON.parse(await Bun.file(statePath()).text())
+    state.goals[sessionID].history = [
+      { type: "created", detail: "an ordinary entry", timestamp: 1_700_000_000 },
+      { type: "warning", detail: "the bad one", timestamp: 1e300 },
+      { type: "completed", detail: "also ordinary", timestamp: 1_700_000_100 },
+    ]
+    await writeFile(statePath(), JSON.stringify(state))
+
+    const report = formatGoalHistory((await getGoal(sessionID))!)
+
+    // The report must render, and it must still carry the entries that ARE representable - a
+    // fallback that dropped the whole history would pass a "does not throw" check while fixing
+    // nothing for the model.
+    expect(report).toContain("an ordinary entry")
+    expect(report).toContain("also ordinary")
+    expect(report).toContain("the bad one")
+  })
+
   test("escaping is applied to the escaping-sensitive characters only", async () => {
     const sessionID = "h11-chars"
     await createGoal(sessionID, "a & b", { maxAutoTurns: 10 })
