@@ -58,24 +58,51 @@ export function duration(input: number) {
   return `${days}d ${hours}h`
 }
 
+const ELLIPSIS = "…"
+
+// Callers derive these budgets from measured terminal geometry and clamp them
+// with Math.max(1, ...), so 0, 1 and 2 are ordinary inputs rather than
+// degenerate ones. Slicing by a negative offset is not usable here: slice(-0) is
+// slice(0), so a zero-width tail silently returns the whole string. Every cut is
+// therefore taken from an explicit index.
+
+// A cut landing between the two halves of an astral character (emoji, CJK
+// extension) leaves a lone surrogate that renders as a replacement glyph. A cut
+// between two unrelated surrogates is harmless and is left alone.
+function splitsSurrogatePair(str: string, index: number) {
+  const high = str.charCodeAt(index - 1)
+  const low = str.charCodeAt(index)
+  return high >= 0xd800 && high <= 0xdbff && low >= 0xdc00 && low <= 0xdfff
+}
+
+function head(str: string, count: number) {
+  if (count <= 0) return ""
+  return str.slice(0, splitsSurrogatePair(str, count) ? count - 1 : count)
+}
+
+function tail(str: string, count: number) {
+  if (count <= 0) return ""
+  const start = str.length - count
+  return str.slice(start > 0 && splitsSurrogatePair(str, start) ? start + 1 : start)
+}
+
 export function truncate(str: string, len: number): string {
   if (str.length <= len) return str
-  return str.slice(0, len - 1) + "…"
+  if (len <= 0) return ""
+  return head(str, len - 1) + ELLIPSIS
 }
 
 export function truncateLeft(str: string, len: number): string {
   if (str.length <= len) return str
-  return "…" + str.slice(-(len - 1))
+  if (len <= 0) return ""
+  return ELLIPSIS + tail(str, len - 1)
 }
 
 export function truncateMiddle(str: string, maxLength: number = 35): string {
   if (str.length <= maxLength) return str
-
-  const ellipsis = "…"
-  const keepStart = Math.ceil((maxLength - ellipsis.length) / 2)
-  const keepEnd = Math.floor((maxLength - ellipsis.length) / 2)
-
-  return str.slice(0, keepStart) + ellipsis + str.slice(-keepEnd)
+  if (maxLength <= 0) return ""
+  const available = maxLength - ELLIPSIS.length
+  return head(str, Math.ceil(available / 2)) + ELLIPSIS + tail(str, Math.floor(available / 2))
 }
 
 export function pluralize(count: number, singular: string, plural: string): string {
