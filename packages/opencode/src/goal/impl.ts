@@ -678,7 +678,11 @@ export async function recordAssistantProgress(sessionID: string, input: Assistan
       // the counter, silently disabling stall detection for providers that report no step tokens.
       const lowOutput = outputTokens < (threshold ?? GOAL_DEFAULT_NO_PROGRESS_TOKEN_THRESHOLD)
       const changedSinceContinuation = Boolean(summary && summary !== goal.continuationBaselineSummary)
-      if (lowOutput && !changedSinceContinuation) {
+      // A turn that ran tools did something, even when the model narrated none of it. Scoring
+      // on prose alone paused a long refactor or investigation - the common unattended shape -
+      // after two tool-only turns, calling real work a stall.
+      const workedWithTools = (input.toolCalls ?? 0) > 0
+      if (lowOutput && !changedSinceContinuation && !workedWithTools) {
         goal.noProgressTurns += 1
         if (maxNoProgressTurns && goal.noProgressTurns >= maxNoProgressTurns) {
           accountWallClock(goal)

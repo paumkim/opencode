@@ -142,6 +142,7 @@ export type AssistantProgressInput = {
   noProgressTokenThreshold?: number | null
   maxNoProgressTurns?: number | null
   evaluateContinuation?: boolean
+  toolCalls?: number | null
 }
 
 const HistoryEntrySchema = Schema.Struct({

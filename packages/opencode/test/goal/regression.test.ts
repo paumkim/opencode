@@ -503,6 +503,50 @@ describe("overnight tolerance: a goal may opt out of the interactive self-pause 
     expect((await getGoal(sessionID))?.noProgressTurns).toBe(1)
   })
 
+  test("a tool-only turn counts as progress, so a silent working agent is not paused", async () => {
+    const sessionID = "tool-only"
+    await createGoal(sessionID, "long refactor", { maxAutoTurns: 0 })
+    // An unattended agent doing a refactor or an investigation narrates almost nothing: each
+    // turn is just tool calls. Scoring on prose alone paused it after two turns, calling real
+    // work a stall. Three low-output, textless turns with tool activity must stay active.
+    for (const id of ["a", "b", "c"]) {
+      await reserveContinuation(sessionID, 0, 0)
+      await recordContinuationResult(sessionID, "success", 3)
+      await recordAssistantProgress(sessionID, {
+        messageID: id,
+        text: "",
+        outputTokens: 40,
+        toolCalls: 2,
+        evaluateContinuation: true,
+      })
+    }
+    const worked = await getGoal(sessionID)
+    expect(worked?.noProgressTurns).toBe(0)
+    expect(worked?.status).toBe("active")
+  })
+
+  test("a genuinely silent turn with no tools and no text is still a stall", async () => {
+    const sessionID = "truly-silent"
+    await createGoal(sessionID, "stalled out", { maxAutoTurns: 0 })
+    // The fix must not become a blanket amnesty: with no tool calls and no output, the same
+    // scoring still pauses the goal.
+    for (const id of ["a", "b", "c"]) {
+      await reserveContinuation(sessionID, 0, 0)
+      await recordContinuationResult(sessionID, "success", 3)
+      await recordAssistantProgress(sessionID, {
+        messageID: id,
+        text: "",
+        outputTokens: 0,
+        toolCalls: 0,
+        evaluateContinuation: true,
+      })
+    }
+    const stalled = await getGoal(sessionID)
+    expect(stalled?.noProgressTurns).toBe(2)
+    expect(stalled?.status).toBe("paused")
+    expect(stalled?.stopReason).toBe("no progress")
+  })
+
   test("a goal without an override still uses the plugin default", async () => {
     const sessionID = "supervised"
     await createGoal(sessionID, "supervised work", { maxAutoTurns: 0 })
