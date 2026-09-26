@@ -87,6 +87,10 @@ delete process.env["OTEL_RESOURCE_ATTRIBUTES"]
 // testing permissions and fail on unrelated timeouts. The suite must not depend on how a
 // developer's shell happens to be configured.
 delete process.env["OPENCODE_UNRESTRICTED"]
+// The opencode provider treats this as "a key is configured" and becomes available. It is
+// commonly exported in a shell profile, which would make provider availability in a test run
+// depend on the developer's environment rather than on the test's own config.
+delete process.env["OPENCODE_API_KEY"]
 
 // Use in-memory sqlite
 process.env["OPENCODE_DB"] = ":memory:"
