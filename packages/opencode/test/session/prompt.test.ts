@@ -48,6 +48,8 @@ import { Shell } from "@opencode-ai/core/shell"
 import { Snapshot } from "../../src/snapshot"
 import { ToolRegistry } from "@/tool/registry"
 import { Truncate } from "@/tool/truncate"
+import { TRUNCATION_DIR } from "@/tool/truncation-dir"
+import { stat as statFile } from "node:fs/promises"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { Ripgrep } from "@opencode-ai/core/ripgrep"
 import { Format } from "../../src/format"
@@ -2942,5 +2944,70 @@ noLLMServer.instance(
         }
       }
     }),
+  30_000,
+)
+
+// The interactive shell used to accumulate every chunk into one string and
+// persist the part on each chunk, so a command producing unbounded output grew
+// the heap and the write rate with the command rather than with the visible
+// window. Output is now bounded and spilled, and persistence is throttled.
+unixNoLLMServer(
+  "shell bounds retained output and spills the full text to disk",
+  () =>
+    Effect.gen(function* () {
+      if (!(yield* hasBash)) return
+      const { prompt, chat } = yield* boot()
+
+      // 4MB, comfortably past the 50KB default max_bytes, so it must spill.
+      const result = yield* prompt
+        .shell({
+          sessionID: chat.id,
+          agent: "build",
+          command: "yes 0123456789abcdefghijklmnopqrstuvwxyz | head -c 4194304",
+        })
+        .pipe(Effect.exit)
+      expect(Exit.isSuccess(result)).toBe(true)
+      if (!Exit.isSuccess(result)) return
+
+      const tool = completedTool(result.value.parts)
+      if (!tool) return
+      const output = tool.state.output ?? ""
+
+      // Retained text is bounded no matter how much was produced: 4MB in, far
+      // under 1MB out. Without the bound this assertion is ~4MB.
+      expect(Buffer.byteLength(output, "utf-8")).toBeLessThan(1024 * 1024)
+      expect(output.length).toBeGreaterThan(0)
+
+      // The full output is recoverable, so nothing is silently lost.
+      const path = (tool.state.metadata as { outputPath?: string } | undefined)?.outputPath
+      expect(path).toBeDefined()
+      if (!path) return
+      expect(path.startsWith(TRUNCATION_DIR)).toBe(true)
+      const stat = yield* Effect.promise(() => statFile(path))
+      expect(stat.size).toBeGreaterThan(4 * 1024 * 1024 - 65536)
+    }),
+  { config: { ...cfg, shell: "bash" } },
+  120_000,
+)
+
+unixNoLLMServer(
+  "shell keeps small output whole and does not spill it",
+  () =>
+    Effect.gen(function* () {
+      if (!(yield* hasBash)) return
+      const { prompt, chat } = yield* boot()
+      const result = yield* prompt.shell({
+        sessionID: chat.id,
+        agent: "build",
+        command: "printf hello-from-shell",
+      })
+
+      const tool = completedTool(result.parts)
+      if (!tool) return
+      expect(tool.state.output).toContain("hello-from-shell")
+      // Below the threshold nothing is written to the spill directory.
+      expect((tool.state.metadata as { outputPath?: string } | undefined)?.outputPath).toBeUndefined()
+    }),
+  { config: { ...cfg, shell: "bash" } },
   30_000,
 )

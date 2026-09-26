@@ -27,6 +27,7 @@ import * as Stream from "effect/Stream"
 import { Command } from "../command"
 import { Checkpoint } from "@/checkpoint/checkpoint"
 import { pathToFileURL, fileURLToPath } from "url"
+import { createWriteStream } from "node:fs"
 import { Config } from "@/config/config"
 import { ConfigMarkdown } from "@/config/markdown"
 import { SessionSummary } from "./summary"
@@ -65,6 +66,12 @@ globalThis.AI_SDK_LOG_WARNINGS = false
 const decodeMessageInfo = Schema.decodeUnknownExit(SessionV1.Info)
 const decodeMessagePart = Schema.decodeUnknownExit(SessionV1.Part)
 const MAX_MCP_RESOURCE_BLOB_BYTES = 10 * 1024 * 1024
+// Upper bound on the shell output text kept in the part itself. Longer output
+// spills to the truncation directory and the part keeps the tail.
+const MAX_SHELL_PREVIEW = 100 * 1024
+// How often the running shell part is persisted while output streams in. The
+// final state is always written, so this only smooths the live updates.
+const SHELL_PUSH_INTERVAL_MS = 250
 const SUPPORTED_MCP_RESOURCE_ATTACHMENT_MIMES = new Set([
   "application/pdf",
   "image/gif",
@@ -526,14 +533,70 @@ const layer = Layer.effect(
           const cfg = yield* config.get()
           const sh = Shell.preferred(cfg.shell)
           const args = Shell.args(sh, input.command, cwd)
-          let output = ""
+
+          // Shell output is unbounded: a command that streams a large file or a
+          // runaway build will emit an arbitrary number of chunks. Accumulating
+          // every chunk into one string, and persisting the part on each chunk,
+          // meant both the heap and the write rate grew with the command rather
+          // than with the window the user can actually see. Bound the retained
+          // text, spill the remainder to the truncation directory, and throttle
+          // persistence. This mirrors tool/shell.ts, which already does it this
+          // way.
+          const limits = yield* truncate.limits()
+          const keep = limits.maxBytes * 2
+          const chunks: { text: string; size: number }[] = []
+          let used = 0
+          let pending = "" // bounded pre-spill buffer
+          let dropped = 0
+          let spill: string | undefined
+          let sink: ReturnType<typeof createWriteStream> | undefined
+
+          const closeSpill = Effect.fnUntraced(function* () {
+            const open = sink
+            if (!open) return
+            sink = undefined
+            if (open.destroyed || open.closed) return
+            yield* Effect.promise(
+              () =>
+                new Promise<void>((resolve) => {
+                  let settled = false
+                  const done = () => {
+                    if (settled) return
+                    settled = true
+                    open.off("close", done)
+                    open.off("error", done)
+                    open.off("finish", done)
+                    resolve()
+                  }
+                  open.once("close", done)
+                  open.once("error", done)
+                  open.once("finish", done)
+                  open.end()
+                }),
+            )
+          })
+
+          // The text the UI shows and stores: the tail of what we have seen.
+          const preview = () => {
+            let text = ""
+            for (const item of chunks) text += item.text
+            if (text.length <= MAX_SHELL_PREVIEW) return text
+            return "...\n\n" + text.slice(-MAX_SHELL_PREVIEW)
+          }
+
           let aborted = false
 
           const finish = Effect.uninterruptible(
             Effect.gen(function* () {
-              if (aborted) {
-                output += "\n\n" + ["<metadata>", "User aborted the command", "</metadata>"].join("\n")
-              }
+              yield* closeSpill()
+              // The abort marker belongs in the visible output, not in the
+              // pre-spill buffer, which is discarded once output has spilled.
+              const marker = aborted
+                ? "\n\n" + ["<metadata>", "User aborted the command", "</metadata>"].join("\n")
+                : ""
+              // Everything retained plus whatever was spilled to disk, so the
+              // part always records where the full output went.
+              const output = preview() + marker
               const completed = Date.now()
               if (!msg.time.completed) {
                 msg.time.completed = completed
@@ -545,7 +608,7 @@ const layer = Layer.effect(
                   time: { ...part.state.time, end: completed },
                   input: part.state.input,
                   title: "",
-                  metadata: { output },
+                  metadata: { output, ...(spill ? { outputPath: spill } : {}) },
                   output,
                 }
                 yield* sessions.updatePart(part)
@@ -568,13 +631,43 @@ const layer = Layer.effect(
                 forceKillAfter: "3 seconds",
               })
               const handle = yield* spawner.spawn(cmd)
+              yield* Effect.addFinalizer(() => closeSpill())
+              let lastPush = 0
               yield* Stream.runForEach(Stream.decodeText(handle.all), (chunk) =>
                 Effect.gen(function* () {
-                  output += chunk
-                  if (part.state.status === "running") {
-                    part.state.metadata = { output }
-                    yield* sessions.updatePart(part)
+                  const size = Buffer.byteLength(chunk, "utf-8")
+                  chunks.push({ text: chunk, size })
+                  used += size
+                  // Retain only the tail the user can plausibly read. Anything
+                  // evicted is already accounted for by the spill file.
+                  while (used > keep && chunks.length > 1) {
+                    const item = chunks.shift()
+                    if (!item) break
+                    used -= item.size
+                    dropped += item.size
                   }
+
+                  if (spill) {
+                    sink?.write(chunk)
+                  } else {
+                    pending += chunk
+                    if (Buffer.byteLength(pending, "utf-8") > limits.maxBytes) {
+                      const file = yield* truncate.write(pending)
+                      spill = file
+                      pending = ""
+                      sink = createWriteStream(file, { flags: "a" })
+                    }
+                  }
+
+                  // Persist at most a few times a second. Writing every chunk
+                  // turned a chatty command into a stream of database writes
+                  // and events, which is what made long-running shells heavy.
+                  if (part.state.status !== "running") return
+                  const now = Date.now()
+                  if (now - lastPush < SHELL_PUSH_INTERVAL_MS) return
+                  lastPush = now
+                  part.state.metadata = { output: preview() }
+                  yield* sessions.updatePart(part)
                 }),
               )
               yield* handle.exitCode
@@ -1188,7 +1281,9 @@ const layer = Layer.effect(
           yield* status.set(sessionID, { type: "busy" })
           yield* Effect.logInfo("loop", { "session.id": sessionID, step })
 
-          let msgs = yield* MessageV2.filterCompactedEffect(sessionID).pipe(
+          // Paged: stops reading history at the compaction anchor instead of
+          // materializing the whole session on every step of the loop.
+          let msgs = yield* MessageV2.filterCompactedPaged(sessionID).pipe(
             Effect.provideService(Database.Service, database),
           )
 
