@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises"
+import { existsSync } from "node:fs"
+import { mkdir, mkdtemp, readdir, rename, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
@@ -564,5 +565,44 @@ describe("overnight tolerance: a goal may opt out of the interactive self-pause 
     await setGoalStatus(sessionID, "paused")
     const resumed = await setGoalStatus(sessionID, "active")
     expect(resumed.maxPromptFailures).toBe(9)
+  })
+})
+
+describe("state directory rename out of the plugin era", () => {
+  test("a legacy opencode-goal-plugin state file is migrated, not abandoned", async () => {
+    // The rename would otherwise silently orphan every goal, including one mid-run overnight.
+    // Build a real state file with the real API, then stage it at the legacy path.
+    const home = await mkdtemp(join(tmpdir(), "opencode-goal-xdg-"))
+    const previousXdg = process.env.XDG_DATA_HOME
+    const previousOverride = process.env.OPENCODE_GOAL_STATE_PATH
+    try {
+      const scratch = join(home, "scratch.json")
+      process.env.OPENCODE_GOAL_STATE_PATH = scratch
+      await createGoal("carried", "still running", { maxAutoTurns: 0 })
+      expect(existsSync(scratch)).toBe(true)
+
+      const legacyDir = join(home, "opencode-goal-plugin")
+      await mkdir(legacyDir, { recursive: true })
+      await rename(scratch, join(legacyDir, "goals.json"))
+
+      delete process.env.OPENCODE_GOAL_STATE_PATH
+      process.env.XDG_DATA_HOME = home
+
+      // Import the module fresh so the env is read at call time.
+      const { statePath: freshPath, readState: freshRead } = await import(`@/goal/impl?xdg=${encodeURIComponent(home)}`)
+      expect(freshPath()).toBe(join(home, "opencode-goal", "goals.json"))
+
+      const state = await freshRead()
+      expect(state.goals.carried?.objective).toBe("still running")
+      // The legacy file is gone; the data now lives under the non-plugin directory.
+      expect(existsSync(join(legacyDir, "goals.json"))).toBe(false)
+      expect(existsSync(join(home, "opencode-goal", "goals.json"))).toBe(true)
+    } finally {
+      if (previousXdg === undefined) delete process.env.XDG_DATA_HOME
+      else process.env.XDG_DATA_HOME = previousXdg
+      if (previousOverride === undefined) delete process.env.OPENCODE_GOAL_STATE_PATH
+      else process.env.OPENCODE_GOAL_STATE_PATH = previousOverride
+      await rm(home, { recursive: true, force: true })
+    }
   })
 })

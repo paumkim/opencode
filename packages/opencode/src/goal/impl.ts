@@ -1,3 +1,4 @@
+import { existsSync, mkdirSync, renameSync } from "node:fs"
 import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import { homedir } from "node:os"
@@ -32,11 +33,40 @@ class StateWriteError extends Data.TaggedError("StateWriteError")<{ readonly cau
 /* State file                                                          */
 /* ------------------------------------------------------------------ */
 
-function defaultStateFile() {
-  const dataHome =
+function dataHomeDir() {
+  return (
     process.env.XDG_DATA_HOME ||
     (process.platform === "win32" && process.env.APPDATA ? process.env.APPDATA : join(homedir(), ".local", "share"))
-  return join(dataHome, "opencode-goal-plugin", "goals.json")
+  )
+}
+
+function defaultStateFile() {
+  return join(dataHomeDir(), "opencode-goal", "goals.json")
+}
+
+/**
+ * Goal mode shipped as a plugin once, and its state directory kept the name. Now that the feature
+ * is core the directory no longer says anything true, so it moved - but goals (including any
+ * in-flight unattended one) live in that file. Migrate rather than abandon it.
+ */
+function legacyStateFile() {
+  return join(dataHomeDir(), "opencode-goal-plugin", "goals.json")
+}
+
+function migrateLegacyStateFile() {
+  const legacy = legacyStateFile()
+  if (legacy === statePath()) return Effect.void
+  return Effect.promise(async () => {
+    if (existsSync(statePath())) return
+    if (!existsSync(legacy)) return
+    mkdirSync(dirname(statePath()), { recursive: true })
+    renameSync(legacy, statePath())
+  }).pipe(
+    // Migration is best-effort: a failure here must not take goal state down with it. The
+    // legacy file stays put and a later run retries.
+    Effect.catchCause(() => Effect.void),
+    Effect.orDie,
+  )
 }
 
 export function statePath() {
@@ -84,6 +114,7 @@ function decodeState(value: unknown) {
 
 function readStateEffect() {
   return Effect.gen(function* () {
+    yield* migrateLegacyStateFile()
     const raw = yield* Effect.tryPromise({
       try: () => readFile(statePath(), "utf8"),
       catch: (cause) => new StateReadError({ cause }),
