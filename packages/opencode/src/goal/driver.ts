@@ -8,6 +8,7 @@ import {
   recordAssistantProgress,
   recordContinuationResult,
   recordPromptAgent,
+  readState,
   reserveContinuation,
 } from "@/goal/impl"
 import { compactionContext, continuationPrompt, limitPrompt, systemReminder } from "@/goal/prompts"
@@ -104,8 +105,21 @@ export function staleAllContinuationClaims() {
 }
 
 function timeoutMillisecondsFromSeconds(value: unknown) {
-  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return null
-  return Math.min(Math.ceil(value * 1000), MAX_TIMER_DELAY_MS)
+  if (typeof value === "number") {
+    if (!Number.isFinite(value) || value <= 0) return null
+    return Math.min(Math.ceil(value * 1000), MAX_TIMER_DELAY_MS)
+  }
+  // The config schema declares these as strings, so a configured value arrives as one and the
+  // number-only check silently disabled it - `max_turn_time` could be set and did nothing. Accept
+  // the duration spellings a user would actually write.
+  if (typeof value !== "string") return null
+  const match = /^\s*(\d+(?:\.\d+)?)\s*(ms|s|m|h)?\s*$/i.exec(value)
+  if (!match) return null
+  const amount = Number(match[1])
+  if (!Number.isFinite(amount) || amount <= 0) return null
+  const unit = (match[2] ?? "s").toLowerCase()
+  const scale = unit === "ms" ? 1 : unit === "s" ? 1000 : unit === "m" ? 60_000 : 3_600_000
+  return Math.min(Math.ceil(amount * scale), MAX_TIMER_DELAY_MS)
 }
 
 function sessionIDFromMessage(message: { info?: unknown; sessionID?: unknown }) {
@@ -713,6 +727,8 @@ function isCompactionTransform(messages: unknown[]) {
 export interface Runtime {
   readonly hooks: Hooks
   readonly handleEvent: (event: unknown) => Promise<void>
+  /** One pass of the stall re-arm sweep. Exposed so a test can drive it without a real timer. */
+  readonly sweepStalledGoals: () => Promise<void>
   readonly dispose: () => Promise<void>
 }
 
@@ -730,6 +746,7 @@ export function createGoalRuntime(input: { client: Client; options?: Options }):
   const minInterval =
     positiveIntegerOrNull(options.min_continue_interval_seconds) ?? GOAL_DEFAULT_CONTINUE_INTERVAL_SECONDS
   const maxTurnTimeMs = timeoutMillisecondsFromSeconds(options.max_turn_time)
+  const maxStallMs = timeoutMillisecondsFromSeconds(options.max_stall_before_continue)
   const maxPromptFailures = positiveIntegerOrNull(options.max_prompt_failures) ?? GOAL_DEFAULT_MAX_PROMPT_FAILURES
   const taskTracker = new TaskTracker()
   const taskDeferredSessions = new Set<string>()
@@ -751,6 +768,52 @@ export function createGoalRuntime(input: { client: Client; options?: Options }):
       retryAt: taskTracker.nextSnapshotIdleRetryAt(sessionID),
     }
   }
+
+  /**
+   * Re-arms an active goal that has stopped making progress for any reason OTHER than a clean
+   * idle event.
+   *
+   * Every other path into continuation keys on `session.idle`. A turn that ABORTS ends the busy
+   * state without ever publishing idle, so no continuation was scheduled: the goal stayed
+   * `active`, `autoTurns` stayed 0, and an unattended run sat there doing nothing indefinitely
+   * while looking perfectly healthy from the outside. Enumerating the ways a turn can end is
+   * fragile, so this does not try - it re-arms any active goal that has been quiet longer than
+   * `max_stall_before_continue` and is not already busy, continuing, or scheduled.
+   *
+   * It routes through `runAutoContinue`, so the throttle, the plan-agent guard, task deferral and
+   * the prompt-failure ladder all still apply. That last one is what stops a session whose turns
+   * abort deterministically from hot-looping: each re-arm that fails counts as a continuation
+   * failure and the goal eventually self-pauses.
+   */
+  async function sweepStalledGoals() {
+    if (maxStallMs == null) return
+    const now = Math.floor(Date.now() / 1000)
+    const state = await goalBookkeeping("readState", () => readState())
+    if (!state) return
+    for (const goal of Object.values(state.goals)) {
+      if (goal.status !== "active") continue
+      const sessionID = goal.sessionID
+      if (busySessions.has(sessionID)) continue
+      if (activeContinuations.has(sessionID)) continue
+      if (scheduledContinuations.has(sessionID)) continue
+      if (now - goal.updatedAt < Math.floor(maxStallMs / 1000)) continue
+      console.warn(`[goal] active goal idle for ${now - goal.updatedAt}s with no idle event; re-arming`)
+      await runAutoContinue(sessionID)
+    }
+  }
+
+  /**
+   * Cadence is a fraction of the stall threshold so detection lands close to the threshold without
+   * busy-polling, and never drops below 15s so a small threshold cannot turn into a hot loop.
+   */
+  const stallTimer = (() => {
+    if (maxStallMs == null) return undefined
+    const cadence = Math.max(15_000, Math.min(120_000, Math.floor(maxStallMs / 4)))
+    const timer = setInterval(() => void sweepStalledGoals(), cadence)
+    const maybeUnref = timer as { unref?: () => void }
+    if (typeof maybeUnref.unref === "function") maybeUnref.unref()
+    return timer
+  })()
 
   function clearTurnWatchdog(sessionID: string) {
     const watchdog = turnWatchdogs.get(sessionID)
@@ -989,6 +1052,7 @@ export function createGoalRuntime(input: { client: Client; options?: Options }):
       scheduledContinuations.clear()
       for (const watchdog of turnWatchdogs.values()) clearTimeout(watchdog.timer)
       turnWatchdogs.clear()
+      if (stallTimer) clearInterval(stallTimer)
     },
     async "tool.execute.before"(input) {
       taskTracker.noteAnyToolCall(input as { sessionID?: unknown })
@@ -1066,6 +1130,7 @@ export function createGoalRuntime(input: { client: Client; options?: Options }):
   return {
     hooks,
     handleEvent: (event: unknown) => handleGoalEvent(event, { handle: handleEvent }),
+    sweepStalledGoals: () => sweepStalledGoals(),
     dispose: () => Promise.resolve(hooks.dispose?.()),
   }
 }

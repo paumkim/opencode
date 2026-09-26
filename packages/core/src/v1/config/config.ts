@@ -144,6 +144,7 @@ export const Info = Schema.Struct({
         max_goal_duration_seconds: Schema.optional(Schema.NullOr(Schema.Number)),
         min_continue_interval_seconds: Schema.optional(Schema.Number),
         max_turn_time: Schema.optional(Schema.String),
+        max_stall_before_continue: Schema.optional(Schema.String),
         max_prompt_failures: Schema.optional(Schema.Number),
         no_progress_token_threshold: Schema.optional(Schema.Number),
         max_no_progress_turns: Schema.optional(Schema.Number),
