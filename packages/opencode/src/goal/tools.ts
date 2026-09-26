@@ -80,7 +80,7 @@ export const goalLimitArgs = {
     .nullable()
     .optional()
     .describe(
-      "Optional per-goal minimum output tokens for a continuation turn to count as progress. Raise it only to tolerate genuinely long-running single turns.",
+      "Optional per-goal minimum output tokens for a continuation turn to count as progress; a turn producing fewer is counted as a stall. LOWER it to tolerate turns that are quiet but real (a long build or test run), because raising it makes more turns count as low-progress and pauses the goal sooner.",
     ),
   max_no_progress_turns: z
     .number()

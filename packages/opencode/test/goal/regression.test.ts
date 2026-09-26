@@ -656,6 +656,75 @@ describe("H10: goal mode is core and its tool set matches the shipped prompt", (
     expect(GOAL_PROMPT).toContain('Call update_goal with status "complete" only if the goal is achieved')
   })
 
+  test("H33: the no_progress_token_threshold guidance points the knob the way the scorer reads it", async () => {
+    // `no_progress_token_threshold` is the floor a continuation turn must CLEAR to count as
+    // progress: the scorer computes `lowOutput = outputTokens < threshold`, and a low-output turn
+    // that changed nothing and ran no tools increments noProgressTurns until the goal pauses. So
+    // raising it makes MORE turns count as stalls, not fewer.
+    //
+    // Both surfaces told the model the opposite. The /goal prompt said "Raise
+    // no_progress_token_threshold only when single turns are legitimately long (a big build or test
+    // run) and you want those not to count as stalls", and the tool description said "Raise it only
+    // to tolerate genuinely long-running single turns". A model following either instruction raises
+    // the threshold to protect a long build - and the long build's own quiet turns are then below
+    // the floor it just raised, so the goal pauses on exactly the workload the instruction claimed
+    // to be protecting. Nothing caught it: H27 only checks that a named argument is ACCEPTED, never
+    // that it is pointed the right way, so both sentences could be inverted with the suite green.
+    //
+    // Part 1 pins the semantics the wording has to match, so the direction is a fact this suite
+    // establishes rather than a claim about it. Same turn, same tokens, same text - only the
+    // threshold moves, and the verdict flips.
+    const turnTokens = 2_000
+    const score = async (threshold: number) => {
+      const sessionID = `h33-${threshold}`
+      // maxNoProgressTurns of 1, so the first stall pauses instead of needing a third turn to
+      // reach the default tolerance of 2.
+      await createGoal(sessionID, "long build", {
+        maxAutoTurns: 0,
+        maxNoProgressTurns: 1,
+        noProgressTokenThreshold: threshold,
+      })
+      for (const id of ["prime", "stall"]) {
+        await reserveContinuation(sessionID, 0, 0)
+        await recordContinuationResult(sessionID, "success", 3)
+        await recordAssistantProgress(sessionID, {
+          messageID: id,
+          text: "same",
+          outputTokens: turnTokens,
+          evaluateContinuation: true,
+        })
+      }
+      return getGoal(sessionID)
+    }
+
+    // A floor BELOW the turn's output: the turn clears it, so it is not a stall.
+    const lenient = await score(turnTokens - 1)
+    expect(lenient?.noProgressTurns).toBe(0)
+    expect(lenient?.status).toBe("active")
+
+    // A floor ABOVE that very same turn: it now falls under the floor and is a stall. This is the
+    // fact that "raise it to tolerate" contradicts.
+    const strict = await score(turnTokens + 1)
+    expect(strict?.noProgressTurns).toBe(1)
+    expect(strict?.status).toBe("paused")
+    expect(strict?.stopReason).toBe("no progress")
+
+    // Part 2: both surfaces must state that direction, and neither may still tell the model to
+    // raise this knob to gain tolerance. `max_prompt_failures` and `max_no_progress_turns` really
+    // are raised for an unattended run and their wording is correct, so the check is scoped to
+    // this one field rather than banning the word.
+    const guidance: [string, string][] = [
+      ["goal tool schema", goalLimitArgs.no_progress_token_threshold.description ?? ""],
+      ["/goal command prompt", GOAL_PROMPT],
+    ]
+    for (const [where, text] of guidance) {
+      const labelled = `${where}: ${text}`
+      expect(labelled).toMatch(/lower/i)
+      expect(labelled).not.toMatch(/raise[^.]*no_progress_token_threshold/i)
+      expect(labelled).not.toMatch(/no_progress_token_threshold[^.]*raise/i)
+    }
+  })
+
   test("H28: the documented rule for replacing a goal matches what createGoal actually allows", async () => {
     // Both `create_goal` and `set_goal` claimed "Fails if a non-complete goal exists", but
     // `isClosed` is `complete || unmet` - an UNMET goal is closed and does not block a new one.
