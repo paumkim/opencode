@@ -231,6 +231,16 @@ export function goalTools(deps: Deps): Record<string, Tool.Def<Schema.Decoder<un
       async (args, context) => {
         const goal = await recordGoalCompletion(context.sessionID, args.item)
         if (!goal) return "No active goal for this session; nothing was recorded."
+        // A snapshot is returned for a goal in ANY status, but only an ACTIVE goal is recorded onto.
+        // Testing only for `!goal` therefore reported a discarded record as a success-shaped
+        // `{goal}` payload: the model was told to call this the moment a unit is done, believed it
+        // had closed the unit out, and the next turn's ledger did not list it - so the work was
+        // redone. That is the loop the ledger exists to prevent, and this is what made it invisible.
+        // The status is the same field `recordGoalCompletion` gates on, so the two cannot disagree.
+        if (goal.status !== "active")
+          return `The goal for this session is ${goal.status}, not active, so nothing was recorded. Its completed list still reads ${
+            goal.completed.length === 0 ? "empty" : `${goal.completed.length} item(s)`
+          }.`
         return JSON.stringify({ goal }, null, 2)
       },
     ),
