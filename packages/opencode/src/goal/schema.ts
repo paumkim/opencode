@@ -58,6 +58,14 @@ export const GOAL_HISTORY_LIMIT = 50
 export const GOAL_CHECKPOINT_LIMIT = 8
 export const GOAL_CHECKPOINT_CHAR_LIMIT = 280
 /**
+ * The completed-work ledger is the goal's only durable record of what it has already finished.
+ * Checkpoints are a capped, deduplicated prose window of 8 entries, which cannot answer "have I
+ * already done this?" for an objective that spans many turns. Without it a long-running goal
+ * re-derived its own history from the repo, re-found the same defects, and re-fixed them.
+ */
+export const GOAL_MAX_COMPLETED_ITEMS = 40
+export const GOAL_MAX_COMPLETED_ITEM_CHARS = 200
+/**
  * A continuation turn is scored as low-progress only when it emits fewer than this many output
  * tokens AND its text is unchanged from the previous continuation baseline. The text check is the
  * real stall signal; this is a floor that keeps a near-empty turn from being read as progress.
@@ -101,6 +109,7 @@ export type GoalHistoryType =
   | "unmet"
   | "autoContinue"
   | "checkpoint"
+  | "progress"
   | "warning"
   | "limited"
   | "error"
@@ -152,6 +161,12 @@ export type Goal = {
   stopReason: string | null
   history: GoalHistoryEntry[]
   checkpoints: GoalCheckpoint[]
+  /**
+   * Items the agent has finished, oldest first. Written by `record_goal_completion` and read back
+   * into the continuation prompt, so a turn starts from what is LEFT rather than re-deriving the
+   * whole objective. This is the record that lets a goal move on instead of looping.
+   */
+  completed: string[]
   lastCheckpoint: GoalCheckpoint | null
   lastAssistantText: string
   lastAssistantMessageID: string
@@ -159,6 +174,12 @@ export type Goal = {
   awaitingContinuationProgress: boolean
   continuationBaselineMessageID: string
   continuationBaselineSummary: string
+  /**
+   * Ledger length when the current continuation turn was reserved. Progress scoring compares it
+   * against the length at the end of the turn: a tool-heavy turn that closed nothing out is the
+   * signature of a loop, and without this the counter could never see one.
+   */
+  continuationBaselineCompleted: number
 }
 
 export type GoalSnapshot = Omit<
@@ -221,6 +242,7 @@ const HistoryEntrySchema = Schema.Struct({
     "unmet",
     "autoContinue",
     "checkpoint",
+    "progress",
     "warning",
     "limited",
     "error",
@@ -272,6 +294,10 @@ const GoalSchema = Schema.Struct({
   stopReason: NullableString,
   history: Schema.optional(Schema.Array(HistoryEntrySchema)),
   checkpoints: Schema.optional(Schema.Array(CheckpointSchema)),
+  // Optional so goals persisted before these fields existed still decode; normalizeGoal fills the
+  // empty/zero defaults on the next mutate.
+  completed: Schema.optional(Schema.Array(Schema.String)),
+  continuationBaselineCompleted: Schema.optional(Schema.Number),
   lastCheckpoint: Schema.optional(Schema.NullOr(CheckpointSchema)),
   lastAssistantText: Schema.optional(Schema.String),
   lastAssistantMessageID: Schema.optional(Schema.String),
