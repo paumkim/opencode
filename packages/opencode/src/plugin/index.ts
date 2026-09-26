@@ -256,13 +256,12 @@ const layer = Layer.effect(
             },
           }).pipe(
             Effect.tapError((error) => Effect.logError("failed to load plugin", { path: load.spec, error })),
-            Effect.catch(() => {
-              // TODO: make proper events for this
-              // events.publish(Session.Event.Error, {
-              //   error: new NamedError.Unknown({
-              //     message: `Failed to load plugin ${load.spec}: ${message}`,
-              //   }).toObject(),
-              // })
+            // A plugin that resolved and loaded but then threw while being applied used to be
+            // visible only in the log, so a broken plugin looked like it had simply been
+            // skipped. Surface it the same way the install/compatibility/entry/load stages
+            // already do, so every stage that can fail a plugin tells the user.
+            Effect.catch((message) => {
+              publishPluginError(`Failed to load plugin ${load.spec}: ${message}`)
               return Effect.void
             }),
           )
