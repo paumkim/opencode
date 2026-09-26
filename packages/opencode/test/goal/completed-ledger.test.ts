@@ -12,6 +12,7 @@ import {
   statePath,
 } from "@/goal/impl"
 import { continuationPrompt } from "@/goal/prompts"
+import { GOAL_MAX_COMPLETED_ITEMS } from "@/goal/schema"
 
 let stateDir: string | undefined
 const previous = process.env.OPENCODE_GOAL_STATE_PATH
@@ -82,6 +83,48 @@ describe("the completed-work ledger", () => {
     const sessionID = "ledger-3"
     await createGoal(sessionID, "keep improving", { maxAutoTurns: 100 })
     expect(recordGoalCompletion(sessionID, "   ")).rejects.toThrow()
+  })
+
+  test("a full ledger still records the new item instead of calling it a no-op", async () => {
+    const sessionID = "ledger-full"
+    await createGoal(sessionID, "keep improving", { maxAutoTurns: 100 })
+    for (let i = 0; i < GOAL_MAX_COMPLETED_ITEMS; i++) await recordGoalCompletion(sessionID, `item ${i}`)
+
+    const atCap = await getGoal(sessionID)
+    expect(atCap?.completed).toHaveLength(GOAL_MAX_COMPLETED_ITEMS)
+
+    const recorded = await recordGoalCompletion(sessionID, "one past the cap")
+
+    // The bug: the ledger is capped by dropping the OLDEST entry, so its length is unchanged by a
+    // new item once the cap is reached. Treating "length did not change" as "nothing was recorded"
+    // therefore threw away the checkpoint, the history entry, and - below - the loop guard's only
+    // evidence that this turn closed real work out. The model is told "call record_goal_completion
+    // the moment a unit is done" and gets a silent no-op for every unit from the 41st on.
+    expect(recorded?.completed.at(-1)).toBe("one past the cap")
+    expect(recorded?.lastCheckpoint?.summary).toContain("one past the cap")
+  })
+
+  test("a goal that keeps finishing work is not scored as a loop once its ledger is full", async () => {
+    const sessionID = "ledger-full-loop"
+    await createGoal(sessionID, "find further bugs", { maxNoProgressTurns: 2, maxAutoTurns: 100 })
+    for (let i = 0; i < GOAL_MAX_COMPLETED_ITEMS; i++) await recordGoalCompletion(sessionID, `item ${i}`)
+
+    // Same root cause, and the consequence that actually stops an unattended run: the stall scorer
+    // reads "the ledger did not grow", and at the cap it never grows, so every later turn that
+    // genuinely records a completion is scored as the loop it is not. The goal then pauses itself
+    // for "no progress" while doing exactly what it was told to do.
+    for (const id of ["a", "b", "c", "d"]) {
+      await turn(sessionID, id, {
+        toolCalls: 6,
+        onTurn: async () => {
+          await recordGoalCompletion(sessionID, `fixed the ${id} defect`)
+        },
+      })
+    }
+
+    const goal = await getGoal(sessionID)
+    expect(goal?.status).toBe("active")
+    expect(goal?.noProgressTurns).toBe(0)
   })
 })
 

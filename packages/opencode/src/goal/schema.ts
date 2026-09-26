@@ -165,8 +165,19 @@ export type Goal = {
    * Items the agent has finished, oldest first. Written by `record_goal_completion` and read back
    * into the continuation prompt, so a turn starts from what is LEFT rather than re-deriving the
    * whole objective. This is the record that lets a goal move on instead of looping.
+   *
+   * Capped at `GOAL_MAX_COMPLETED_ITEMS` by dropping the OLDEST entries, so its length is NOT a
+   * count of recorded work. `completedRecorded` is that count; anything comparing the ledger against
+   * a baseline must use it, not `completed.length`.
    */
   completed: string[]
+  /**
+   * Monotonic count of distinct items ever recorded, never trimmed. Backs the stall guard: a turn
+   * is "looping" when this has not moved since the continuation was reserved, and at the cap
+   * `completed.length` stays pinned at 40 whether or not the turn recorded anything, so a turn that
+   * genuinely closed real work out was scored as the loop it is not.
+   */
+  completedRecorded: number
   lastCheckpoint: GoalCheckpoint | null
   lastAssistantText: string
   lastAssistantMessageID: string
@@ -297,6 +308,10 @@ const GoalSchema = Schema.Struct({
   // Optional so goals persisted before these fields existed still decode; normalizeGoal fills the
   // empty/zero defaults on the next mutate.
   completed: Schema.optional(Schema.Array(Schema.String)),
+  // Optional so goals persisted before these fields existed still decode; normalizeGoal fills the
+  // empty/zero defaults on the next mutate. A goal with a ledger but no counter (written by the
+  // version that had the ledger and not the count) re-anchors its counter to the retained length.
+  completedRecorded: Schema.optional(Schema.Number),
   continuationBaselineCompleted: Schema.optional(Schema.Number),
   lastCheckpoint: Schema.optional(Schema.NullOr(CheckpointSchema)),
   lastAssistantText: Schema.optional(Schema.String),
