@@ -11,8 +11,7 @@ import { useTerminalDimensions } from "@opentui/solid"
 import { formatDuration } from "../../util/format"
 import { errorMessage } from "../../util/error"
 import { Locale } from "../../util/locale"
-import os from "node:os"
-import path from "node:path"
+import { legacyStateFile, statePath } from "@opencode-ai/core/goal/path"
 
 const GOAL_POLL_MS = 2_000
 const DEFAULT_GOAL_COMMAND = "goal"
@@ -29,17 +28,6 @@ type Goal = {
   createdAt: number | string
   updatedAt?: number | string
   stopReason?: string | null
-}
-
-function defaultStateFile() {
-  const dataHome =
-    process.env.XDG_DATA_HOME ||
-    (process.platform === "win32" && process.env.APPDATA ? process.env.APPDATA : path.join(os.homedir(), ".local", "share"))
-  return path.join(dataHome, "opencode-goal-plugin", "goals.json")
-}
-
-function statePath() {
-  return process.env.OPENCODE_GOAL_STATE_PATH || defaultStateFile()
 }
 
 function goalText(g: Goal): string {
@@ -209,7 +197,11 @@ export function GoalBar(props: { sessionID?: string }) {
 
   const load = async () => {
     try {
-      const text = await Bun.file(statePath()).text()
+      // The current path wins. The plugin-era path is a fallback, not dead weight: the server
+      // migrates that file across on its first state read, so between a fresh install and that
+      // read the bar would render nothing for a goal that is genuinely running.
+      const file = Bun.file(statePath())
+      const text = (await file.exists()) ? await file.text() : await Bun.file(legacyStateFile()).text()
       const parsed = JSON.parse(text) as unknown
       if (!parsed || typeof parsed !== "object") {
         setGoals([])

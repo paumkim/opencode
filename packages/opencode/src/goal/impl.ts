@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, renameSync } from "node:fs"
 import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises"
-import { dirname, join } from "node:path"
-import { homedir } from "node:os"
+import { dirname } from "node:path"
+import { legacyStateFile, statePath } from "@opencode-ai/core/goal/path"
 import type {
   AssistantProgressInput,
   CreateGoalOptions,
@@ -33,26 +33,14 @@ class StateWriteError extends Data.TaggedError("StateWriteError")<{ readonly cau
 /* State file                                                          */
 /* ------------------------------------------------------------------ */
 
-function dataHomeDir() {
-  return (
-    process.env.XDG_DATA_HOME ||
-    (process.platform === "win32" && process.env.APPDATA ? process.env.APPDATA : join(homedir(), ".local", "share"))
-  )
-}
-
-function defaultStateFile() {
-  return join(dataHomeDir(), "opencode-goal", "goals.json")
-}
-
 /**
- * Goal mode shipped as a plugin once, and its state directory kept the name. Now that the feature
- * is core the directory no longer says anything true, so it moved - but goals (including any
- * in-flight unattended one) live in that file. Migrate rather than abandon it.
+ * Moves the plugin-era file to the current path, but only when nothing is at the current path
+ * already - abandoning the legacy copy would blank the goal bar, which reads the same file.
+ *
+ * The path itself is resolved in core so the UI and the server cannot disagree about it; see
+ * packages/core/src/goal/path.ts. Best-effort, as before: a failure here must not take goal
+ * state down with it, so the legacy file stays put and a later run retries.
  */
-function legacyStateFile() {
-  return join(dataHomeDir(), "opencode-goal-plugin", "goals.json")
-}
-
 function migrateLegacyStateFile() {
   const legacy = legacyStateFile()
   if (legacy === statePath()) return Effect.void
@@ -62,16 +50,12 @@ function migrateLegacyStateFile() {
     mkdirSync(dirname(statePath()), { recursive: true })
     renameSync(legacy, statePath())
   }).pipe(
-    // Migration is best-effort: a failure here must not take goal state down with it. The
-    // legacy file stays put and a later run retries.
     Effect.catchCause(() => Effect.void),
     Effect.orDie,
   )
 }
 
-export function statePath() {
-  return process.env.OPENCODE_GOAL_STATE_PATH || defaultStateFile()
-}
+export { statePath }
 
 function emptyState(): State {
   return { version: 1, goals: {} }
