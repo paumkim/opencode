@@ -746,7 +746,7 @@ export function createGoalRuntime(input: { client: Client; options?: Options }):
       try {
         await client.app?.log?.({
           body: {
-            service: "opencode-goal-plugin",
+            service: "opencode-goal",
             level: "error",
             message: "Turn watchdog retry failed",
             extra: { error: error instanceof Error ? error.message : String(error) },
@@ -833,7 +833,7 @@ export function createGoalRuntime(input: { client: Client; options?: Options }):
       try {
         await client.app?.log?.({
           body: {
-            service: "opencode-goal-plugin",
+            service: "opencode-goal",
             level: "error",
             message: "Auto-continue failed",
             extra: { error: error instanceof Error ? error.message : String(error) },
