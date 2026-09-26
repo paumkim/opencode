@@ -347,6 +347,20 @@ class TaskTracker {
   private readonly latestAssistantBySession = new Map<string, AssistantMarker>()
   private readonly snapshotIdleHolds = new Map<string, SnapshotIdleHold>()
   private readonly settledSnapshotIdleTasks = new Set<string>()
+  // Tool calls seen per session, reset when the turn is scored. A turn that only ran tools
+  // still made progress even when the model wrote no prose.
+  private readonly toolCallsBySession = new Map<string, number>()
+
+  noteAnyToolCall(input: { sessionID?: unknown }) {
+    if (typeof input.sessionID !== "string") return
+    this.toolCallsBySession.set(input.sessionID, (this.toolCallsBySession.get(input.sessionID) ?? 0) + 1)
+  }
+
+  takeToolCalls(sessionID: string) {
+    const count = this.toolCallsBySession.get(sessionID) ?? 0
+    this.toolCallsBySession.delete(sessionID)
+    return count
+  }
 
   noteTaskCall(input: { tool?: unknown; sessionID?: unknown; callID?: unknown }) {
     if (typeof input.tool !== "string" || input.tool.toLowerCase() !== "task") return
@@ -593,12 +607,14 @@ async function recordAssistantMessage(
   message: { info?: unknown; role?: unknown; id?: unknown; parts?: unknown[] } | undefined,
   options: Options,
   evaluateContinuation = false,
+  toolCalls = 0,
 ) {
   if (!message) return
   await recordAssistantProgress(sessionID, {
     messageID: messageID(message),
     text: textFromMessage(message),
     outputTokens: outputTokensFromMessage(message) ?? null,
+    toolCalls,
     noProgressTokenThreshold: positiveIntegerOrNull(options.no_progress_token_threshold),
     maxNoProgressTurns: positiveIntegerOrNull(options.max_no_progress_turns),
     evaluateContinuation,
@@ -795,7 +811,7 @@ export function createGoalRuntime(input: { client: Client; options?: Options }):
         return
       }
       if (busySessions.has(sessionID)) return
-      await recordAssistantMessage(sessionID, latestAssistant, options, true)
+      await recordAssistantMessage(sessionID, latestAssistant, options, true, taskTracker.takeToolCalls(sessionID))
       const current = await getGoal(sessionID)
       if (!current) return
       const latestTurnAgent = agentFromMessage(latestAssistant)
@@ -890,7 +906,7 @@ export function createGoalRuntime(input: { client: Client; options?: Options }):
       // so a throw here becomes an unhandled rejection. Also: only assistant messages may advance
       // the continuation baseline, or a user/compaction message ID corrupts no-progress detection.
       if (assistantMarker(message ?? {})) {
-        await goalBookkeeping("recordAssistantMessage", () => recordAssistantMessage(sessionID, message, options))
+        await goalBookkeeping("recordAssistantMessage", () => recordAssistantMessage(sessionID, message, options, false, taskTracker.takeToolCalls(sessionID)))
       }
     }
 
@@ -910,6 +926,7 @@ export function createGoalRuntime(input: { client: Client; options?: Options }):
       turnWatchdogs.clear()
     },
     async "tool.execute.before"(input) {
+      taskTracker.noteAnyToolCall(input as { sessionID?: unknown })
       taskTracker.noteTaskCall(input as { tool?: unknown; sessionID?: unknown; callID?: unknown })
     },
     async "tool.execute.after"(input, output) {
@@ -939,7 +956,7 @@ export function createGoalRuntime(input: { client: Client; options?: Options }):
       // charge the entire retained context as fresh usage.
       if (isCompactionTransform(output.messages)) return
       await goalBookkeeping("recordAssistantMessage", () =>
-        recordAssistantMessage(sessionID, latestAssistantMessage(output.messages), options),
+        recordAssistantMessage(sessionID, latestAssistantMessage(output.messages), options, false, taskTracker.takeToolCalls(sessionID)),
       )
     },
     async "experimental.chat.system.transform"(input, output) {
