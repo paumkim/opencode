@@ -3,8 +3,36 @@ import { Data, Schema } from "effect"
 export const GOAL_SYSTEM_MARKER = "OpenCode goal mode"
 export const GOAL_METADATA_KEY = "opencode.goal"
 
+/**
+ * Character limits count Unicode CODE POINTS, not UTF-16 code units, because a code unit is not a
+ * character: `z.string().max(n)` counts units, so an objective of n emoji is rejected by the tool
+ * boundary while `validateObjective` - which counts code points, the reading the message states -
+ * accepts it. The two therefore disagreed on exactly the input people least expect to be
+ * re-counted, and the tool boundary won, so the model got a schema error instead of the far clearer
+ * "goal objective must be at most N characters".
+ *
+ * These constants are the ONLY definition of each limit. The tool schemas and the implementation
+ * must both resolve through them; when they were separate literals the two had already drifted.
+ */
 export const GOAL_MAX_OBJECTIVE = 4000
 export const GOAL_MAX_EVIDENCE = 4000
+/**
+ * Upper bound on the assistant text a goal retains for its own bookkeeping. Every use of it goes
+ * through a 280-character summary, so nothing is lost by capping it: without a cap, one verbose turn
+ * is stored verbatim and then re-serialized by every subsequent LLM step (each `accountUsage` rewrites
+ * the state file) and echoed in full by `get_goal` into the model's context.
+ */
+/**
+ * The ONE definition of "is this model-supplied string within its character limit?", shared by the
+ * zod tool schemas and by `validateObjective`/`validateEvidence`. Counting lives here rather than
+ * in each caller because the two previously used different units, which is precisely how a limit
+ * ends up meaning two different things.
+ */
+export function withinCharacterLimit(value: string, maxCodePoints: number) {
+  return [...value].length <= maxCodePoints
+}
+
+export const GOAL_MAX_RETAINED_TEXT = 4000
 export const GOAL_HISTORY_LIMIT = 50
 export const GOAL_CHECKPOINT_LIMIT = 8
 export const GOAL_CHECKPOINT_CHAR_LIMIT = 280
@@ -29,6 +57,16 @@ export const GOAL_DEFAULT_MAX_NO_PROGRESS_TURNS = 2
 export const GOAL_DEFAULT_MAX_AUTO_TURNS = 0
 export const GOAL_DEFAULT_CONTINUE_INTERVAL_SECONDS = 3
 export const GOAL_DEFAULT_MAX_PROMPT_FAILURES = 3
+
+/**
+ * The one definition of "is this a usable positive-integer limit?". Both the state normalizer and
+ * the tool/option layer validate limits with it, and they must agree: a value one accepts and the
+ * other rejects silently changes a limit between creation and the next read. It used to be
+ * duplicated verbatim in `impl.ts` and `shared.ts`, which is how the two drifted apart before.
+ */
+export function positiveIntegerOrNull(value: unknown) {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null
+}
 
 export type GoalStatus = "active" | "paused" | "budgetLimited" | "usageLimited" | "complete" | "unmet"
 export type MutableGoalStatus = "active" | "paused"

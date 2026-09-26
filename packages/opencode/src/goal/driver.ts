@@ -17,7 +17,6 @@ import { InstanceState } from "@/effect/instance-state"
 import {
   goalClient,
   isRecord,
-  positiveIntegerOrNull,
   readGoalOptions,
   restrictedAgentSet,
   textFromMessage,
@@ -26,6 +25,13 @@ import {
   type Client,
   type Options,
 } from "@/goal/shared"
+import {
+  GOAL_DEFAULT_CONTINUE_INTERVAL_SECONDS,
+  GOAL_DEFAULT_MAX_AUTO_TURNS,
+  GOAL_DEFAULT_MAX_PROMPT_FAILURES,
+  GOAL_SYSTEM_MARKER,
+  positiveIntegerOrNull,
+} from "@/goal/schema"
 
 type TaskState = "running" | "completed" | "error" | "cancelled"
 
@@ -58,9 +64,6 @@ type TurnWatchdog = {
   timer: ReturnType<typeof setTimeout>
 }
 
-const DEFAULT_CONTINUE_INTERVAL_SECONDS = 3
-const DEFAULT_MAX_PROMPT_FAILURES = 3
-const GOAL_SYSTEM_MARKER = "OpenCode goal mode"
 const TASK_SETTLE_DELAY_MS = 25
 const SNAPSHOT_IDLE_HOLD_MS = 250
 const MAX_TIMER_DELAY_MS = 2_147_483_647
@@ -203,14 +206,7 @@ async function resolveContinuationModel(
     const info = (data as { info?: unknown }).info ?? data
     const model = (info as { model?: { id?: unknown; providerID?: unknown; variant?: unknown } }).model
     if (model && typeof model.id === "string" && typeof model.providerID === "string") {
-      const resolved: { providerID: string; modelID: string; variant?: string } = {
-        providerID: model.providerID,
-        modelID: model.id,
-      }
-      if (typeof model.variant === "string" && model.variant && model.variant !== "default") {
-        resolved.variant = model.variant
-      }
-      return resolved
+      return { providerID: model.providerID, modelID: model.id, ...variantRef(model.variant) }
     }
   } catch {
     // Fall through to message-based lookup below.
@@ -225,25 +221,35 @@ async function resolveContinuationModel(
       const sources = [message as Record<string, unknown>, info]
       for (const source of sources) {
         if (!source || typeof source !== "object") continue
-        const model = source["model"] as { providerID?: unknown; modelID?: unknown; id?: unknown } | undefined
+        const model = source["model"] as
+          | { providerID?: unknown; modelID?: unknown; id?: unknown; variant?: unknown }
+          | undefined
         if (model && typeof model.providerID === "string") {
           const modelID = model.modelID ?? model.id
-          if (typeof modelID === "string") return { providerID: model.providerID, modelID }
+          if (typeof modelID === "string")
+            return { providerID: model.providerID, modelID, ...variantRef(model.variant ?? source["variant"]) }
         }
         if (typeof source["providerID"] === "string") {
           const modelID = source["modelID"] ?? source["model"]
           if (typeof modelID === "string") {
-            return { providerID: source["providerID"] as string, modelID }
+            return { providerID: source["providerID"] as string, modelID, ...variantRef(source["variant"]) }
           }
         }
       }
-      const variant = (info as { variant?: unknown } | undefined)?.variant
-      void variant
     }
   } catch {
     return undefined
   }
   return undefined
+}
+
+/**
+ * A continuation must run on the same model with the same variant as the session it continues, so
+ * both resolution paths filter identically. "default" means no variant was chosen, and sending it
+ * would pin the model to a variant the session is not using.
+ */
+function variantRef(variant: unknown) {
+  return typeof variant === "string" && variant && variant !== "default" ? { variant } : {}
 }
 
 async function sendContinuation(client: Client, sessionID: string, prompt: string, agent?: string | null) {
@@ -356,6 +362,13 @@ class TaskTracker {
     this.toolCallsBySession.set(input.sessionID, (this.toolCallsBySession.get(input.sessionID) ?? 0) + 1)
   }
 
+  /**
+   * Tool calls observed since the last SCORED turn. This deletes what it reads, so only the
+   * scoring call may use it: `message.updated` and `experimental.chat.messages.transform` observe
+   * the same turn without scoring it, and consuming the count there left the scored turn with
+   * zero, which made the "a turn with tool calls is progress" rule dead - an unattended refactor
+   * that narrates nothing was paused as a stall after two turns.
+   */
   takeToolCalls(sessionID: string) {
     const count = this.toolCallsBySession.get(sessionID) ?? 0
     this.toolCallsBySession.delete(sessionID)
@@ -409,6 +422,27 @@ class TaskTracker {
     }
     this.latestAssistantBySession.delete(sessionID)
     this.clearSnapshotIdleForSession(sessionID)
+    // Released for the same reason as the three above: a deleted session's bookkeeping must not
+    // outlive it for the life of the process. Nothing drains either of these once the session is
+    // gone, because the only reader is the scoring path for a turn in that same session.
+    //
+    // This is not only memory. `toolCallsBySession` is read back as PROGRESS credit - any turn
+    // with `toolCalls > 0` is scored as work done - so a session ID that is deleted and later
+    // reused would have its first stall check waived by a tool call from its previous life, and
+    // stall detection would silently not fire. The observation hooks no longer drain this map
+    // either: tool-call accounting is consumed only by the scoring call, precisely so the count
+    // survives until the turn is judged. Covered by the "deleting a session releases the
+    // tool-call credit" test.
+    this.toolCallsBySession.delete(sessionID)
+    // `pendingTaskCalls` is keyed by call ID and only read to resolve the owning session, so
+    // releasing it is retention-only and has no observable behaviour to assert - hence no test
+    // for this half. It is not fully sufficient either: a `tool.execute.after` still in flight
+    // when the session is deleted resolves its parent from here and re-adds a `tasks` entry for a
+    // session that no longer exists. Closing that needs an in-flight guard on the call, not a
+    // sweep, so it is left as a known gap rather than half-fixed here.
+    for (const [callID, owner] of this.pendingTaskCalls) {
+      if (owner === sessionID) this.pendingTaskCalls.delete(callID)
+    }
   }
 
   observeMessages(messages: { info?: unknown; role?: unknown; id?: unknown; time?: unknown; parts?: unknown[] }[]) {
@@ -606,15 +640,22 @@ async function recordAssistantMessage(
   sessionID: string,
   message: { info?: unknown; role?: unknown; id?: unknown; parts?: unknown[] } | undefined,
   options: Options,
+  taskTracker: TaskTracker,
   evaluateContinuation = false,
-  toolCalls = 0,
 ) {
   if (!message) return
   await recordAssistantProgress(sessionID, {
     messageID: messageID(message),
     text: textFromMessage(message),
     outputTokens: outputTokensFromMessage(message) ?? null,
-    toolCalls,
+    // Tool activity counts as progress, but only the SCORING call may consume the count.
+    // `takeToolCalls` deletes what it reads, and the two observation hooks (`message.updated` and
+    // `experimental.chat.messages.transform`) run while the turn is still in flight, so consuming
+    // it there left the scored turn with zero. That made this rule dead in production: an
+    // unattended refactor or investigation, which narrates almost nothing, was paused as a stall
+    // after two turns of pure tool work. Deriving the count here rather than at each call site
+    // keeps the two in step by construction.
+    toolCalls: evaluateContinuation ? taskTracker.takeToolCalls(sessionID) : 0,
     noProgressTokenThreshold: positiveIntegerOrNull(options.no_progress_token_threshold),
     maxNoProgressTurns: positiveIntegerOrNull(options.max_no_progress_turns),
     evaluateContinuation,
@@ -681,10 +722,11 @@ export function createGoalRuntime(input: { client: Client; options?: Options }):
   const options = input.options ?? {}
   const autoContinue = options.auto_continue ?? true
   const deferWhileTasksActive = options.defer_while_tasks_active ?? true
-  const maxAutoTurns = positiveIntegerOrNull(options.max_auto_turns) ?? 0
-  const minInterval = positiveIntegerOrNull(options.min_continue_interval_seconds) ?? DEFAULT_CONTINUE_INTERVAL_SECONDS
+  const maxAutoTurns = positiveIntegerOrNull(options.max_auto_turns) ?? GOAL_DEFAULT_MAX_AUTO_TURNS
+  const minInterval =
+    positiveIntegerOrNull(options.min_continue_interval_seconds) ?? GOAL_DEFAULT_CONTINUE_INTERVAL_SECONDS
   const maxTurnTimeMs = timeoutMillisecondsFromSeconds(options.max_turn_time)
-  const maxPromptFailures = positiveIntegerOrNull(options.max_prompt_failures) ?? DEFAULT_MAX_PROMPT_FAILURES
+  const maxPromptFailures = positiveIntegerOrNull(options.max_prompt_failures) ?? GOAL_DEFAULT_MAX_PROMPT_FAILURES
   const taskTracker = new TaskTracker()
   const taskDeferredSessions = new Set<string>()
   const scheduledContinuations = new Map<string, ReturnType<typeof setTimeout>>()
@@ -811,7 +853,7 @@ export function createGoalRuntime(input: { client: Client; options?: Options }):
         return
       }
       if (busySessions.has(sessionID)) return
-      await recordAssistantMessage(sessionID, latestAssistant, options, true, taskTracker.takeToolCalls(sessionID))
+      await recordAssistantMessage(sessionID, latestAssistant, options, taskTracker, true)
       const current = await getGoal(sessionID)
       if (!current) return
       const latestTurnAgent = agentFromMessage(latestAssistant)
@@ -906,7 +948,9 @@ export function createGoalRuntime(input: { client: Client; options?: Options }):
       // so a throw here becomes an unhandled rejection. Also: only assistant messages may advance
       // the continuation baseline, or a user/compaction message ID corrupts no-progress detection.
       if (assistantMarker(message ?? {})) {
-        await goalBookkeeping("recordAssistantMessage", () => recordAssistantMessage(sessionID, message, options, false, taskTracker.takeToolCalls(sessionID)))
+        await goalBookkeeping("recordAssistantMessage", () =>
+          recordAssistantMessage(sessionID, message, options, taskTracker),
+        )
       }
     }
 
@@ -948,15 +992,20 @@ export function createGoalRuntime(input: { client: Client; options?: Options }):
           ? input.sessionID
           : output.messages.find((message) => typeof message.info.sessionID === "string")?.info.sessionID
       if (!sessionID) return
+      // On compaction this hook receives only the compacted-away PREFIX, not the full history, so
+      // its total is SMALLER than the token cursor. `accountUsage` differences against that cursor,
+      // so charging a smaller total leaves the delta at zero but still rewinds the cursor - and the
+      // next full transform then charges the entire retained context as fresh usage, on every
+      // compaction. The guard therefore has to come BEFORE `accountUsage`, which is the call that
+      // moves the cursor. It also covers the assistant-progress call below, for the same reason: a
+      // prefix is not the session's latest assistant message and must not become a progress
+      // baseline.
+      if (isCompactionTransform(output.messages)) return
       // This hook runs inside the LLM step loop. A state read/write failure (unwritable
       // XDG_DATA_HOME, read-only volume) must not fail the user's prompt.
       await goalBookkeeping("accountUsage", () => accountUsage(sessionID, tokensFromMessages(output.messages)))
-      // On compaction this hook receives only the compacted-away PREFIX, not the full history.
-      // Charging that partial total would corrupt the token cursor and make the next full call
-      // charge the entire retained context as fresh usage.
-      if (isCompactionTransform(output.messages)) return
       await goalBookkeeping("recordAssistantMessage", () =>
-        recordAssistantMessage(sessionID, latestAssistantMessage(output.messages), options, false, taskTracker.takeToolCalls(sessionID)),
+        recordAssistantMessage(sessionID, latestAssistantMessage(output.messages), options, taskTracker),
       )
     },
     async "experimental.chat.system.transform"(input, output) {
@@ -970,10 +1019,25 @@ export function createGoalRuntime(input: { client: Client; options?: Options }):
     async "experimental.session.compacting"(input, output) {
       const goal = await goalBookkeeping("getGoal", () => getGoal(input.sessionID))
       if (!goal) return
+      // Same rule `systemReminder` applies, for the same reason: a complete or unmet goal must not
+      // be handed more goal-continuation instructions. `compactionContext` is written for a goal
+      // still in flight - it tells the summariser to preserve the objective, the budget and the
+      // latest checkpoint, and to "close with update_goal status complete only with evidence" -
+      // which is instruction to do already-finished work, delivered to the summariser at exactly
+      // the moment context is scarcest. A live goal's context is the mechanism that carries the
+      // objective across compaction, so this guard must not extend past closed goals.
+      if (goal.status === "complete" || goal.status === "unmet") return
       output.context.push(compactionContext(goal))
     },
     async "experimental.compaction.autocontinue"(input, output) {
       const goal = await goalBookkeeping("getGoal", () => getGoal(input.sessionID))
+      // `compaction.ts` appends a synthetic user message and keeps the session running whenever
+      // `enabled` survives this hook. An ACTIVE goal already drives its own continuation from the
+      // idle event, so leaving this on would give it two continuations per compaction. Scoped to
+      // `active` on purpose: a limited goal's single wrap-up is sent behind `budgetWrapupSent`, and
+      // a goal's limits bound the goal's own auto-continues, not the user's session, so every other
+      // status is left to the session. Pinned both ways by the H26 tests so widening it is a
+      // deliberate edit rather than a silent scope change.
       if (goal?.status === "active") output.enabled = false
     },
   }

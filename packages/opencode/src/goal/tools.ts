@@ -4,6 +4,7 @@ import {
   clearGoal,
   completeGoal,
   createGoal,
+  escapePromptText,
   extendGoal,
   formatGoalHistory,
   getGoal,
@@ -16,7 +17,6 @@ import * as Tool from "@/tool/tool"
 import * as Truncate from "@/tool/truncate"
 import { zodArgs } from "@/tool/zod"
 import {
-  positiveIntegerOrNull,
   resolveCreateGoalLimits,
   restrictedAgentSet,
   tokensFromMessages,
@@ -26,10 +26,94 @@ import {
   type Options,
   type UpdateGoalArgs,
 } from "@/goal/shared"
+import {
+  GOAL_DEFAULT_MAX_AUTO_TURNS,
+  GOAL_MAX_EVIDENCE,
+  GOAL_MAX_OBJECTIVE,
+  positiveIntegerOrNull,
+  withinCharacterLimit,
+} from "@/goal/schema"
 
 // 0 means unbounded: goals are never capped at a default number of auto-continues.
 // An explicit positive `max_auto_turns` config value still wins (see positiveIntegerOrNull).
-export const DEFAULT_MAX_AUTO_TURNS = 0
+// The value itself lives in schema.ts as GOAL_DEFAULT_MAX_AUTO_TURNS, which documents itself as
+// the single source of truth for it; defining it here too meant editing it had no effect here.
+// Shared messages so the tool boundary and `validateObjective`/`validateEvidence` describe the same
+// limit identically. `.max(n)` produced a zod-specific message and counted UTF-16 code units, so an
+// objective of n emoji was rejected here with a different error than the implementation's.
+const objectiveLimitMessage = `objective must be at most ${GOAL_MAX_OBJECTIVE} characters`
+const evidenceLimitMessage = `must be at most ${GOAL_MAX_EVIDENCE} characters`
+
+/**
+ * The limit args every goal-creating tool shares. Exported so a test can assert that the argument
+ * contract the `/goal` prompt documents is actually accepted here: the prompt tells the model to
+ * pass `null` for every limit the user did not name, and nothing else checks that the tool agrees.
+ * A tool-naming test cannot catch a schema that stopped accepting one of these.
+ */
+export const goalLimitArgs = {
+  token_budget: z
+    .number()
+    .int()
+    .positive()
+    .nullable()
+    .optional()
+    .describe("Optional positive token budget. Omit or pass null for unlimited."),
+  max_auto_turns: z
+    .number()
+    .int()
+    .positive()
+    .nullable()
+    .optional()
+    .describe("Optional per-goal auto-continue limit. Omit or pass null for unlimited."),
+  max_duration_seconds: z
+    .number()
+    .int()
+    .positive()
+    .nullable()
+    .optional()
+    .describe("Optional per-goal duration limit. Omit or pass null for unlimited."),
+  no_progress_token_threshold: z
+    .number()
+    .int()
+    .positive()
+    .nullable()
+    .optional()
+    .describe(
+      "Optional per-goal minimum output tokens for a continuation turn to count as progress. Raise it only to tolerate genuinely long-running single turns.",
+    ),
+  max_no_progress_turns: z
+    .number()
+    .int()
+    .positive()
+    .nullable()
+    .optional()
+    .describe(
+      "Optional consecutive low-progress turns tolerated before auto-pausing. Raise for unattended/overnight runs; the default (2) pauses quickly.",
+    ),
+  max_prompt_failures: z
+    .number()
+    .int()
+    .positive()
+    .nullable()
+    .optional()
+    .describe(
+      "Optional consecutive failed auto-continue prompts tolerated before auto-pausing. Raise for unattended runs so transient provider/network failures do not stop the goal.",
+    ),
+}
+
+/** The objective arg, shared by create_goal/set_goal/update_goal. Exported so the test can assert the
+ * real boundary rather than a reconstruction of it. */
+export const goalObjectiveArg = z
+  .string()
+  .min(1)
+  .refine((value) => withinCharacterLimit(value, GOAL_MAX_OBJECTIVE), { message: objectiveLimitMessage })
+
+/** The evidence/blocker arg, shared by update_goal. */
+export const goalEvidenceArg = z
+  .string()
+  .min(1)
+  .refine((value) => withinCharacterLimit(value, GOAL_MAX_EVIDENCE), { message: evidenceLimitMessage })
+
 const PLAN_MODE_CREATE_NOTICE =
   'Goal recorded while the session is in Plan mode, so execution is paused. Do not start implementation work now. Ask the user to switch to Build mode and resume the goal (for example with "/goal resume") to begin execution.'
 
@@ -88,7 +172,7 @@ function defineTool(
 
 export function goalTools(deps: Deps): Record<string, Tool.Def<Schema.Decoder<unknown>>> {
   const options = deps.options
-  const maxAutoTurns = positiveIntegerOrNull(options.max_auto_turns) ?? DEFAULT_MAX_AUTO_TURNS
+  const maxAutoTurns = positiveIntegerOrNull(options.max_auto_turns) ?? GOAL_DEFAULT_MAX_AUTO_TURNS
   const isPlanAgent = (agent: unknown) => {
     const names = restrictedAgentSet(options)
     return typeof agent === "string" && names.has(agent.trim().toLowerCase())
@@ -118,56 +202,7 @@ export function goalTools(deps: Deps): Record<string, Tool.Def<Schema.Decoder<un
     return tokensFromMessages(data as { info?: unknown; parts?: unknown[] }[])
   }
 
-  const limitArgs = {
-    token_budget: z
-      .number()
-      .int()
-      .positive()
-      .nullable()
-      .optional()
-      .describe("Optional positive token budget. Omit or pass null for unlimited."),
-    max_auto_turns: z
-      .number()
-      .int()
-      .positive()
-      .nullable()
-      .optional()
-      .describe("Optional per-goal auto-continue limit. Omit or pass null for unlimited."),
-    max_duration_seconds: z
-      .number()
-      .int()
-      .positive()
-      .nullable()
-      .optional()
-      .describe("Optional per-goal duration limit. Omit or pass null for unlimited."),
-    no_progress_token_threshold: z
-      .number()
-      .int()
-      .positive()
-      .nullable()
-      .optional()
-      .describe(
-        "Optional per-goal minimum output tokens for a continuation turn to count as progress. Raise it only to tolerate genuinely long-running single turns.",
-      ),
-    max_no_progress_turns: z
-      .number()
-      .int()
-      .positive()
-      .nullable()
-      .optional()
-      .describe(
-        "Optional consecutive low-progress turns tolerated before auto-pausing. Raise for unattended/overnight runs; the default (2) pauses quickly.",
-      ),
-    max_prompt_failures: z
-      .number()
-      .int()
-      .positive()
-      .nullable()
-      .optional()
-      .describe(
-        "Optional consecutive failed auto-continue prompts tolerated before auto-pausing. Raise for unattended runs so transient provider/network failures do not stop the goal.",
-      ),
-  }
+  const limitArgs = goalLimitArgs
 
   return {
     get_goal: defineTool(
@@ -189,16 +224,16 @@ export function goalTools(deps: Deps): Record<string, Tool.Def<Schema.Decoder<un
     ),
     create_goal: defineTool(
       "create_goal",
-      "Create a goal only when explicitly requested by the user or system/developer instructions; do not infer goals from ordinary tasks. Fails if a non-complete goal exists. Limits are unlimited by default: omitting a limit arg (or passing null) means no token budget, no auto-continue cap, and no duration cap, so only pass numbers the user explicitly asked for. While the session is in Plan mode, the goal is recorded as paused and execution requires the user to switch to Build mode.",
-      { objective: z.string().min(1).max(4000).describe("The concrete objective to start pursuing."), ...limitArgs },
+      "Create a goal only when explicitly requested by the user or system/developer instructions; do not infer goals from ordinary tasks. Fails while a goal is still open (active, paused, budgetLimited, or usageLimited); a goal that is complete or unmet does not block a new one, so do not try to close or clear it first. Limits are unlimited by default: omitting a limit arg (or passing null) means no token budget, no auto-continue cap, and no duration cap, so only pass numbers the user explicitly asked for. While the session is in Plan mode, the goal is recorded as paused and execution requires the user to switch to Build mode.",
+      { objective: goalObjectiveArg.describe("The concrete objective to start pursuing."), ...limitArgs },
       deps,
       async (args, context) => createGoalFromTool(args as CreateGoalArgs, context),
     ),
     set_goal: defineTool(
       "set_goal",
-      "Set a new goal when the user explicitly asks the AGENT to formulate and set its own goal (the model writes the objective itself). Prefer create_goal when passing the user's own words. Fails if a non-complete goal exists. Limits are unlimited by default: omitting a limit arg (or passing null) means no token budget, no auto-continue cap, and no duration cap, so only pass numbers the user explicitly asked for. While the session is in Plan mode, the goal is recorded as paused and execution requires the user to switch to Build mode.",
+      "Set a new goal when the user explicitly asks the AGENT to formulate and set its own goal (the model writes the objective itself). Prefer create_goal when passing the user's own words. Fails while a goal is still open (active, paused, budgetLimited, or usageLimited); a goal that is complete or unmet does not block a new one, so do not try to close or clear it first. Limits are unlimited by default: omitting a limit arg (or passing null) means no token budget, no auto-continue cap, and no duration cap, so only pass numbers the user explicitly asked for. While the session is in Plan mode, the goal is recorded as paused and execution requires the user to switch to Build mode.",
       {
-        objective: z.string().min(1).max(4000).describe("The model-formulated concrete objective to start pursuing."),
+        objective: goalObjectiveArg.describe("The model-formulated concrete objective to start pursuing."),
         ...limitArgs,
       },
       deps,
@@ -208,7 +243,7 @@ export function goalTools(deps: Deps): Record<string, Tool.Def<Schema.Decoder<un
       "update_goal_objective",
       "Edit the current OpenCode goal objective when the user explicitly asks to edit or replace it.",
       {
-        objective: z.string().min(1).max(4000).describe("The updated concrete objective."),
+        objective: goalObjectiveArg.describe("The updated concrete objective."),
         status: z.enum(["active", "paused"]).optional().describe("Whether the edited goal should be active or paused."),
       },
       deps,
@@ -235,36 +270,33 @@ export function goalTools(deps: Deps): Record<string, Tool.Def<Schema.Decoder<un
         status: z
           .enum(["complete", "unmet"])
           .describe("Required. complete means achieved; unmet means blocked or impossible."),
-        evidence: z
-          .string()
-          .min(1)
-          .max(4000)
+        evidence: goalEvidenceArg
           .optional()
           .describe("Required when status is complete. Summarize the concrete evidence verified."),
-        blocker: z
-          .string()
-          .min(1)
-          .max(4000)
+        blocker: goalEvidenceArg
           .optional()
           .describe("Required when status is unmet. Explain the concrete blocker or impossibility."),
       },
       deps,
       async (args, context) => {
         const input = args as UpdateGoalArgs
+        // The report is prose the model reads, and it quotes the evidence or blocker verbatim, so
+        // it gets the same escaping `formatGoal` and `formatGoalHistory` apply. The structured
+        // `goal` next to it stays raw: that is data, and escaping inside JSON would corrupt it.
         if (input.status === "complete") {
           const goal = await completeGoal(context.sessionID, input.evidence ?? "")
           const budget = goal.tokenBudget == null ? "" : ` Token usage: ${goal.tokensUsed}/${goal.tokenBudget}.`
-          const report = `Goal achieved. Time used: ${goal.timeUsedSeconds} seconds.${budget} Evidence: ${goal.completionEvidence}.`
+          const report = `Goal achieved. Time used: ${goal.timeUsedSeconds} seconds.${budget} Evidence: ${escapePromptText(goal.completionEvidence ?? "")}.`
           return JSON.stringify({ goal, completion_report: report }, null, 2)
         }
         const goal = await markGoalUnmet(context.sessionID, input.blocker ?? "")
-        const report = `Goal unmet. Time used: ${goal.timeUsedSeconds} seconds. Blocker: ${goal.blocker}.`
+        const report = `Goal unmet. Time used: ${goal.timeUsedSeconds} seconds. Blocker: ${escapePromptText(goal.blocker ?? "")}.`
         return JSON.stringify({ goal, unmet_report: report }, null, 2)
       },
     ),
     extend_goal: defineTool(
       "extend_goal",
-      "Explicitly extend the budgets of a goal that stopped at a token, turn, or duration limit. Requires at least one higher limit or a deliberate null for token/duration; preserves usage and history. Closed and ordinary active goals are rejected.",
+      "Explicitly extend the budgets of a goal that stopped at a token, turn, or duration limit. Requires at least one limit to be named - a higher number, or null for no cap at all - on ANY of the three, so a limit the user did not name can be lifted as well as raised; preserves usage and history. Closed and ordinary active goals are rejected.",
       {
         token_budget: z
           .number()

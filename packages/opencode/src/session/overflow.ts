@@ -77,6 +77,28 @@ export function usable(input: { cfg: ConfigV1.Info; model: Provider.Model; outpu
     : Math.max(0, context - ProviderTransform.maxOutputTokens(input.model, input.outputTokenMax))
 }
 
+/**
+ * Reconstructs a token total when the provider reported none.
+ *
+ * `Session.getUsage` splits the provider's `outputTokens` into `output` (visible) and `reasoning`,
+ * so the parts must be summed INCLUDING reasoning to reproduce what the provider would have
+ * reported. Omitting it under-counts every reasoning turn - and a reasoning turn is exactly where
+ * the context is largest, so the error is in the dangerous direction: compaction fires late and the
+ * request overflows for real.
+ *
+ * This is the single definition, shared with `SessionProcessor.accumulateTokens` so the two copies
+ * of "what does a missing total mean" cannot drift apart again.
+ */
+export function totalTokens(tokens: {
+  total?: number
+  input: number
+  output: number
+  reasoning: number
+  cache: { read: number; write: number }
+}) {
+  return tokens.total || tokens.input + tokens.output + tokens.reasoning + tokens.cache.read + tokens.cache.write
+}
+
 export function isOverflow(input: {
   cfg: ConfigV1.Info
   tokens: SessionV1.Assistant["tokens"]
@@ -86,7 +108,5 @@ export function isOverflow(input: {
   if (input.cfg.compaction?.auto === false) return false
   if (input.model.limit.context === 0) return false
 
-  const count =
-    input.tokens.total || input.tokens.input + input.tokens.output + input.tokens.cache.read + input.tokens.cache.write
-  return count >= usable(input)
+  return totalTokens(input.tokens) >= usable(input)
 }

@@ -18,6 +18,11 @@ import {
   GOAL_DEFAULT_NO_PROGRESS_TOKEN_THRESHOLD,
   GOAL_HISTORY_LIMIT,
   GOAL_CHECKPOINT_LIMIT,
+  GOAL_MAX_RETAINED_TEXT,
+  positiveIntegerOrNull,
+  withinCharacterLimit,
+  GOAL_MAX_EVIDENCE,
+  GOAL_MAX_OBJECTIVE,
   StateSchema,
   GoalError,
 } from "./schema"
@@ -96,7 +101,8 @@ function decodeState(value: unknown) {
   )
 }
 
-function readStateEffect() {
+/** The state exactly as it is on disk, plus that disk text so a no-op mutation can skip its write. */
+function readStateWithRawEffect() {
   return Effect.gen(function* () {
     yield* migrateLegacyStateFile()
     const raw = yield* Effect.tryPromise({
@@ -107,21 +113,33 @@ function readStateEffect() {
       try: () => JSON.parse(raw) as unknown,
       catch: (cause) => new StateDecodeError({ cause }),
     })
-    return yield* decodeState(parsed)
+    const state = yield* decodeState(parsed)
+    return { state, raw }
   }).pipe(
     // A missing file is simply "no goals yet".
     Effect.catchTag("StateReadError", (error) =>
-      isMissingStateFile(error.cause) ? Effect.succeed(emptyState()) : Effect.fail(error),
+      // `raw: null` - there is no usable on-disk text, so the next mutation must write.
+      isMissingStateFile(error.cause) ? Effect.succeed({ state: emptyState(), raw: null }) : Effect.fail(error),
     ),
     // A corrupt or schema-violating file is recoverable: quarantine it and start clean rather
     // than disabling goal state for every session until someone deletes the file by hand.
     Effect.catchTag("StateDecodeError", (error) =>
       Effect.suspend(() => {
         quarantineStateFile("decode failed")
-        return Effect.succeed(emptyState())
+        // The file was renamed aside, so again there is no usable on-disk text to compare against.
+        return Effect.succeed({ state: emptyState(), raw: null })
       }),
     ),
   )
+}
+
+function readStateEffect() {
+  return readStateWithRawEffect().pipe(Effect.map((read) => read.state))
+}
+
+/** The one serialization of the state file, used by BOTH the writer and the no-op comparison. */
+function serializeState(state: State) {
+  return JSON.stringify(state, null, 2) + "\n"
 }
 
 function writeStateEffect(state: State) {
@@ -130,7 +148,7 @@ function writeStateEffect(state: State) {
       const file = statePath()
       await mkdir(dirname(file), { recursive: true, mode: 0o700 })
       const tmp = `${file}.${process.pid}.${Date.now()}.tmp`
-      await writeFile(tmp, JSON.stringify(state, null, 2) + "\n", { mode: 0o600 })
+      await writeFile(tmp, serializeState(state), { mode: 0o600 })
       await rename(tmp, file)
       await chmod(file, 0o600).catch(() => undefined)
     },
@@ -157,12 +175,32 @@ export async function mutate<T>(fn: (state: State) => T | Promise<T>) {
   return enqueueMutation(() =>
     Effect.runPromise(
       Effect.gen(function* () {
-        const state = yield* readStateEffect()
+        const { state, raw } = yield* readStateWithRawEffect()
         const result = yield* Effect.tryPromise({
           try: () => Promise.resolve(fn(state)),
           catch: (cause) => (cause instanceof Error ? cause : new Error(String(cause))),
         })
-        yield* writeStateEffect(state)
+        // Skip the write when the state is byte-identical to what is already on disk. Every assistant
+        // message mutates the file two or three times over (`accountUsage`, then
+        // `recordAssistantProgress`, then the scored progress call), and each write serialized the
+        // WHOLE state - every goal the user has ever run, forever, since only an explicit `clear_goal`
+        // ever removes one. At 1000 stored goals one read+decode+serialize+write cycle measured 217ms
+        // here, and a no-op mutation paid all of it to write back identical bytes.
+        //
+        // Comparing the exact `writeStateEffect` serialization against the exact bytes read is what
+        // keeps the other behaviours intact rather than being a short cut around them: a normalizing
+        // repair of a legacy field, a migration, or a quarantine all differ from disk and so still
+        // write.
+        //
+        // HONEST SCOPE: this is worth only 4-6% of that cycle (217ms -> 208ms at 1000 goals), NOT the
+        // 35% a first reading suggests, because `JSON.stringify` of the whole state is the dominant
+        // cost and the comparison has to serialize too - it saves the write/rename/chmod syscalls and
+        // stops the file's mtime churning, not the serialization. The real cost is architectural: the
+        // state is one global file that only an explicit `clear_goal` ever prunes, and BOTH this
+        // server and the TUI goal bar (which re-reads the whole file on every `message.updated`) parse
+        // all of it on the hot path. Fixing that means a retention policy or a per-project file, which
+        // is an owner's decision, so this stays a mitigation.
+        if (serializeState(state) !== raw) yield* writeStateEffect(state)
         return result
       }),
     ),
@@ -172,14 +210,16 @@ export async function mutate<T>(fn: (state: State) => T | Promise<T>) {
 export function validateObjective(objective: string) {
   const value = objective.trim()
   if (!value) throw new GoalError({ message: "goal objective must not be empty" })
-  if ([...value].length > 4000) throw new GoalError({ message: "goal objective must be at most 4000 characters" })
+  if (!withinCharacterLimit(value, GOAL_MAX_OBJECTIVE))
+    throw new GoalError({ message: `goal objective must be at most ${GOAL_MAX_OBJECTIVE} characters` })
   return value
 }
 
 export function validateEvidence(evidence: string | null | undefined, label: string) {
   const value = evidence?.trim()
   if (!value) throw new GoalError({ message: `${label} must not be empty` })
-  if ([...value].length > 4000) throw new GoalError({ message: `${label} must be at most 4000 characters` })
+  if (!withinCharacterLimit(value, GOAL_MAX_EVIDENCE))
+    throw new GoalError({ message: `${label} must be at most ${GOAL_MAX_EVIDENCE} characters` })
   return value
 }
 
@@ -192,7 +232,7 @@ function normalizeGoal(goal: Goal) {
   goal.history = (goal.history ?? []).slice(-GOAL_HISTORY_LIMIT)
   goal.checkpoints = (goal.checkpoints ?? []).slice(-GOAL_CHECKPOINT_LIMIT)
   goal.lastCheckpoint = goal.lastCheckpoint ?? goal.checkpoints.at(-1) ?? null
-  goal.lastAssistantText ??= ""
+  goal.lastAssistantText = boundRetainedText(goal.lastAssistantText)
   goal.lastAssistantMessageID ??= ""
   goal.lastPromptAgent ??= null
   goal.awaitingContinuationProgress = goal.awaitingContinuationProgress === true
@@ -206,6 +246,28 @@ function normalizeGoal(goal: Goal) {
   goal.continuationFailures = nonNegativeInteger(goal.continuationFailures, 0)
   goal.autoTurns = nonNegativeInteger(goal.autoTurns, 0)
   goal.timeUsedSeconds = nonNegativeInteger(goal.timeUsedSeconds, 0)
+  // The token cursor. `accountUsage` differences each observation against `lastSessionTokens` and
+  // falls back to `sessionTokensAtCreation`, so a negative value inflates every charge and a
+  // fractional one makes `tokensUsed` fractional - which the `tokensUsed` normalization above then
+  // snaps to 0 on the next read, silently forgetting all recorded usage. Dropping an untrusted value
+  // is what makes `accountUsage` re-anchor from the creation total. Unlike the wall clocks below,
+  // this one DROPS a fraction instead of flooring it: sub-second precision on a clock is real, but
+  // sub-token precision on a token count is not, and re-anchoring is the safe direction for usage.
+  // It must be `undefined` and not `null`: the schema declares these as `Schema.optional(Schema
+  // .Number)`, which does not accept null, so writing null would fail decode and quarantine the
+  // whole state file.
+  goal.sessionTokensAtCreation = nonNegativeIntegerOrUndefined(goal.sessionTokensAtCreation)
+  goal.lastSessionTokens = nonNegativeIntegerOrUndefined(goal.lastSessionTokens)
+  // The wall-clock cursor, and the duration limit's counterpart to the token cursor.
+  // `accountWallClock` adds `now - lastAccountedAt` to `timeUsedSeconds` and `snapshot` projects
+  // the live delta from it. A negative value sits in the epoch, so it charged the whole epoch as
+  // elapsed time and made the goal instantly unresumable against any duration limit; a fractional
+  // one accrues a fraction that the `timeUsedSeconds` normalization above then snaps to 0, so the
+  // elapsed time is forgotten and the limit can never trip. See `wallClockCursor`.
+  goal.lastAccountedAt = wallClockCursor(goal.lastAccountedAt)
+  // The continuation throttle cursor. See `reserveContinuation`: a cursor ahead of `now` is not a
+  // throttle at all, and normalizing keeps this the last arithmetic field covered by the invariant.
+  goal.lastContinuationAt = wallClockCursor(goal.lastContinuationAt)
   goal.createdAt = nonNegativeInteger(goal.createdAt, 0)
   goal.updatedAt = nonNegativeInteger(goal.updatedAt, 0)
   goal.maxAutoTurns = positiveIntegerOrNull(goal.maxAutoTurns)
@@ -222,12 +284,28 @@ function normalizeGoal(goal: Goal) {
   return goal
 }
 
-function positiveIntegerOrNull(value: unknown) {
-  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null
-}
-
 function nonNegativeInteger(value: unknown, fallback: number) {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : fallback
+}
+
+function nonNegativeIntegerOrUndefined(value: unknown) {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined
+}
+
+/**
+ * A fractional wall-clock cursor is only sub-second precision, so it is floored and the elapsed
+ * time it represents is kept. A negative or non-finite one is untrustworthy and is dropped, which
+ * re-anchors the cursor to now rather than charging time that never elapsed.
+ */
+function wallClockCursor(value: unknown) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return null
+  return Math.floor(value)
+}
+
+/** Keeps the message PREFIX, so every 280-character summary derived from it is unchanged. */
+function boundRetainedText(value: unknown) {
+  if (typeof value !== "string") return ""
+  return value.length > GOAL_MAX_RETAINED_TEXT ? value.slice(0, GOAL_MAX_RETAINED_TEXT) : value
 }
 
 function isClosed(status: Goal["status"]) {
@@ -393,7 +471,9 @@ export async function updateGoalObjective(
   const value = validateObjective(objective)
   const agent = typeof options?.agent === "string" && options.agent.trim() ? options.agent.trim() : null
   const planModePause = options?.planModePause === true
-  return mutate((state) => {
+  // Editing the objective resumes the goal, so it must obey the same limit guard a plain resume
+  // does. Without it this path reactivates a goal the budget/turn/duration re-check would refuse.
+  return mutateStatus((state) => {
     const goal = state.goals[sessionID]
     if (!goal) throw new GoalError({ message: "cannot update goal because this session has no goal" })
     if (isClosed(goal.status)) throw new GoalError({ message: "cannot reopen a closed goal" })
@@ -401,6 +481,9 @@ export async function updateGoalObjective(
       throw new GoalError({ message: "goal is limited; explicitly extend its limits before resuming" })
     }
     accountWallClock(goal)
+    if (status === "active" && !planModePause && exhaustGoalLimits(goal)) {
+      return { goal: snapshot(goal), limited: true }
+    }
     goal.objective = value
     goal.status = planModePause ? "paused" : status
     goal.updatedAt = Math.floor(Date.now() / 1000)
@@ -418,7 +501,7 @@ export async function updateGoalObjective(
         : "Goal objective updated and paused."
     pushHistory(goal, "updated", `Goal objective updated: ${summarizeText(value, 400)}`)
     if (planModePause) pushHistory(goal, "paused", goal.lastStatus)
-    return snapshot(goal)
+    return { goal: snapshot(goal), limited: false }
   })
 }
 
@@ -453,7 +536,7 @@ export async function pauseGoalForPlanMode(sessionID: string) {
 
 export async function setGoalStatus(sessionID: string, status: "active" | "paused", agent?: string | null) {
   const agentValue = typeof agent === "string" && agent.trim() ? agent.trim() : null
-  return mutate((state) => {
+  return mutateStatus((state) => {
     const goal = state.goals[sessionID]
     if (!goal) throw new GoalError({ message: "cannot update goal because this session has no goal" })
     if (isClosed(goal.status)) throw new GoalError({ message: "cannot reopen a closed goal" })
@@ -461,21 +544,9 @@ export async function setGoalStatus(sessionID: string, status: "active" | "pause
       throw new GoalError({ message: "goal is limited; explicitly extend its limits before resuming" })
     }
     // A repeated "/goal pause" must not churn history or restate a transition that did not happen.
-    if (goal.status === status) return snapshot(goal)
+    if (goal.status === status) return { goal: snapshot(goal), limited: false }
     accountWallClock(goal)
-    if (status === "active") {
-      // Re-check every limit before reactivating, not just the turn cap, so a goal that has since
-      // exhausted its token budget or duration cannot be resumed and then corrected a turn later.
-      const now = Math.floor(Date.now() / 1000)
-      if (goal.tokenBudget != null && goal.tokensUsed >= goal.tokenBudget) {
-        maybeStopForBudget(goal)
-        throw new GoalError({ message: "goal is limited; explicitly extend its limits before resuming" })
-      }
-      if (goal.maxDurationSeconds != null && goal.timeUsedSeconds >= goal.maxDurationSeconds) {
-        maybeStopForUsageLimit(goal, GOAL_DEFAULT_MAX_AUTO_TURNS, now)
-        throw new GoalError({ message: "goal is limited; explicitly extend its limits before resuming" })
-      }
-    }
+    if (status === "active" && exhaustGoalLimits(goal)) return { goal: snapshot(goal), limited: true }
     goal.status = status
     goal.updatedAt = Math.floor(Date.now() / 1000)
     goal.lastAccountedAt = status === "active" ? goal.updatedAt : null
@@ -485,8 +556,31 @@ export async function setGoalStatus(sessionID: string, status: "active" | "pause
     if (agentValue) goal.lastPromptAgent = agentValue
     goal.lastStatus = status === "active" ? "Goal resumed." : "Goal paused."
     pushHistory(goal, status === "active" ? "resumed" : "paused", goal.lastStatus)
-    return snapshot(goal)
+    return { goal: snapshot(goal), limited: false }
   })
+}
+
+/**
+ * Runs a status transition, committing the goal's limited status when a reactivation is refused.
+ * `mutate` writes only after its callback returns, so raising the refusal from inside that callback
+ * would discard the transition and leave a goal that can neither be resumed nor extended.
+ */
+async function mutateStatus<T>(run: (state: State) => { goal: T; limited: boolean }) {
+  const result = await mutate(run)
+  if (result.limited) throw new GoalError({ message: "goal is limited; explicitly extend its limits before resuming" })
+  return result.goal
+}
+
+/**
+ * Moves a goal into its limited status when it has already exhausted a limit, reporting whether it
+ * did. Re-checked before every reactivation, not just the turn cap, so a goal that outgrew its
+ * budget or duration while paused cannot be resumed and then corrected a turn later.
+ */
+function exhaustGoalLimits(goal: Goal) {
+  if (goal.tokenBudget != null && goal.tokensUsed >= goal.tokenBudget) return maybeStopForBudget(goal)
+  if (goal.maxDurationSeconds != null && goal.timeUsedSeconds >= goal.maxDurationSeconds)
+    return maybeStopForUsageLimit(goal, GOAL_DEFAULT_MAX_AUTO_TURNS)
+  return false
 }
 
 export async function extendGoal(
@@ -647,7 +741,7 @@ export async function recordAssistantProgress(sessionID: string, input: Assistan
     const changed = Boolean(summary && summary !== previousSummary)
 
     if (summary && (!repeatedMessage || changed)) recordCheckpoint(goal, summary)
-    if (text) goal.lastAssistantText = text
+    if (text) goal.lastAssistantText = boundRetainedText(text)
     if (messageID) goal.lastAssistantMessageID = messageID
 
     const continuationTurnCompleted =
@@ -699,7 +793,12 @@ export async function reserveContinuation(sessionID: string, maxAutoTurns: numbe
     const now = Math.floor(Date.now() / 1000)
     accountWallClock(goal, now)
     if (maybeStopForUsageLimit(goal, maxAutoTurns, now)) return reserveWrapup(goal)
-    if (goal.lastContinuationAt && now - goal.lastContinuationAt < minIntervalSeconds) return null
+    // Only a cursor that is actually in the past can throttle. A cursor ahead of `now` yields a
+    // negative delta, which is below any interval, so the goal is throttled until the wall clock
+    // catches up - silently, and `reactivate` does not clear it either, so a resume does not help.
+    // A backwards clock step (NTP correction, VM resume) is enough to leave it there.
+    if (goal.lastContinuationAt && goal.lastContinuationAt <= now && now - goal.lastContinuationAt < minIntervalSeconds)
+      return null
     goal.autoTurns += 1
     goal.lastContinuationAt = now
     goal.continuationBaselineMessageID = goal.lastAssistantMessageID
@@ -757,18 +856,28 @@ function reserveWrapup(goal: Goal) {
 }
 
 function maybeStopForBudget(goal: Goal) {
-  if (goal.status !== "active") return
-  if (goal.tokenBudget == null || goal.tokensUsed < goal.tokenBudget) return
+  // A goal that outgrew its budget is over it whether or not it was paused. Leaving it `paused`
+  // reports a resume-able goal that `setGoalStatus` then refuses to resume, and `extendGoal` in
+  // turn refuses to extend, so the goal is wedged with no remedy short of clearing it. The
+  // already-limited statuses are skipped so accounting every step cannot restate the transition,
+  // and a CLOSED goal is skipped so this can never overwrite `complete`/`unmet` - the callers all
+  // filter closed goals out today, and the guard is what keeps that true if a caller ever does not.
+  if (isClosed(goal.status) || goal.status === "budgetLimited" || goal.status === "usageLimited") return false
+  if (goal.tokenBudget == null || goal.tokensUsed < goal.tokenBudget) return false
   accountWallClock(goal)
   goal.status = "budgetLimited"
   goal.lastAccountedAt = null
   goal.stopReason = `token budget reached (${goal.tokensUsed}/${goal.tokenBudget})`
   goal.lastStatus = `${goal.stopReason}; wrap-up required.`
   pushHistory(goal, "limited", goal.lastStatus)
+  return true
 }
 
 function maybeStopForUsageLimit(goal: Goal, defaultMaxAutoTurns: number, now = Math.floor(Date.now() / 1000)) {
-  if (goal.status !== "active") return false
+  // Same reasoning as maybeStopForBudget: a paused goal can also have exhausted its turn or
+  // duration allowance, and reporting that as a limit is what keeps it extendable. A closed goal is
+  // excluded for the same reason - neither guard may overwrite `complete`/`unmet`.
+  if (isClosed(goal.status) || goal.status === "budgetLimited" || goal.status === "usageLimited") return false
   const effectiveMaxAutoTurns = effectiveAutoTurnLimit(goal, defaultMaxAutoTurns)
   if (effectiveMaxAutoTurns > 0 && goal.autoTurns >= effectiveMaxAutoTurns) {
     goal.status = "usageLimited"
@@ -776,6 +885,7 @@ function maybeStopForUsageLimit(goal: Goal, defaultMaxAutoTurns: number, now = M
     goal.stopReason = `max auto-continues reached (${effectiveMaxAutoTurns})`
     goal.lastStatus = `${goal.stopReason}; wrap-up required.`
     pushHistory(goal, "limited", goal.lastStatus)
+    goal.updatedAt = now
     return true
   }
   if (goal.maxDurationSeconds != null && goal.timeUsedSeconds >= goal.maxDurationSeconds) {
@@ -832,10 +942,6 @@ function goalLimitSummary(goal: Goal) {
   return limits.length ? `Goal set with ${limits.join(", ")}.` : "Goal set with no limits (unlimited tokens, turns, and duration)."
 }
 
-export function estimateTokensFromText(text: string) {
-  return Math.ceil(text.length / 4)
-}
-
 /**
  * Escapes untrusted text before it is interpolated into a prompt. Model-authored fields
  * (objective, blocker, evidence, lastStatus, stopReason) all reach prompt templates, so escaping
@@ -869,7 +975,15 @@ export function formatGoal(goal: GoalSnapshot | null) {
 export function formatGoalHistory(goal: GoalSnapshot | null) {
   if (!goal) return "No goal history is available for this session."
   if (goal.history.length === 0) return "No goal history recorded yet."
-  return goal.history.map((entry) => `- [${new Date(entry.timestamp * 1000).toISOString()}] ${entry.type}: ${entry.detail}`).join("\n")
+  // `entry.detail` quotes the objective, completion evidence, blocker and assistant prose, so it is
+  // model- and user-authored and reaches the model through `get_goal_history`. It needs the same
+  // escaping `formatGoal` applies, or a report that quotes a closing `</untrusted_objective>` breaks
+  // straight out of the wrapper the continuation prompt puts the objective in.
+  return goal.history.map((entry) => historyLine(entry)).join("\n")
+}
+
+function historyLine(entry: Goal["history"][number]) {
+  return `- [${new Date(entry.timestamp * 1000).toISOString()}] ${entry.type}: ${escapePromptText(entry.detail)}`
 }
 
 function normalizeCreateOptions(input?: number | null | CreateGoalOptions): Required<CreateGoalOptions> {

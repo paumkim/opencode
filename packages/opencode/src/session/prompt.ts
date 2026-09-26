@@ -103,6 +103,21 @@ function formatMcpResourceBytes(value: number) {
   return `${Math.ceil(value / (1024 * 1024))} MB`
 }
 
+/**
+ * The context a message leaves behind is the LAST step's usage, not the sum of its steps: every step
+ * re-sends the whole history, so summing counts the conversation once per step and reports roughly
+ * `steps x` the real context. `processor.ts` measures in-step overflow from the current step for the
+ * same reason, and `message.tokens` is the spend total (see `accumulateTokens`), so the last
+ * `step-finish` part is the only place the context size is recorded.
+ *
+ * Falls back to the message totals when a message has no step-finish parts - a replayed, compacted
+ * or hand-written message - so the check still works without them.
+ */
+function contextTokens(message: SessionV1.WithParts | undefined) {
+  const last = message?.parts.filter((part): part is SessionV1.StepFinishPart => part.type === "step-finish").at(-1)
+  return last?.tokens
+}
+
 function isOrphanedInterruptedTool(part: SessionV1.ToolPart) {
   // cleanup() marks abandoned tool_use blocks this way after retries/aborts.
   // They are not pending work and must not trigger an assistant-prefill request.
@@ -1386,13 +1401,12 @@ const layer = Layer.effect(
             continue
           }
 
-          if (
-            lastFinished &&
-            lastFinished.summary !== true &&
-            (yield* compaction.isOverflow({ tokens: lastFinished.tokens, model }))
-          ) {
-            yield* compaction.create({ sessionID, agent: lastUser.agent, model: lastUser.model, auto: true })
-            continue
+          if (lastFinished && lastFinished.summary !== true) {
+            const finished = msgs.find((message) => message.info.id === lastFinished.id)
+            if (yield* compaction.isOverflow({ tokens: contextTokens(finished) ?? lastFinished.tokens, model })) {
+              yield* compaction.create({ sessionID, agent: lastUser.agent, model: lastUser.model, auto: true })
+              continue
+            }
           }
 
           const agent = yield* agents.get(lastUser.agent)

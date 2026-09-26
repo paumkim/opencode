@@ -13,7 +13,7 @@ import { Snapshot } from "@/snapshot"
 import { Session } from "./session"
 import { LLM } from "./llm"
 import { MessageV2 } from "./message-v2"
-import { isOverflow, PreflightError } from "./overflow"
+import { isOverflow, PreflightError, totalTokens } from "./overflow"
 import { PartID } from "./schema"
 import type { SessionID } from "./schema"
 import { SessionRetry } from "./retry"
@@ -42,6 +42,48 @@ const REASONING_LOOP_THRESHOLD = 3
 // turn signatures and flag when the pattern is a strict alternation.
 const ALTERNATION_WINDOW = 6
 const ALTERNATION_MIN_UNIQUE = 2
+
+/**
+ * Canonical JSON with object keys sorted recursively, so two tool inputs that differ only in key
+ * order compare equal. Providers re-serialize their tool arguments, and key order is not stable
+ * across turns, so comparing raw `JSON.stringify` output let an identical repeated call slip past
+ * the doom-loop check - the loop an unattended run gets stuck in re-issuing the same failing call.
+ * Array order is preserved because it carries meaning.
+ */
+function canonicalJSON(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJSON).join(",")}]`
+  if (isRecord(value))
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJSON(value[key])}`)
+      .join(",")}}`
+  return JSON.stringify(value) ?? "null"
+}
+
+/**
+ * Adds one step's usage to the message's running totals.
+ *
+ * `cost` has always been accumulated across steps while the token fields were overwritten, so a
+ * multi-step turn - the normal shape for a tool-calling agent - reported only its LAST step even
+ * though the DB token columns (`session.ts`), `opencode stats` and the ACP usage report all read
+ * these per message and summed them. All three under-reported every multi-step turn.
+ *
+ * `total` is optional per step, so a missing value must not yield NaN. The fallback reconstructs
+ * it the way the provider computes it: `getUsage` splits the provider's output into
+ * `output + reasoning`, so the parts are summed including reasoning.
+ */
+function accumulateTokens(current: SessionV1.Assistant["tokens"], add: SessionV1.Assistant["tokens"]) {
+  const next = {
+    total: (current.total ?? 0) + (add.total ?? 0),
+    input: current.input + add.input,
+    output: current.output + add.output,
+    reasoning: current.reasoning + add.reasoning,
+    cache: { read: current.cache.read + add.cache.read, write: current.cache.write + add.cache.write },
+  }
+  // `total` is optional per step, so summing it can be 0. The shared reconstruction decides what a
+  // missing total means; see `totalTokens` in ./overflow for why it must include reasoning.
+  return { ...next, total: totalTokens(next) }
+}
 
 // Record a turn signature into the rolling per-session window and flag a
 // strict alternation (A → B → A → B) that the consecutive-identity detectors
@@ -174,6 +216,14 @@ const layer = Layer.effect(
     // Rolling window of turn signatures per session, used to detect strict
     // alternation (A → B → A → B) that the consecutive-identity detectors miss.
     const turnSignatures = new Map<SessionID, string[]>()
+    // Consecutive edit-free turns, for the same reason and with the same consequence as the three
+    // above: `create()` runs once per step, so a counter kept in `ctx` restarts every step and can
+    // only ever read 0 or 1. A turn that made no edits is NOT on its own a loop - read-only
+    // investigation, planning and research are all legitimate runs of consecutive turns with no
+    // file edit - so this stays a measurement only. It deliberately does not set `loopDetected`, and
+    // it does not relabel a loop the way `loopReason` does: "no_edit" is a session-level property,
+    // not a repetition pattern, so it would replace a precise diagnosis with a vaguer one.
+    const noEditStreaks = new Map<SessionID, number>()
 
     // These three maps live at the app layer rather than per instance, so they
     // outlive the session they describe. Without an explicit release a deleted
@@ -183,6 +233,7 @@ const layer = Layer.effect(
       textLoop.delete(sessionID)
       reasoningLoop.delete(sessionID)
       turnSignatures.delete(sessionID)
+      noEditStreaks.delete(sessionID)
     }
     const releaseOnDelete = yield* events.listen((event) =>
       Effect.sync(() => {
@@ -215,7 +266,7 @@ reasoningMap: {},
         hasEditInStep: false,
         stateChanged: false,
         alternationDetected: false,
-        noEditStreak: 0,
+        noEditStreak: noEditStreaks.get(input.sessionID) ?? 0,
         turnStarted: Date.now(),
         lastDelta: Date.now(),
       }
@@ -479,12 +530,16 @@ const saveToolLearning = Effect.fn("SessionProcessor.saveToolLearning")(function
 
       const handleEvent = Effect.fnUntraced(function* (value: StreamEvent) {
         // Track last delta for stall detection — any event that represents
-        // model progress resets the stall timer.
+        // model progress resets the stall timer. `tool-result` and `tool-error` count: a tool that
+        // takes minutes (a build, a test run) emits no deltas while it runs, so without them a
+        // legitimately working session was reported stalled for the whole duration of a long tool.
         if (
           value.type === "reasoning-delta" ||
           value.type === "text-delta" ||
           value.type === "tool-input-delta" ||
           value.type === "tool-call" ||
+          value.type === "tool-result" ||
+          value.type === "tool-error" ||
           value.type === "step-start" ||
           value.type === "reasoning-start" ||
           value.type === "text-start" ||
@@ -519,8 +574,14 @@ const saveToolLearning = Effect.fn("SessionProcessor.saveToolLearning")(function
               field: "text",
               delta: value.text,
             })
-            // Runaway detection: same reasoning repeated → interrupt and retry
-            if (isRunawayReasoning(ctx.reasoningMap[value.id].text)) {
+            // Runaway detection: same reasoning repeated → interrupt and retry.
+            // Only a delta that actually added bytes counts. Both detectors compare the CUMULATIVE
+            // text, so an empty delta is indistinguishable from "the model repeated itself" — and
+            // providers emit empty deltas for keep-alives, role-only chunks, and tool-call chunks
+            // interleaved into a text block. Counting those aborted a healthy turn, discarding its
+            // output and forcing a retry. The repeat being hunted is a repeat ACROSS deltas and
+            // turns, so requiring the delta to have grown the text leaves that intact.
+            if (value.text && isRunawayReasoning(ctx.reasoningMap[value.id].text)) {
               ctx.loopDetected = true
               ctx.runawayDetected = true
               yield* Effect.logError("runaway_reasoning", {
@@ -616,7 +677,7 @@ const reasoning = ctx.reasoningMap[value.id]
                   part.type === "tool" &&
                   part.tool === value.name &&
                   part.state.status !== "pending" &&
-                  JSON.stringify(part.state.input) === JSON.stringify(input),
+                  canonicalJSON(part.state.input) === canonicalJSON(input),
               )
             ) {
               return
@@ -713,7 +774,7 @@ const reasoning = ctx.reasoningMap[value.id]
             })
             ctx.assistantMessage.finish = value.reason
             ctx.assistantMessage.cost += usage.cost
-            ctx.assistantMessage.tokens = usage.tokens
+            ctx.assistantMessage.tokens = accumulateTokens(ctx.assistantMessage.tokens, usage.tokens)
             yield* session.updatePart({
               id: PartID.ascending(),
               reason: value.reason,
@@ -797,8 +858,9 @@ const reasoning = ctx.reasoningMap[value.id]
               field: "text",
               delta: value.text,
             })
-            // Runaway detection: same text repeated → interrupt and retry
-            if (isRunawayText(ctx.currentText.text)) {
+            // Runaway detection: same text repeated → interrupt and retry.
+            // Only a delta that actually added bytes counts; see the reasoning-delta case.
+            if (value.text && isRunawayText(ctx.currentText.text)) {
               ctx.loopDetected = true
               ctx.runawayDetected = true
               yield* Effect.logError("runaway_text", {
@@ -1126,7 +1188,11 @@ if (ctx.currentText.text.trim()) {
             reasoningLoop.delete(ctx.sessionID)
             resetRunaway()
           }
-          const noEditStreak = ctx.hasEditInStep ? 0 : ctx.noEditStreak + 1
+          // A turn that produced a file edit resets the streak; one that did not extends it. The
+          // map is the streak's home, so the value survives the fresh `ctx` the next step's
+          // `create()` builds, and the early returns above report the same number this one does.
+          const noEditStreak = ctx.hasEditInStep ? 0 : (noEditStreaks.get(ctx.sessionID) ?? 0) + 1
+          noEditStreaks.set(ctx.sessionID, noEditStreak)
           ctx.noEditStreak = noEditStreak
 
           ctx.hasEditInStep = false
