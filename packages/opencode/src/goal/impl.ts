@@ -1115,7 +1115,27 @@ export function formatGoalHistory(goal: GoalSnapshot | null) {
 }
 
 function historyLine(entry: Goal["history"][number]) {
-  return `- [${new Date(entry.timestamp * 1000).toISOString()}] ${entry.type}: ${escapePromptText(entry.detail)}`
+  return `- [${formatHistoryTimestamp(entry.timestamp)}] ${entry.type}: ${escapePromptText(entry.detail)}`
+}
+
+/**
+ * Renders a history stamp, tolerating one the `Date` range cannot represent.
+ *
+ * `toISOString()` THROWS a RangeError on an invalid date rather than returning something printable,
+ * so an unformattable stamp took `formatGoalHistory` - and with it `get_goal_history` - down: the
+ * model got a failed tool call instead of a report, and every OTHER entry in the history became
+ * unreadable because of one bad value. The state file is user-writable and `HistoryEntrySchema`
+ * types the stamp as a bare `Schema.Number`, which accepts values far outside the ±8.64e15 ms Date
+ * range, so this is reachable without a bug anywhere: a hand-edited or externally written state file
+ * is enough.
+ *
+ * Falling back to the raw number is honest and keeps the entry - losing it would hide a recorded
+ * transition, which is worse than printing it unformatted.
+ */
+function formatHistoryTimestamp(seconds: number) {
+  const date = new Date(seconds * 1000)
+  if (!Number.isFinite(date.getTime())) return String(seconds)
+  return date.toISOString()
 }
 
 function normalizeCreateOptions(input?: number | null | CreateGoalOptions): Required<CreateGoalOptions> {
