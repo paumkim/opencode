@@ -11,6 +11,9 @@ import { SessionTodo } from "@opencode-ai/schema/session-todo"
 export const Info = SessionTodo.Info
 export type Info = SessionTodo.Info
 
+const STATUSES: ReadonlySet<string> = new Set(SessionTodo.Status.literals)
+const PRIORITIES: ReadonlySet<string> = new Set(SessionTodo.Priority.literals)
+
 export const Event = SessionTodo.Event
 
 export interface Interface {
@@ -58,11 +61,25 @@ const layer = Layer.effect(
         .orderBy(asc(TodoTable.position))
         .all()
         .pipe(Effect.orDie)
-      return rows.map((row) => ({
-        content: row.content,
-        status: row.status,
-        priority: row.priority,
-      }))
+      return rows
+        .filter((row) => {
+          // `Info` is a closed set and it is the `GET /session/:id/todo` response schema, so a row
+          // written before the set was enforced would fail the response encode and 500 the endpoint.
+          // The todo list is model-managed transient state that the next todowrite rewrites whole,
+          // so dropping the unusable row is the repair; it must not be silent, because a silently
+          // short list is indistinguishable from the model having removed the item.
+          if (STATUSES.has(row.status) && PRIORITIES.has(row.priority)) return true
+          console.warn(
+            `[todo] session ${sessionID} has a todo with status=${JSON.stringify(row.status)} ` +
+              `priority=${JSON.stringify(row.priority)}, which is not in the todo contract; dropping it`,
+          )
+          return false
+        })
+        .map((row) => ({
+          content: row.content,
+          status: row.status as Info["status"],
+          priority: row.priority as Info["priority"],
+        }))
     })
 
     return Service.of({ update, get })

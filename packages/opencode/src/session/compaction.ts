@@ -387,8 +387,16 @@ const layer = Layer.effect(
       const compacting = yield* plugin.trigger("experimental.session.compacting", compactingInput, compactingOutput)
       const msgs = structuredClone(selected.head)
       const transformOutput = { messages: msgs }
-      yield* goal.trigger("experimental.chat.messages.transform", {}, transformOutput)
-      yield* plugin.trigger("experimental.chat.messages.transform", {}, transformOutput)
+      // `selected.head` is the compacted-away PREFIX, not the session's full history, so the
+      // transform hook is told which call this is instead of leaving a consumer to infer it from
+      // the array. A consumer that differences the array's token total against a running cursor
+      // rewinds that cursor here and double-charges the retained context on the next turn, and the
+      // array cannot identify the call: the prior compaction summaries that would mark it are
+      // filtered out of `head` above. `sessionID` comes along because the prefix is not required to
+      // contain it either.
+      const transformInput = { sessionID: input.sessionID, compaction: true }
+      yield* goal.trigger("experimental.chat.messages.transform", transformInput, transformOutput)
+      yield* plugin.trigger("experimental.chat.messages.transform", transformInput, transformOutput)
       const conversation = msgs.map(serialize).filter(Boolean).join("\n\n")
       const nextPrompt =
         compacting.prompt ??

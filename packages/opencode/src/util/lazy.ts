@@ -1,20 +1,3 @@
-export function lazy<T>(fn: () => T) {
-  let value: T | undefined
-  let loaded = false
-
-  const result = (): T => {
-    if (loaded) return value as T
-    value = fn()
-    loaded = true
-    return value
-  }
-
-  result.reset = () => {
-    loaded = false
-    value = undefined
-  }
-
-  result.loaded = () => loaded
-
-  return result
-}
+// Single implementation: the opencode copy used to diverge from core's, and the
+// divergent one cached a thrown initializer as a successful `undefined`.
+export * from "@opencode-ai/core/util/lazy"

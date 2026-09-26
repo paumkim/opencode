@@ -43,10 +43,17 @@ describe("goal budget lifecycle", () => {
     expect((await accountUsage(sessionID, 1_025))?.tokensUsed).toBe(25)
     expect((await accountUsage(sessionID, 1_010))?.tokensUsed).toBe(25)
 
-    // Compaction lowers the cumulative session total. Keep goal usage monotonic, then
-    // measure growth from the new cumulative base.
+    // Compaction makes the apparent total FALL, because the post-compaction history is a SUBSET of
+    // the session rather than a smaller session. So 100 is not a session total and must not become
+    // the baseline: re-anchoring there is what makes the next full step re-charge the whole retained
+    // context as fresh usage, on every compaction. The cursor is a high-water mark against it.
     expect((await accountUsage(sessionID, 100))?.tokensUsed).toBe(25)
-    expect((await accountUsage(sessionID, 130))?.tokensUsed).toBe(55)
+    // The high-water is 1,025 - the largest total ever observed - so neither the 1,010 nor the
+    // compaction's 100 lowered it.
+    expect((await readState()).goals[sessionID].lastSessionTokens).toBe(1_025)
+    // A real post-compaction step that does exceed the high-water still charges exactly its growth,
+    // so holding the cursor costs nothing in normal operation: 1,040 - 1,025 = 15.
+    expect((await accountUsage(sessionID, 1_040))?.tokensUsed).toBe(40)
   })
 
   test("persists and replaces the creation cursor without charging pre-existing context", async () => {

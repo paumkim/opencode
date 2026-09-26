@@ -21,9 +21,10 @@ import { SessionSummary } from "../../src/session/summary"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { Permission } from "../../src/permission"
 import { TestInstance, provideTmpdirInstance, provideTmpdirServer } from "../fixture/fixture"
-import { testEffect } from "../lib/effect"
+import { pollWithTimeout, testEffect } from "../lib/effect"
 import { raw, reply, TestLLMServer } from "../lib/llm-server"
 import { RuntimeFlags } from "@/effect/runtime-flags"
+import { Checkpoint } from "@/checkpoint/checkpoint"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
@@ -181,6 +182,7 @@ const root = LayerNode.group([
   // Exposed so a test can answer a permission ask the processor raises, which is the only
   // observable signal that the doom-loop detector fired.
   Permission.node,
+  Checkpoint.node,
 ])
 const replacements = [
   [SessionSummary.node, summary],
@@ -2454,4 +2456,68 @@ itNoEdit.instance(
       )
     }),
   { config: cfg },
+)
+
+// A checkpoint records what a step ACCOMPLISHED. The processor builds it in the `step-finish`
+// handler, out of `ctx.currentText` - but `ctx.currentText` is the OPEN text block, and it is
+// cleared to `undefined` by the `text-end` handler. `Lifecycle.finish` closes every open text
+// block BEFORE it emits `step-finish`, so on any well-formed stream `ctx.currentText` is already
+// `undefined` by the time the checkpoint is built, and `accomplishments` is structurally always
+// `[]`. The checkpoint is only written at all when the step changed files, so the one case where
+// there is something to record is exactly the case where the field is guaranteed to be empty.
+//
+// This needs a real worktree change, because `hasEditInStep` - the gate on writing a checkpoint at
+// all - comes from the snapshot diff. The reply is a plain text turn, so a passing test says the
+// accomplishments survived the event order rather than that anything about tools worked.
+it.live("a checkpoint written after a file change records the step's accomplishments", () =>
+  provideTmpdirServer(
+    ({ dir, llm }) =>
+      Effect.gen(function* () {
+        const checkpoints = yield* Checkpoint.Service
+        const { processors, session, provider } = yield* boot()
+
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "fix the parser")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const model = yield* provider.getModel(ref.providerID, ref.modelID)
+        // `create` captures the pre-stream snapshot, so a file written after it and before the
+        // stream is exactly the edit this step is about to be credited with.
+        const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model })
+        yield* Effect.promise(() => Bun.write(path.join(dir, "parser.ts"), "export const parse = 1\n"))
+
+        yield* llm.push(reply().text("Repaired the off-by-one in the parser index.").stop())
+        const value = yield* handle.process({
+          user: {
+            id: parent.id,
+            sessionID: chat.id,
+            role: "user",
+            time: parent.time,
+            agent: parent.agent,
+            model: { providerID: ref.providerID, modelID: ref.modelID },
+          } satisfies SessionV1.User,
+          sessionID: chat.id,
+          model,
+          agent: agent(),
+          system: [],
+          messages: [{ role: "user", content: "fix the parser" }],
+          tools: {},
+        })
+
+        expect(value.result).toBe("continue")
+        const written = yield* pollWithTimeout(
+          Effect.gen(function* () {
+            const found = yield* checkpoints.get(chat.id)
+            return found.length > 0 ? found[0] : undefined
+          }),
+          "no checkpoint was written after the file change",
+        )
+        expect(written.accomplishments).toEqual(["Repaired the off-by-one in the parser index."])
+        expect(written.context.hasEditInStep).toBe(true)
+        yield* checkpoints.clear(chat.id)
+      }),
+    {
+      git: true,
+      config: (url) => ({ ...providerCfg(url), experimental: { checkpoint: { enabled: true } } }),
+    },
+  ),
 )

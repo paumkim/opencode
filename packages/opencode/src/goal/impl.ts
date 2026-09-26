@@ -756,10 +756,22 @@ export async function accountUsage(sessionID: string, tokensUsed?: number) {
     if (typeof tokensUsed === "number" && Number.isFinite(tokensUsed)) {
       const cumulative = Math.max(0, Math.ceil(tokensUsed))
       if (goal.lastSessionTokens != null) {
-        // Session totals can fall after compaction. Keep goal usage monotonic and charge only
-        // positive growth since the latest observed total.
+        // Session totals CAN fall after compaction, so charging only positive growth is not enough on
+        // its own: a rewound cursor makes the next full-history observation charge the entire
+        // retained context as fresh usage, on every compaction. The `isCompactionTransform` guard in
+        // the driver stops the obvious case, but it recognizes a compaction by sniffing the messages
+        // for a summary marker - and the real call site filters prior summaries out of the prefix
+        // before the hook fires, so an unmarked prefix slipped through and rewound the cursor.
+        //
+        // A smaller NON-ZERO total is therefore a different SCOPE (a compacted-away prefix), not a
+        // smaller session, and the cursor is a high-water mark against it. Zero is different in kind:
+        // it is the ABSENCE of a measurement - a provider reporting no usage for any message - not a
+        // session total of zero, and it must re-anchor. Keeping the stale baseline there is what
+        // swallows a turn's entire real cost (H13): the first exact count arrives and is differenced
+        // against a cursor that was never a real total, so `max(0, ...)` charges nothing and the goal
+        // never reaches its budget.
         goal.tokensUsed += Math.max(0, cumulative - goal.lastSessionTokens)
-        goal.lastSessionTokens = cumulative
+        goal.lastSessionTokens = cumulative === 0 ? 0 : Math.max(goal.lastSessionTokens, cumulative)
       } else if (goal.sessionTokensAtCreation == null) {
         // If creation-time usage was unavailable, anchor a new zero-usage goal now. For a legacy
         // goal, preserve its already-accounted usage while establishing the same cursor.
@@ -767,9 +779,10 @@ export async function accountUsage(sessionID: string, tokensUsed?: number) {
         goal.lastSessionTokens = cumulative
         if (goal.tokensUsed !== 0) goal.tokensUsed = Math.max(goal.tokensUsed, cumulative)
       } else {
-        // The creation total was persisted but the observation cursor was not.
+        // The creation total was persisted but the observation cursor was not. Same rule: a real
+        // positive observation re-anchors but never below the creation total it is measured against.
         goal.tokensUsed += Math.max(0, cumulative - goal.sessionTokensAtCreation)
-        goal.lastSessionTokens = cumulative
+        goal.lastSessionTokens = cumulative === 0 ? 0 : Math.max(goal.sessionTokensAtCreation, cumulative)
       }
     }
     maybeStopForBudget(goal)
