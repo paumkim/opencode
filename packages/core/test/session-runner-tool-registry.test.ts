@@ -9,7 +9,7 @@ import { SessionMessage } from "@opencode-ai/core/session/message"
 import { ToolOutputStore } from "@opencode-ai/core/tool-output-store"
 import { ToolRegistry } from "@opencode-ai/core/tool/registry"
 import { executeTool, settleTool, toolDefinitions } from "./lib/tool"
-import { Cause, Deferred, Effect, Exit, Fiber, Layer, Option, Schema, SchemaGetter, SchemaIssue, Scope } from "effect"
+import { Deferred, Effect, Exit, Fiber, Layer, Option, Schema, SchemaGetter, SchemaIssue, Scope } from "effect"
 import { testEffect } from "./lib/effect"
 
 const bounds: ToolOutputStore.BoundInput[] = []
@@ -203,16 +203,16 @@ describe("ToolRegistry", () => {
     }),
   )
 
-  it.effect("propagates retention failures through settlement", () =>
+  it.effect("keeps validated tool results successful when retention fails", () =>
     Effect.gen(function* () {
       const service = yield* ToolRegistry.Service
       yield* service.register({ echo: make() })
       const materialized = yield* service.materialize()
-      const exit = yield* materialized.settle(call("echo", "call-retention-failure")).pipe(Effect.exit)
 
-      expect(Exit.isFailure(exit)).toBe(true)
-      if (Exit.isFailure(exit)) expect(Option.getOrUndefined(Cause.findErrorOption(exit.cause))).toBe(retentionFailure)
-      expect(retentionFailure.message).toBe("Failed to write tool output: disk full")
+      expect(yield* materialized.settle(call("echo", "call-retention-failure"))).toEqual({
+        result: { type: "text", value: "echo" },
+        output: { structured: { text: "echo" }, content: [{ type: "text", text: "echo" }] },
+      })
     }),
   )
 

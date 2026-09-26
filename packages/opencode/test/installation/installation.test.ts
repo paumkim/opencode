@@ -68,12 +68,19 @@ function testLayer(
 
 describe("installation", () => {
   describe("latest", () => {
-    testEffect(testLayer(() => jsonResponse({ tag_name: "v1.2.3" }))).effect(
-      "reads release version from GitHub releases",
+    const releaseCalls: string[] = []
+    testEffect(
+      testLayer((request) => {
+        releaseCalls.push(request.url)
+        return jsonResponse({ tag_name: "v1.2.3" })
+      }),
+    ).effect(
+      "reads release version from the fork GitHub repository for unknown methods",
       () =>
         Effect.gen(function* () {
           const result = yield* Installation.use.latest("unknown")
           expect(result).toBe("1.2.3")
+          expect(releaseCalls).toEqual(["https://api.github.com/repos/paumkim/opencode/releases/latest"])
         }),
     )
 

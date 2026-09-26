@@ -30,8 +30,7 @@ describe("Ripgrep", () => {
       (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
     ),
   )
-
-  it.live("never includes git metadata", () =>
+  it.live("omits git metadata and preserves limited callback results", () =>
     Effect.acquireUseRelease(
       Effect.promise(() => tmpdir()),
       (tmp) =>
@@ -62,6 +61,34 @@ describe("Ripgrep", () => {
       (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
     ),
   )
+  it.live("enforces the hard result ceiling for explicit over-limit requests", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) =>
+        Effect.gen(function* () {
+          yield* Effect.promise(() => fs.mkdir(path.join(tmp.path, "files")))
+          yield* Effect.promise(async () => {
+            await Promise.all(
+              Array.from({ length: Ripgrep.MAX_RESULTS + 1 }, (_, index) =>
+                fs.writeFile(path.join(tmp.path, "files", `file-${index}.txt`), "needle"),
+              ),
+            )
+          })
+          const ripgrep = yield* Ripgrep.Service
+          const over = Ripgrep.MAX_RESULTS + 100
+           const glob = yield* ripgrep.glob({ cwd: tmp.path, pattern: "files/*.txt", limit: over })
+           const find = yield* ripgrep.find({ cwd: tmp.path, pattern: "files/*.txt", limit: over, index: true })
+
+           const grep = yield* ripgrep.grep({ cwd: tmp.path, pattern: "needle", include: "files/*.txt", limit: over })
+
+          expect(glob.length).toBeLessThanOrEqual(Ripgrep.MAX_RESULTS)
+          expect(find.length).toBe(Ripgrep.MAX_RESULTS + 1)
+          expect(grep.length).toBeLessThanOrEqual(Ripgrep.MAX_RESULTS)
+        }),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ),
+  )
+
   it.live("does not split surrogate pairs in oversized line previews", () =>
     Effect.acquireUseRelease(
       Effect.promise(() => tmpdir()),

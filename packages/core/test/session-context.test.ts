@@ -28,6 +28,8 @@ import {
   userTexts,
   systemTexts,
   State,
+  Location,
+  AbsolutePath,
 } from "./session-runner.fixture"
 
 describe("SessionRunnerLLM", () => {
@@ -66,6 +68,47 @@ describe("SessionRunnerLLM", () => {
       ).toHaveLength(1)
       yield* replaySessionProjection(sessionID)
       expect(yield* session.messages({ sessionID })).toHaveLength(3)
+    }),
+  )
+
+  it.effect("initializes a fresh context epoch after moving a session", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      const events = yield* EventV2.Service
+      const { db } = yield* Database.Service
+
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Source" }), resume: false })
+      yield* session.resume(sessionID)
+      const sourceEpoch = yield* db
+        .select({ baseline: SessionContextEpochTable.baseline })
+        .from(SessionContextEpochTable)
+        .where(eq(SessionContextEpochTable.session_id, sessionID))
+        .get()
+        .pipe(Effect.orDie)
+
+      State.systemBaseline = "Destination context"
+      State.requests.length = 0
+      State.response = []
+      yield* events.publish(SessionEvent.Moved, {
+        sessionID,
+        location: Location.Ref.make({ directory: AbsolutePath.make("/project") }),
+        timestamp: DateTime.makeUnsafe(1),
+      })
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "After move" }), resume: false })
+      yield* session.resume(sessionID)
+
+      expect(State.requests.at(-1)?.system.map((part) => part.text)).toEqual(["Destination context"])
+      expect(systemTexts(State.requests.at(-1)!)).not.toContain("Initial context")
+      expect(
+        yield* db
+          .select({ baseline: SessionContextEpochTable.baseline })
+          .from(SessionContextEpochTable)
+          .where(eq(SessionContextEpochTable.session_id, sessionID))
+          .get()
+          .pipe(Effect.orDie),
+      ).toEqual({ baseline: "Destination context" })
+      expect(sourceEpoch?.baseline).toBe("Initial context")
     }),
   )
 

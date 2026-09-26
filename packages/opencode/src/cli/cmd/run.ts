@@ -829,6 +829,7 @@ export const RunCommand = effectCmd({
               if (auto) {
                 await client.permission.reply({
                   requestID: permission.id,
+                  sessionID: permission.sessionID,
                   reply: "once",
                 })
               } else {
@@ -839,6 +840,7 @@ export const RunCommand = effectCmd({
                 )
                 await client.permission.reply({
                   requestID: permission.id,
+                  sessionID: permission.sessionID,
                   reply: "reject",
                 })
               }

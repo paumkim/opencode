@@ -1,4 +1,5 @@
 import { Effect, Schema } from "effect"
+import type { Scope } from "effect"
 import path from "node:path"
 import fs from "node:fs/promises"
 import { FSUtil } from "@opencode-ai/core/fs-util"
@@ -10,43 +11,71 @@ import { Shell } from "@opencode-ai/core/shell"
 import { ShellID } from "./shell/id"
 import type { TerminalSessions } from "@opencode-ai/ghostty-terminal/sessions"
 
+declare const __GHOSTTY_TERMINAL_BUN__: boolean | undefined
+
+/** Compile-time host gate. Node/Electron builds define this as false so the
+ * Bun-only native module is omitted from their bundle. Source runs default to
+ * the current host. */
+export const GhosttyTerminalAvailable = typeof __GHOSTTY_TERMINAL_BUN__ === "undefined" || __GHOSTTY_TERMINAL_BUN__
+
+export type Metadata = {
+  unavailable?: boolean
+  runtime?: "node"
+}
+
 export const Parameters = Schema.Struct({
   action: Schema.Literals(["create", "write", "screen", "resize", "kill", "list", "dispose"]),
   name: Schema.optional(Schema.String.check(Schema.isPattern(/^[A-Za-z0-9_-]{1,64}$/))).annotate({
     description: "Named terminal. Required except for list and dispose (omit to dispose all your terminals).",
   }),
-  workdir: Schema.optional(Schema.String).annotate({ description: "Create only: working directory, default project directory." }),
+  workdir: Schema.optional(Schema.String).annotate({
+    description: "Create only: working directory, default project directory.",
+  }),
   cols: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1), Schema.isLessThanOrEqualTo(500))),
   rows: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1), Schema.isLessThanOrEqualTo(200))),
   data: Schema.optional(Schema.String.check(Schema.isMaxLength(65536))).annotate({
-    description: "Write only: literal text/keys, including control characters. To press Enter, include a carriage return in the data string — use \"\\r\" (which JSON decodes to a single 0x0D byte), NOT \"\\\\r\" (which would send literal backslash-r). \"\\u0003\" is Ctrl+C. Arrow Up is \"\\u001b[A\". Nothing is appended automatically.",
+    description:
+      'Write only: literal text/keys, including control characters. To press Enter, include a carriage return in the data string — use "\\r" (which JSON decodes to a single 0x0D byte), NOT "\\\\r" (which would send literal backslash-r). "\\u0003" is Ctrl+C. Arrow Up is "\\u001b[A". Nothing is appended automatically.',
   }),
   format: Schema.optional(Schema.Literals(["plain", "html"])),
   signal: Schema.optional(Schema.Literals(["SIGTERM", "SIGKILL", "SIGINT"])),
   wait: Schema.optional(Schema.Int).annotate({
-    description: "Screen only: milliseconds to wait before reading after a write. Default: 0 (no wait). Set to 500-2000 to give the shell time to process input.",
+    description:
+      "Screen only: milliseconds to wait before reading after a write. Default: 0 (no wait). Set to 500-2000 to give the shell time to process input.",
   }),
 })
 
-export const GhosttyTerminalTool = Tool.define(
+export const GhosttyTerminalTool = Tool.define<
+  typeof Parameters,
+  Metadata,
+  Config.Service | Plugin.Service | Scope.Scope
+>(
   "ghostty_terminal",
   Effect.gen(function* () {
     const config = yield* Config.Service
     const plugin = yield* Plugin.Service
-    const state = yield* InstanceState.make(() => Effect.gen(function* () {
-      const sessions = new Map<string, TerminalSessions>()
-      const state = { sessions, closed: false }
-      yield* Effect.addFinalizer(() => Effect.sync(() => {
-        state.closed = true
-        const errors: unknown[] = []
-        for (const registry of sessions.values()) {
-          try { registry.close() } catch (error) { errors.push(error) }
-        }
-        sessions.clear()
-        if (errors.length) throw new AggregateError(errors, "Terminal cleanup failed")
-      }))
-      return state
-    }))
+    const state = yield* InstanceState.make(() =>
+      Effect.gen(function* () {
+        const sessions = new Map<string, TerminalSessions>()
+        const state = { sessions, closed: false }
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => {
+            state.closed = true
+            const errors: unknown[] = []
+            for (const registry of sessions.values()) {
+              try {
+                registry.close()
+              } catch (error) {
+                errors.push(error)
+              }
+            }
+            sessions.clear()
+            if (errors.length) throw new AggregateError(errors, "Terminal cleanup failed")
+          }),
+        )
+        return state
+      }),
+    )
 
     return {
       description: [
@@ -65,102 +94,146 @@ export const GhosttyTerminalTool = Tool.define(
         "create/write require ghostty_terminal and bash permission. The tool inherits the configured bash permission level. Use the bash tool for restricted commands.",
       ].join("\n"),
       parameters: Parameters,
-      execute: (args: Schema.Schema.Type<typeof Parameters>, ctx: Tool.Context) => Effect.gen(function* () {
-        if (ctx.abort.aborted) throw new Error("Terminal call aborted")
-        if (args.action !== "list" && args.action !== "dispose" && !args.name) throw new Error("name is required")
-        if (args.action === "write" && args.data === undefined) throw new Error("write requires data")
-        if (args.action === "resize" && (args.cols === undefined || args.rows === undefined)) {
-          throw new Error("resize requires cols and rows")
-        }
-        yield* ctx.ask({
-          permission: "ghostty_terminal",
-          patterns: [args.action],
-          always: ["*"],
-          metadata: { ...args },
-        })
-        if (ctx.abort.aborted) throw new Error("Terminal call aborted")
-        if (args.action === "create" || args.action === "write") {
+      execute: (args: Schema.Schema.Type<typeof Parameters>, ctx: Tool.Context): Effect.Effect<Tool.ExecuteResult<Metadata>> =>
+        Effect.gen(function* () {
+          if (!GhosttyTerminalAvailable) {
+            return {
+              title: "terminal unavailable",
+              metadata: { unavailable: true, runtime: "node" } satisfies Metadata,
+              output:
+                "ghostty_terminal is unavailable in Node/Electron hosts; it requires the Bun runtime with the native Ghostty library. Use the bash tool for non-interactive commands.",
+            }
+          }
+          if (ctx.abort.aborted) throw new Error("Terminal call aborted")
+          if (args.action !== "list" && args.action !== "dispose" && !args.name) throw new Error("name is required")
+          if (args.action === "write" && args.data === undefined) throw new Error("write requires data")
+          if (args.action === "resize" && (args.cols === undefined || args.rows === undefined)) {
+            throw new Error("resize requires cols and rows")
+          }
           yield* ctx.ask({
-            permission: ShellID.ToolID,
-            patterns: ["*"],
+            permission: "ghostty_terminal",
+            patterns: [args.action],
             always: ["*"],
-            metadata: { ...args, description: "Interactive shell input" },
+            metadata: { ...args },
           })
           if (ctx.abort.aborted) throw new Error("Terminal call aborted")
-        }
-        const ins = yield* InstanceState.context
-        if (ctx.abort.aborted) throw new Error("Terminal call aborted")
-        const cwd = args.action === "create" ? yield* Effect.promise(async () => {
-          const cwd = await fs.realpath(path.resolve(ins.directory, args.workdir ?? "."))
-          if (ctx.abort.aborted) throw new Error("Terminal call aborted")
-          return cwd
-        }) : ins.directory
-        if (args.action === "create") {
-          const directory = yield* Effect.promise(() => fs.realpath(ins.directory))
-          if (ctx.abort.aborted) throw new Error("Terminal call aborted")
-          // '/' is the non-git worktree sentinel; it must never grant external access.
-          const worktree = ins.worktree === "/" ? undefined : yield* Effect.promise(() => fs.realpath(ins.worktree))
-          if (ctx.abort.aborted) throw new Error("Terminal call aborted")
-          if (!FSUtil.contains(directory, cwd) && !(worktree && worktree !== path.parse(worktree).root && FSUtil.contains(worktree, cwd))) {
-            const glob = FSUtil.normalizePathPattern(path.join(cwd, "*"))
+          if (args.action === "create" || args.action === "write") {
             yield* ctx.ask({
-              permission: "external_directory", patterns: [glob], always: [glob],
-              metadata: { filepath: cwd, parentDir: cwd },
+              permission: ShellID.ToolID,
+              patterns: ["*"],
+              always: ["*"],
+              metadata: { ...args, description: "Interactive shell input" },
             })
             if (ctx.abort.aborted) throw new Error("Terminal call aborted")
           }
-        }
-        const local = yield* InstanceState.get(state)
-        if (ctx.abort.aborted) throw new Error("Terminal call aborted")
-        const owners = local.sessions
-        const owner = JSON.stringify([ctx.sessionID, ctx.agent])
-        const current = owners.get(owner)
-        if (!current && args.action !== "create") {
-          if (args.action !== "list" && args.action !== "dispose") throw new Error(`Unknown terminal session '${args.name}'`)
-          return { title: "terminal " + args.action, metadata: {}, output: args.action === "list" ? "[]" : "Disposed terminals." }
-        }
-        const sessions = current ?? (yield* Effect.promise(async () => {
-          // Do not import bun:ffi/bun-pty during tool registry startup (including Node hosts).
-          const { TerminalSessions } = await import("@opencode-ai/ghostty-terminal/sessions")
+          const ins = yield* InstanceState.context
           if (ctx.abort.aborted) throw new Error("Terminal call aborted")
-          return new TerminalSessions()
-        }))
-        // Import/permission waits can race another call. Use the existing owner, never overwrite it.
-        if (local.closed) throw new Error("Terminal instance is disposed")
-        if (ctx.abort.aborted) throw new Error("Terminal call aborted")
-        const registry = owners.get(owner) ?? sessions
-        owners.set(owner, registry)
-        const name = args.name ?? ""
-        if (args.action === "create") {
-          const cfg = yield* config.get()
+          const cwd =
+            args.action === "create"
+              ? yield* Effect.promise(async () => {
+                  const cwd = await fs.realpath(path.resolve(ins.directory, args.workdir ?? "."))
+                  if (ctx.abort.aborted) throw new Error("Terminal call aborted")
+                  return cwd
+                })
+              : ins.directory
+          if (args.action === "create") {
+            const directory = yield* Effect.promise(() => fs.realpath(ins.directory))
+            if (ctx.abort.aborted) throw new Error("Terminal call aborted")
+            // '/' is the non-git worktree sentinel; it must never grant external access.
+            const worktree = ins.worktree === "/" ? undefined : yield* Effect.promise(() => fs.realpath(ins.worktree))
+            if (ctx.abort.aborted) throw new Error("Terminal call aborted")
+            if (
+              !FSUtil.contains(directory, cwd) &&
+              !(worktree && worktree !== path.parse(worktree).root && FSUtil.contains(worktree, cwd))
+            ) {
+              const glob = FSUtil.normalizePathPattern(path.join(cwd, "*"))
+              yield* ctx.ask({
+                permission: "external_directory",
+                patterns: [glob],
+                always: [glob],
+                metadata: { filepath: cwd, parentDir: cwd },
+              })
+              if (ctx.abort.aborted) throw new Error("Terminal call aborted")
+            }
+          }
+          const local = yield* InstanceState.get(state)
           if (ctx.abort.aborted) throw new Error("Terminal call aborted")
+          const owners = local.sessions
+          const owner = JSON.stringify([ctx.sessionID, ctx.agent])
+          const current = owners.get(owner)
+          if (!current && args.action !== "create") {
+            if (args.action !== "list" && args.action !== "dispose")
+              throw new Error(`Unknown terminal session '${args.name}'`)
+            return {
+              title: "terminal " + args.action,
+              metadata: {} satisfies Metadata,
+              output: args.action === "list" ? "[]" : "Disposed terminals.",
+            }
+          }
+          const sessions =
+            current ??
+            (yield* Effect.promise(async () => {
+              // Do not import bun:ffi/bun-pty during tool registry startup (including Node hosts).
+              const { TerminalSessions } = await import("@opencode-ai/ghostty-terminal/sessions")
+              if (ctx.abort.aborted) throw new Error("Terminal call aborted")
+              return new TerminalSessions()
+            }))
+          // Import/permission waits can race another call. Use the existing owner, never overwrite it.
           if (local.closed) throw new Error("Terminal instance is disposed")
-          const extra = yield* plugin.trigger("shell.env", { cwd, sessionID: ctx.sessionID, callID: ctx.callID }, { env: {} })
           if (ctx.abort.aborted) throw new Error("Terminal call aborted")
-          if (local.closed) throw new Error("Terminal instance is disposed")
-          registry.create(name, {
-            cwd, cols: args.cols ?? 80, rows: args.rows ?? 24,
-            env: Object.fromEntries(Object.entries({ ...process.env, ...extra.env }).filter((pair): pair is [string, string] => typeof pair[1] === "string")),
-          }, Shell.acceptable(cfg.shell))
-        }
-        if (args.action === "write") registry.write(name, args.data ?? "")
-        if (args.action === "resize") registry.resize(name, args.cols ?? 80, args.rows ?? 24)
-        if (args.action === "kill") registry.kill(name, args.signal)
-        if (args.action === "dispose") {
-          if (args.name) registry.dispose(args.name)
-          else registry.disposeAll()
-        }
-        return {
-          title: `terminal ${args.action}${name ? " " + name : ""}`,
-          metadata: {},
-          output: args.action === "screen" ? args.wait
-            ? yield* Effect.promise((signal: AbortSignal) => registry.screenWait(name, args.format, { wait: args.wait }))
-            : registry.screen(name, args.format) || "(empty screen)"
-            : args.action === "list" ? JSON.stringify(registry.list())
-            : args.action === "dispose" ? "Disposed terminals."
-            : JSON.stringify(registry.info(name)) + "\nUse screen (readScreen) to visually verify the result.",
-        }
-      }).pipe(Effect.orDie),
+          const registry = owners.get(owner) ?? sessions
+          owners.set(owner, registry)
+          const name = args.name ?? ""
+          if (args.action === "create") {
+            const cfg = yield* config.get()
+            if (ctx.abort.aborted) throw new Error("Terminal call aborted")
+            if (local.closed) throw new Error("Terminal instance is disposed")
+            const extra = yield* plugin.trigger(
+              "shell.env",
+              { cwd, sessionID: ctx.sessionID, callID: ctx.callID },
+              { env: {} },
+            )
+            if (ctx.abort.aborted) throw new Error("Terminal call aborted")
+            if (local.closed) throw new Error("Terminal instance is disposed")
+            registry.create(
+              name,
+              {
+                cwd,
+                cols: args.cols ?? 80,
+                rows: args.rows ?? 24,
+                env: Object.fromEntries(
+                  Object.entries({ ...process.env, ...extra.env }).filter(
+                    (pair): pair is [string, string] => typeof pair[1] === "string",
+                  ),
+                ),
+              },
+              Shell.acceptable(cfg.shell),
+            )
+          }
+          if (args.action === "write") registry.write(name, args.data ?? "")
+          if (args.action === "resize") registry.resize(name, args.cols ?? 80, args.rows ?? 24)
+          if (args.action === "kill") registry.kill(name, args.signal)
+          if (args.action === "dispose") {
+            if (args.name) registry.dispose(args.name)
+            else registry.disposeAll()
+          }
+          return {
+            title: `terminal ${args.action}${name ? " " + name : ""}`,
+            metadata: {} satisfies Metadata,
+            output:
+              args.action === "screen"
+                ? args.wait
+                  ? yield* Effect.promise((signal: AbortSignal) =>
+                      registry.screenWait(name, args.format, { wait: args.wait }),
+                    )
+                  : registry.screen(name, args.format) || "(empty screen)"
+                : args.action === "list"
+                  ? JSON.stringify(registry.list())
+                  : args.action === "dispose"
+                    ? "Disposed terminals."
+                    : JSON.stringify(registry.info(name)) + "\nUse screen (readScreen) to visually verify the result.",
+          }
+        }).pipe(Effect.orDie),
     }
   }),
 )

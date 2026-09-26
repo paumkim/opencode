@@ -62,7 +62,7 @@ const layer = Layer.effectDiscard(
       .register({
         [name]: Tool.make({
           description:
-            "Search file contents by regular expression within the active Location or an absolute managed tool-output file. Use a path to narrow the search, include to filter files by glob, and limit to bound the match count. Returns concise file resources, line numbers, and bounded line previews.",
+            "Search file contents by regular expression within the active Location. Use a relative path to narrow the search, include to filter files by glob, and limit to bound the match count. Returns concise file resources, line numbers, and bounded line previews.",
           input: Input,
           output: Output,
           toModelOutput: ({ output }) => [
@@ -92,7 +92,14 @@ const layer = Layer.effectDiscard(
                 agent: context.agent,
                 source: { type: "tool", messageID: context.assistantMessageID, callID: context.toolCallID },
               })
-              const target = path.resolve(location.directory, input.path ?? ".")
+              const root = yield* fs.realPath(location.directory).pipe(Effect.orDie)
+              const lexicalTarget = path.resolve(root, input.path ?? ".")
+              if (!FSUtil.contains(root, lexicalTarget)) return yield* Effect.fail(new Error("Path escapes the active Location"))
+              const target = yield* fs
+                .realPath(lexicalTarget)
+                .pipe(Effect.catch(() => Effect.succeed(lexicalTarget)))
+              if (!FSUtil.contains(root, target))
+                return yield* Effect.fail(new Error("Path escapes the active Location"))
               const info = yield* fs.stat(target).pipe(Effect.catch(() => Effect.succeed(undefined)))
               return yield* ripgrep
                 .grep({
@@ -100,7 +107,7 @@ const layer = Layer.effectDiscard(
                   pattern: input.pattern,
                   file: info?.type === "File" ? path.basename(target) : undefined,
                   include: input.include,
-                  limit: input.limit ?? Number.MAX_SAFE_INTEGER,
+                  limit: input.limit ?? Ripgrep.MAX_RESULTS,
                 })
                 .pipe(
                   Effect.map((result) =>

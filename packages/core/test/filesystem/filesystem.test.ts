@@ -112,6 +112,25 @@ describe("FSUtil", () => {
     )
 
     it(
+      "atomically replaces JSON and applies restrictive mode",
+      Effect.gen(function* () {
+        const fs = yield* FSUtil.Service
+        const filesys = yield* FileSystem.FileSystem
+        const tmp = yield* filesys.makeTempDirectoryScoped()
+        const file = path.join(tmp, "data.json")
+        yield* filesys.writeFileString(file, JSON.stringify({ old: true }))
+
+        yield* fs.writeJson(file, { new: true }, 0o600)
+
+        expect(yield* fs.readJson(file)).toEqual({ new: true })
+        if (process.platform !== "win32") {
+          const info = yield* filesys.stat(file)
+          expect(info.mode! & 0o777).toBe(0o600)
+        }
+      }),
+    )
+
+    it(
       "fails invalid JSON through the error channel",
       Effect.gen(function* () {
         const fs = yield* FSUtil.Service

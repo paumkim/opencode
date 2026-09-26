@@ -252,7 +252,9 @@ async function runInteractiveRuntime(input: RunRuntimeInput, deps: RunRuntimeDep
       }
 
       log?.write("send.permission.reply", next)
-      await ctx.sdk.permission.reply(next)
+      const sessionID = next.sessionID ?? state.sessionID
+      if (!sessionID) return
+      await ctx.sdk.permission.reply({ ...next, sessionID })
     },
     onQuestionReply: async (next) => {
       if (state.demo?.questionReply(next)) {

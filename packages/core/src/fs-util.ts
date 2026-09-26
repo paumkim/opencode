@@ -1,5 +1,6 @@
 import { NodeFileSystem } from "@effect/platform-node"
 import { dirname, isAbsolute, join, relative, resolve as pathResolve, sep } from "path"
+import { randomUUID } from "crypto"
 import { realpathSync } from "fs"
 import * as NFS from "fs/promises"
 import { lookup } from "mime-types"
@@ -109,8 +110,13 @@ export namespace FSUtil {
 
       const writeJson = Effect.fn("FileSystem.writeJson")(function* (path: string, data: unknown, mode?: number) {
         const content = JSON.stringify(data, null, 2)
-        yield* fs.writeFileString(path, content)
-        if (mode) yield* fs.chmod(path, mode)
+        const temp = `${path}.${randomUUID()}.tmp`
+        yield* Effect.gen(function* () {
+          yield* fs.makeDirectory(dirname(path), { recursive: true })
+          yield* fs.writeFileString(temp, content, mode ? { mode } : undefined)
+          if (mode) yield* fs.chmod(temp, mode)
+          yield* fs.rename(temp, path)
+        }).pipe(Effect.ensuring(fs.remove(temp).pipe(Effect.ignore)))
       })
 
       const ensureDir = Effect.fn("FileSystem.ensureDir")(function* (path: string) {

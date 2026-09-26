@@ -1,6 +1,6 @@
 import { describe, expect } from "bun:test"
 import path from "path"
-import { Cause, Effect, Exit, Fiber, Layer, Option } from "effect"
+import { Cause, Effect, Exit, Fiber, Layer } from "effect"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { FSUtil } from "@opencode-ai/core/fs-util"
@@ -144,20 +144,17 @@ describe("ToolOutputStore", () => {
     ),
   )
 
-  it.live("fails oversized settlement when complete retention cannot be written", () =>
+  it.live("returns the complete successful output when retention cannot be written", () =>
     withStore(({ root, store, fs }) =>
       Effect.gen(function* () {
         yield* fs.writeFileString(path.join(root, "tool-output"), "not a directory")
-        const exit = yield* store
-          .bound({
-            sessionID,
-            toolCallID: "call-lossy",
-            output: { structured: {}, content: [{ type: "text", text: "x".repeat(ToolOutputStore.MAX_BYTES + 1) }] },
-          })
-          .pipe(Effect.exit)
-        expect(Exit.isFailure(exit)).toBe(true)
-        if (Exit.isFailure(exit))
-          expect(Option.getOrUndefined(Cause.findErrorOption(exit.cause))?._tag).toBe("ToolOutputStore.StorageError")
+        const output = {
+          structured: { kind: "report" },
+          content: [{ type: "text" as const, text: "x".repeat(ToolOutputStore.MAX_BYTES + 1) }],
+        }
+        const result = yield* store.bound({ sessionID, toolCallID: "call-lossy", output })
+
+        expect(result).toEqual({ output, outputPaths: [] })
       }),
     ),
   )

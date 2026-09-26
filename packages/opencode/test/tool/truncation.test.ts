@@ -1,9 +1,10 @@
 import { describe, test, expect } from "bun:test"
 import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
+import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { filesystem } from "@opencode-ai/core/effect/app-node-platform"
 import { FSUtil } from "@opencode-ai/core/fs-util"
-import { Effect, FileSystem } from "effect"
+import { Effect, FileSystem, Layer } from "effect"
 import { Truncate } from "@/tool/truncate"
 import { Config } from "@/config/config"
 import { Identifier } from "../../src/id/id"
@@ -17,6 +18,19 @@ const FIXTURES_DIR = path.join(import.meta.dir, "fixtures")
 const ROOT = path.resolve(import.meta.dir, "..", "..")
 
 const it = testEffect(LayerNode.compile(LayerNode.group([Truncate.node, FSUtil.node, filesystem])))
+
+const failingFilesystem = Layer.effect(
+  FSUtil.Service,
+  Effect.gen(function* () {
+    const fs = yield* FSUtil.Service
+    return FSUtil.Service.of({ ...fs, ensureDir: () => Effect.die("retention unavailable") })
+  }),
+).pipe(Layer.provide(LayerNode.compile(FSUtil.node)))
+const retentionFailureIt = testEffect(
+  AppNodeBuilder.build(LayerNode.group([Truncate.node, FSUtil.node]), [
+    [FSUtil.node, failingFilesystem],
+  ]),
+)
 
 const configuredLayer = (cfg: ConfigV1.Info) =>
   LayerNode.compile(LayerNode.group([Truncate.node, FSUtil.node, filesystem, Config.node]), [
@@ -160,7 +174,7 @@ describe("Truncate", () => {
       )
     })
 
-    it.live("large single-line file truncates with byte message", () =>
+    it.live("large file truncates by lines before bytes", () =>
       Effect.gen(function* () {
         const svc = yield* Truncate.Service
         const fsys = yield* FSUtil.Service
@@ -168,7 +182,7 @@ describe("Truncate", () => {
         const result = yield* svc.output(content)
 
         expect(result.truncated).toBe(true)
-        expect(result.content).toContain("bytes truncated...")
+        expect(result.content).toContain("lines truncated...")
         expect(Buffer.byteLength(content, "utf-8")).toBeGreaterThan(Truncate.MAX_BYTES)
       }),
     )
@@ -182,7 +196,7 @@ describe("Truncate", () => {
         expect(result.truncated).toBe(true)
         expect(result.content).toContain("The tool call succeeded but the output was truncated")
         expect(result.content).toContain("Grep")
-        if (!result.truncated) throw new Error("expected truncated")
+        if (!result.truncated || !result.outputPath) throw new Error("expected managed output")
         expect(result.outputPath).toBeDefined()
         expect(result.outputPath).toContain("tool_")
 
@@ -192,7 +206,20 @@ describe("Truncate", () => {
       }),
     )
 
-    it.live("suggests Task tool when agent has task permission", () =>
+    retentionFailureIt.live("returns a bounded preview without a managed path when retention fails", () =>
+      Effect.gen(function* () {
+        const svc = yield* Truncate.Service
+        const content = Array.from({ length: 100 }, (_, i) => `line${i}`).join("\n")
+        const result = yield* svc.output(content, { maxLines: 10 })
+        expect(result.truncated).toBe(true)
+        if (!result.truncated) throw new Error("expected truncated")
+        expect(result.outputPath).toBeUndefined()
+        expect(result.content).toContain("line0")
+        expect(result.content).not.toContain("line99")
+      }),
+    )
+
+    it.live("directs agent to process truncated output without delegation", () =>
       Effect.gen(function* () {
         const svc = yield* Truncate.Service
         const lines = Array.from({ length: 100 }, (_, i) => `line${i}`).join("\n")
@@ -200,8 +227,9 @@ describe("Truncate", () => {
         const result = yield* svc.output(lines, { maxLines: 10 }, agent as any)
 
         expect(result.truncated).toBe(true)
-        expect(result.content).toContain("Grep")
-        expect(result.content).toContain("Task tool")
+        expect(result.content).toContain(
+          "Process directly with Grep/Read offset/limit to save context, do NOT delegate to Task/explore.",
+        )
       }),
     )
 

@@ -36,6 +36,12 @@ export interface DialogSelectProps<T> {
   renderFilter?: boolean
   locked?: boolean
   preserveSelection?: boolean
+  // Opt-in single-click commit. Defaults to the two-click confirm (first click
+  // selects + previews, second click on the same row commits) so existing
+  // pickers keep their accidental-click protection. Only enable this for menus
+  // whose rows are all cheap, obvious, and clearly labeled — a first click that
+  // looks inert reads as "the menu is broken".
+  singleClickConfirm?: boolean
   actions?: {
     command: string
     title: string
@@ -65,6 +71,9 @@ export interface DialogSelectOption<T = any> {
   category?: string
   categoryView?: JSX.Element
   disabled?: boolean
+  // Per-row opt-out from a menu-level `singleClickConfirm`. Use it for
+  // destructive rows so a stray click cannot fire them.
+  requireConfirmClick?: boolean
   bg?: RGBA
   gutter?: () => JSX.Element
   margin?: JSX.Element
@@ -724,8 +733,12 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
                               setFocusedAction(undefined)
                               moveTo(index)
                               // Two-click confirm: first click selects + previews,
-                              // second click on the same row confirms.
-                              if (isDeepEqual(clickedValue, option.value)) {
+                              // second click on the same row confirms. Keyboard submit
+                              // bypasses this (immediate confirm). A menu can opt into
+                              // single-click commit; `requireConfirmClick` opts a single
+                              // row back out (destructive actions).
+                              const singleClick = props.singleClickConfirm === true && option.requireConfirmClick !== true
+                              if (singleClick || isDeepEqual(clickedValue, option.value)) {
                                 clickedValue = undefined
                                 clearTimeout(clickTimer)
                                 option.onSelect?.(dialog)

@@ -12,6 +12,7 @@ import { DialogSelectModelUnpaidV2 } from "@/components/dialog-select-model-unpa
 import type { PromptInputProps } from "@/components/prompt-input/contracts"
 import { normalizePromptHistoryEntry, promptLength, type PromptHistoryComment } from "@/components/prompt-input/history"
 import { createPersistedPromptInputHistory } from "@/components/prompt-input/history-store"
+import { isPromptCommand, mergeSlashCommands } from "@/components/prompt-input/slash-commands"
 import { promptDesignPlaceholder, promptPlaceholder } from "@/components/prompt-input/placeholder"
 import { createPromptSubmit } from "@/components/prompt-input/submit"
 import { selectionFromLines, type SelectedLineRange, useFile } from "@/context/file"
@@ -289,15 +290,8 @@ export function usePromptInputV2Controller(props: PromptInputV2ControllerProps):
       mention: { type: "file" as const, path, content: `@${path}`, start: 0, end: 0 },
     })),
   ])
-  const slashCommands = createMemo(() => [
-    ...sync().data.command.map((item) => ({
-      id: `custom.${item.name}`,
-      trigger: item.name,
-      title: item.name,
-      description: item.description,
-      type: "custom" as const,
-    })),
-    ...command.options
+  const slashCommands = createMemo(() => {
+    const builtin = command.options
       .filter((item) => !item.disabled && !item.id.startsWith("suggested.") && item.slash)
       .map((item) => ({
         id: item.id,
@@ -305,8 +299,10 @@ export function usePromptInputV2Controller(props: PromptInputV2ControllerProps):
         title: item.title,
         description: item.description,
         type: "builtin" as const,
-      })),
-  ])
+      }))
+
+    return mergeSlashCommands(sync().data.command, builtin)
+  })
   const commands = createMemo<PromptInputV2Suggestion[]>(() =>
     slashCommands().map((item) => ({
       id: item.id,
@@ -359,7 +355,7 @@ export function usePromptInputV2Controller(props: PromptInputV2ControllerProps):
     onSuggestionSelect(item) {
       if (item.kind !== "command") return
       const selected = slashCommands().find((entry) => entry.id === item.id)
-      if (!selected || selected.type === "custom") return
+      if (!selected || isPromptCommand(selected)) return
       return () => command.trigger(selected.id, "slash")
     },
     attachments: {

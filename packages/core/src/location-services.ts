@@ -39,6 +39,12 @@ import { ToolOutputStore } from "./tool-output-store"
 
 export { LocationServiceMap } from "./location-service-map"
 
+const locationServiceMapDisposers = new Set<(directory: string) => Promise<void>>()
+
+export async function invalidateLocationServiceMaps(directory: string) {
+  await Promise.allSettled([...locationServiceMapDisposers].map((invalidate) => invalidate(directory)))
+}
+
 export const locationServices = LayerNode.group([
   Location.node,
   Policy.node,
@@ -86,28 +92,60 @@ export function buildLocationServiceMap(
 ): Layer.Layer<LocationServiceMap.Service> {
   return Layer.effect(
     LocationServiceMap.Service,
-    LayerMap.make(
-      (ref: Location.Ref) => {
-        const allReplacements = replacements.concat([[Location.node, Location.boundNode(ref)]])
-        // Apply replacements during hoist, not afterward: replacements can
-        // introduce new tagged dependencies (Location.boundNode depends on
-        // Project), and the hoist walk is the only pass that can still slice
-        // those back out.
-        const location = LayerNode.hoist(locationServices, Node.tags.values.global, allReplacements)
+    Effect.gen(function* () {
+      const locations = yield* LayerMap.make(
+        (ref: Location.Ref) => {
+          const allReplacements = replacements.concat([[Location.node, Location.boundNode(ref)]])
+          // Apply replacements during hoist, not afterward: replacements can
+          // introduce new tagged dependencies (Location.boundNode depends on
+          // Project), and the hoist walk is the only pass that can still slice
+          // those back out.
+          const location = LayerNode.hoist(locationServices, Node.tags.values.global, allReplacements)
 
-        return LayerNode.compile(location.node).pipe(
-          Layer.fresh,
-          Layer.tap(() =>
-            Effect.logInfo("booting location services", {
-              directory: ref.directory,
-              workspaceID: ref.workspaceID,
-            }),
-          ),
-          Layer.provide(LayerNode.compile(location.hoisted)),
-        )
-      },
-      { idleTimeToLive: "60 minutes" },
-    ),
+          return LayerNode.compile(location.node).pipe(
+            Layer.fresh,
+            Layer.tap(() =>
+              Effect.logInfo("booting location services", {
+                directory: ref.directory,
+                workspaceID: ref.workspaceID,
+              }),
+            ),
+            Layer.provide(LayerNode.compile(location.hoisted)),
+          )
+        },
+        { idleTimeToLive: "60 minutes" },
+      )
+      // Location.Ref is a plain struct, so callers mint a fresh object per lookup. Track the
+      // structural key (RcMap compares keys structurally) or the set grows without bound.
+      const key = (ref: Location.Ref) => `${ref.directory}\u0000${ref.workspaceID ?? ""}`
+      const refs = new Map<string, Location.Ref>()
+      const service = Object.assign(Object.create(locations), {
+        get: (ref: Location.Ref) => {
+          refs.set(key(ref), ref)
+          return locations.get(ref)
+        },
+        invalidate: (ref: Location.Ref) => {
+          refs.delete(key(ref))
+          return locations.invalidate(ref)
+        },
+        invalidateDirectory: (directory: string) =>
+          Effect.forEach(
+            [...refs.values()].filter((ref) => ref.directory === directory),
+            (ref) => locations.invalidate(ref),
+          ).pipe(Effect.asVoid),
+      }) satisfies LocationServiceMap.Map
+      const dispose = (directory: string) =>
+        service.invalidateDirectory
+          ? Effect.runPromise(service.invalidateDirectory(directory)).then(() => {})
+          : Promise.resolve()
+      locationServiceMapDisposers.add(dispose)
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          locationServiceMapDisposers.delete(dispose)
+        }),
+      )
+      return service
+    }),
   )
 }
 

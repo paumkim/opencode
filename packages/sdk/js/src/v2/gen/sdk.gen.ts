@@ -3121,6 +3121,7 @@ export class Permission extends HeyApiClient {
   public reply<ThrowOnError extends boolean = false>(
     parameters: {
       requestID: string
+      sessionID: string
       directory?: string
       workspace?: string
       reply?: "once" | "always" | "reject"
@@ -3134,6 +3135,7 @@ export class Permission extends HeyApiClient {
         {
           args: [
             { in: "path", key: "requestID" },
+            { in: "query", key: "sessionID" },
             { in: "query", key: "directory" },
             { in: "query", key: "workspace" },
             { in: "body", key: "reply" },

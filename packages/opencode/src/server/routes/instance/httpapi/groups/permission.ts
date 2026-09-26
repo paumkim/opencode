@@ -1,5 +1,6 @@
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { Permission } from "@/permission"
+import { SessionID } from "@/session/schema"
 import { Schema } from "effect"
 import { HttpApi, HttpApiEndpoint, HttpApiError, HttpApiGroup, OpenApi } from "effect/unstable/httpapi"
 import { PermissionNotFoundError } from "../errors"
@@ -30,7 +31,10 @@ export const PermissionApi = HttpApi.make("permission")
         ),
         HttpApiEndpoint.post("reply", `${root}/:requestID/reply`, {
           params: { requestID: PermissionV1.ID },
-          query: WorkspaceRoutingQuery,
+          query: Schema.Struct({
+            ...WorkspaceRoutingQuery.fields,
+            sessionID: SessionID,
+          }),
           payload: ReplyPayload,
           success: described(Schema.Boolean, "Permission processed successfully"),
           error: [HttpApiError.BadRequest, PermissionNotFoundError],
@@ -38,7 +42,7 @@ export const PermissionApi = HttpApi.make("permission")
           OpenApi.annotations({
             identifier: "permission.reply",
             summary: "Respond to permission request",
-            description: "Approve or deny a permission request from the AI assistant.",
+            description: "Approve or deny a permission request from the AI assistant, scoped to the session query parameter.",
           }),
         ),
       )

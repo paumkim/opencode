@@ -28,6 +28,7 @@ import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { LayerNodePlatform } from "@opencode-ai/core/effect/app-node-platform"
 import { ProviderError } from "@/provider/error"
+import { Plugin } from "@/plugin/index"
 
 type ConfigModel = NonNullable<NonNullable<ConfigV1.Info["provider"]>[string]["models"]>[string]
 
@@ -53,7 +54,26 @@ const openAIConfig = (model: ModelsDev.Provider["models"][string], baseURL: stri
   }
 }
 
-const it = testEffect(AppNodeBuilder.build(LayerNode.group([LLM.node, Provider.node])))
+const codexParamsLayer = Layer.mock(Plugin.Service, {
+  list: () => Effect.succeed([]),
+  init: () => Effect.void,
+  trigger: (name, input, output) =>
+    name === "chat.params" && (input as { model?: { providerID?: string } }).model?.providerID === "openai"
+      ? Effect.sync(() => {
+          ;(output as { maxOutputTokens?: number }).maxOutputTokens = undefined
+        }).pipe(Effect.as(output))
+      : Effect.succeed(output),
+})
+
+const it = testEffect(
+  AppNodeBuilder.build(
+    LayerNode.group([LLM.node, Provider.node, Plugin.node]),
+    [
+      [RuntimeFlags.node, RuntimeFlags.layer({ disableDefaultPlugins: true, experimentalNativeLlm: false })],
+      [Plugin.node, codexParamsLayer],
+    ],
+  ),
+)
 
 // LLM.stream returns a Stream, not an Effect, so we can't use the serviceUse proxy.
 const drain = (input: LLM.StreamInput) => LLM.Service.use((svc) => svc.stream(input).pipe(Stream.runDrain))
@@ -81,7 +101,10 @@ function llmLayerWithExecutor(
   } = {},
 ) {
   return AppNodeBuilder.build(LLM.node, [
-    [RuntimeFlags.node, RuntimeFlags.layer(options.flags)],
+    [
+      RuntimeFlags.node,
+      RuntimeFlags.layer({ disableDefaultPlugins: true, experimentalNativeLlm: false, ...options.flags }),
+    ],
     ...(options.executor ? ([[LayerNodePlatform.requestExecutor, options.executor]] as const) : []),
   ])
 }
@@ -641,18 +664,21 @@ beforeAll(() => {
   state.server = Bun.serve({
     port: 0,
     async fetch(req) {
-      const next = state.queue.shift()
-      if (!next) {
-        return new Response("unexpected request", { status: 500 })
+      if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
+        return new Response("websocket upgrade not supported", { status: 426 })
+      }
+      if (req.method !== "POST") {
+        return new Response("method not allowed", { status: 405 })
       }
 
       const url = new URL(req.url)
+      const index = state.queue.findIndex((entry) => url.pathname.endsWith(entry.path))
+      if (index === -1) {
+        return new Response("unexpected request", { status: 500 })
+      }
+      const [next] = state.queue.splice(index, 1)
       const body = (await req.json()) as Record<string, unknown>
       next.resolve({ url, headers: req.headers, body })
-
-      if (!url.pathname.endsWith(next.path)) {
-        return new Response("not found", { status: 404 })
-      }
 
       return typeof next.response === "function"
         ? next.response(req, { url, headers: req.headers, body })
@@ -665,8 +691,8 @@ beforeEach(() => {
   state.queue.length = 0
 })
 
-afterAll(() => {
-  void state.server?.stop()
+afterAll(async () => {
+  await state.server?.stop(true)
 })
 
 function createChatStream(text: string) {

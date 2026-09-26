@@ -18,6 +18,8 @@ import { RipgrepBinary } from "./ripgrep/binary"
 const ERROR_BYTES = 8 * 1024
 const MAX_RECORD_BYTES = 64 * 1024
 const MAX_SUBMATCHES = 100
+/** Hard collection bound shared by all ripgrep adapters; callers may request less. */
+export const MAX_RESULTS = 10_000
 
 const RawMatch = Schema.Struct({
   type: Schema.Literal("match"),
@@ -56,6 +58,8 @@ export interface FindInput {
   readonly follow?: boolean
   readonly signal?: AbortSignal
   readonly onEntry?: (entry: Entry) => Effect.Effect<void>
+  /** Internal filesystem-index collection; bypasses the public result ceiling. */
+  readonly index?: boolean
 }
 
 export interface GlobInput {
@@ -73,6 +77,7 @@ export interface GrepInput {
   readonly file?: string
   readonly include?: string
   readonly limit: number
+  readonly hidden?: boolean
   readonly signal?: AbortSignal
 }
 
@@ -103,7 +108,10 @@ const layer = Layer.effect(
       readonly parse: (line: string) => Effect.Effect<A | undefined, Error>
       readonly pattern?: string
       readonly onItem?: (item: A) => Effect.Effect<void>
+      readonly index?: boolean
     }) => {
+      if (!Number.isSafeInteger(input.limit) || input.limit < 1) return Effect.fail(failure("ripgrep limit must be a positive safe integer"))
+      const limit = input.index ? input.limit : Math.min(input.limit, MAX_RESULTS)
       const program = Effect.scoped(
         Effect.gen(function* () {
           const handle = yield* process.spawn(
@@ -120,15 +128,15 @@ const layer = Layer.effect(
             Stream.mapEffect(input.parse),
             Stream.filter((row): row is A => row !== undefined),
             Stream.tap((row) => {
-              if (!input.onItem || observed++ >= input.limit) return Effect.void
+              if (!input.onItem || observed++ >= limit) return Effect.void
               return input.onItem(row)
             }),
-            Stream.take(input.limit + 1),
+            Stream.take(limit + 1),
             Stream.runCollect,
             Effect.map((chunk) => [...chunk]),
           )
-          const truncated = rows.length > input.limit
-          if (truncated) return { items: rows.slice(0, input.limit), truncated, partial: false }
+          const truncated = rows.length > limit
+          if (truncated) return { items: rows.slice(0, limit), truncated, partial: false }
 
           const code = yield* handle.exitCode
           const stderr = yield* Fiber.join(stderrFiber)
@@ -211,6 +219,7 @@ const layer = Layer.effect(
             )
           },
           onItem: input.onEntry,
+          index: input.index,
         }).pipe(
           Effect.map((result) => result.items),
           Effect.catchTag("Ripgrep.InvalidPatternError", (cause) => Effect.fail(failure(cause.message, cause))),
@@ -221,7 +230,7 @@ const layer = Layer.effect(
           args: [
             "--no-config",
             "--json",
-            "--hidden",
+            ...((input.hidden ?? true) ? ["--hidden"] : []),
             "--no-messages",
             ...(input.include ? [`--glob=${input.include}`] : []),
             "--glob=!**/.git/**",

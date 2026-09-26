@@ -74,6 +74,7 @@ import {
 } from "./prompt-input/contracts"
 import { createPromptSubmit } from "./prompt-input/submit"
 import { PromptPopover, type AtOption, type SlashCommand } from "./prompt-input/slash-popover"
+import { isPromptCommand, mergeSlashCommands } from "./prompt-input/slash-commands"
 import { PromptContextItems } from "./prompt-input/context-items"
 import { PromptImageAttachments } from "./prompt-input/image-attachments"
 import { PromptDragOverlay } from "./prompt-input/drag-overlay"
@@ -703,16 +704,7 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
         type: "builtin" as const,
       }))
 
-    const custom = sync().data.command.map((cmd) => ({
-      id: `custom.${cmd.name}`,
-      trigger: cmd.name,
-      title: cmd.name,
-      description: cmd.description,
-      type: "custom" as const,
-      // source: cmd.source,
-    }))
-
-    return [...custom, ...builtin]
+    return mergeSlashCommands(sync().data.command, builtin)
   })
 
   const handleSlashSelect = (cmd: SlashCommand | undefined) => {
@@ -721,7 +713,7 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
     closePopover()
     const images = imageAttachments()
 
-    if (cmd.type === "custom") {
+    if (isPromptCommand(cmd)) {
       const text = `/${cmd.trigger} `
       if (menu) {
         editorRef.focus()

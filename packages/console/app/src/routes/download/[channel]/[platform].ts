@@ -28,11 +28,16 @@ const downloadNames: Record<string, string> = {
 } satisfies { [K in DownloadPlatform]?: string }
 
 export async function GET({ params: { platform, channel } }: APIEvent) {
-  const assetName = channel === "stable" ? prodAssetNames[platform] : betaAssetNames[platform]
+  if (channel !== "stable" && channel !== "beta") return new Response(null, { status: 404 })
+  const assetNames = channel === "stable" ? prodAssetNames : betaAssetNames
+  // Guard against inherited Object.prototype keys ("toString", "constructor", ...)
+  // resolving to a truthy non-string value on a plain object literal.
+  if (!Object.hasOwn(assetNames, platform)) return new Response(null, { status: 404 })
+  const assetName = assetNames[platform]
   if (!assetName) return new Response(null, { status: 404 })
 
   const latest = await fetch(
-    `https://github.com/anomalyco/${channel === "stable" ? "opencode" : "opencode-beta"}/releases/latest/download/${assetName}`,
+    `https://github.com/paumkim/${channel === "stable" ? "opencode" : "opencode-beta"}/releases/latest/download/${assetName}`,
     { redirect: "manual" },
   )
   const location = latest.headers.get("location")

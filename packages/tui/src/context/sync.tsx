@@ -203,6 +203,7 @@ export const {
             } else {
               void sdk.client.permission.reply({
                 requestID: request.id,
+                sessionID: request.sessionID,
                 reply: "once",
                 directory,
                 workspace,

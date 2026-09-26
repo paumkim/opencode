@@ -269,6 +269,7 @@ export const promoteNextQueued = Effect.fn("SessionInput.promoteNextQueued")(fun
   db: DatabaseService,
   events: EventV2.Interface,
   sessionID: SessionSchema.ID,
+  cutoff?: number,
 ) {
   const row = yield* db
     .select()
@@ -278,6 +279,7 @@ export const promoteNextQueued = Effect.fn("SessionInput.promoteNextQueued")(fun
         eq(SessionInputTable.session_id, sessionID),
         isNull(SessionInputTable.promoted_seq),
         eq(SessionInputTable.delivery, "queue"),
+        ...(cutoff === undefined ? [] : [lte(SessionInputTable.admitted_seq, cutoff)]),
       ),
     )
     .orderBy(asc(SessionInputTable.admitted_seq))

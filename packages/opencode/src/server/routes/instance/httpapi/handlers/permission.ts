@@ -15,13 +15,22 @@ export const permissionHandlers = HttpApiBuilder.group(InstanceHttpApi, "permiss
 
     const reply = Effect.fn("PermissionHttpApi.reply")(function* (ctx: {
       params: { requestID: PermissionV1.ID }
+      query: { sessionID: PermissionV1.Request["sessionID"] }
       payload: PermissionV1.ReplyBody
     }) {
+      const request = (yield* svc.list()).find((item) => item.id === ctx.params.requestID)
+      if (!request || request.sessionID !== ctx.query.sessionID) {
+        return yield* new PermissionNotFoundError({
+          requestID: String(ctx.params.requestID),
+          message: `Permission request not found: ${ctx.params.requestID}`,
+        })
+      }
       yield* svc
         .reply({
           requestID: ctx.params.requestID,
           reply: ctx.payload.reply,
           message: ctx.payload.message,
+          sessionID: ctx.query.sessionID,
         })
         .pipe(
           Effect.catchTag("Permission.NotFoundError", (error) =>

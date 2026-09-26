@@ -1,5 +1,5 @@
 import { $ } from "bun"
-import { describe, expect } from "bun:test"
+import { describe, expect, test } from "bun:test"
 import fs from "fs/promises"
 import path from "path"
 import { ConfigProvider, Deferred, Duration, Effect, Fiber, Layer, Option, Stream } from "effect"
@@ -16,6 +16,21 @@ import { tmpdir } from "../fixture/tmpdir"
 import { testEffect } from "../lib/effect"
 
 const describeWatcher = Watcher.hasNativeBinding() && !process.env.CI ? describe : describe.skip
+
+test("registration tracker unsubscribes a late registration exactly once", async () => {
+  const tracker = Watcher.registrationTracker()
+  let resolve!: (subscription: { unsubscribe: () => Promise<void> }) => void
+  const registration = new Promise<{ unsubscribe: () => Promise<void> }>((done) => (resolve = done))
+  let unsubscribes = 0
+  tracker.track(registration)
+  const closing = tracker.close()
+  expect(tracker.close()).toBe(closing)
+  resolve({ unsubscribe: async () => void ++unsubscribes })
+  await closing
+  expect(unsubscribes).toBe(1)
+  await tracker.close()
+  expect(unsubscribes).toBe(1)
+})
 
 type WatcherEvent = { file: string; event: "add" | "change" | "unlink" }
 

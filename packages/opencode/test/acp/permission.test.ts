@@ -180,7 +180,9 @@ describe("acp permissions", () => {
         { optionId: "reject", kind: "reject_once", name: "Reject" },
       ],
     })
-    expect(harness.replies).toEqual([{ requestID: "perm_1", reply: "once", directory: "/workspace" }])
+    expect(harness.replies).toEqual([
+      { requestID: "perm_1", sessionID: "ses_a", reply: "once", directory: "/workspace" },
+    ])
   })
 
   it("uses permission metadata for non-shell titles", async () => {

@@ -63,10 +63,13 @@ const layer = Layer.effect(
     const flock = yield* EffectFlock.Service
 
     const read = Effect.fn("McpAuth.read")(function* () {
-      return yield* fs.readJson(filepath).pipe(
-        Effect.map((data): AuthData => Option.getOrElse(decodeAuthData(data), () => ({}) as AuthData) as AuthData),
-        Effect.catch(() => Effect.succeed({} as AuthData)),
+      const data = yield* fs.readJson(filepath).pipe(
+        Effect.catchReason("PlatformError", "NotFound", () => Effect.succeed({})),
+        Effect.orDie,
       )
+      const decoded = Option.getOrElse(decodeAuthData(data), () => undefined)
+      if (!decoded) return yield* Effect.die(new Error("Invalid MCP auth data"))
+      return decoded
     })
 
     const all = Effect.fn("McpAuth.all")(function* () {

@@ -16,7 +16,9 @@ export const MAX_BYTES = 50 * 1024
 export const DIR = TRUNCATION_DIR
 export const GLOB = path.join(TRUNCATION_DIR, "*")
 
-export type Result = { content: string; truncated: false } | { content: string; truncated: true; outputPath: string }
+export type Result =
+  | { content: string; truncated: false }
+  | { content: string; truncated: true; outputPath?: string }
 
 export interface Options {
   maxLines?: number
@@ -124,9 +126,17 @@ const layer = Layer.effect(
       const removed = hitBytes ? totalBytes - bytes : lines.length - out.length
       const unit = hitBytes ? "bytes" : "lines"
       const preview = out.join("\n")
-      const file = yield* write(text)
+      const file = yield* write(text).pipe(
+        Effect.catchDefect(() =>
+          Effect.logWarning("Truncated tool output retention unavailable; returning a bounded preview").pipe(
+            Effect.as(undefined),
+          ),
+        ),
+      )
 
-      const hint = hasTaskTool(agent)
+      const hint = !file
+        ? "The tool call succeeded but only a bounded preview could be returned; full output retention is unavailable."
+        : hasTaskTool(agent)
         ? `The tool call succeeded but the output was truncated. Full output saved to: ${file}\nProcess directly with Grep/Read offset/limit to save context, do NOT delegate to Task/explore.`
         : `The tool call succeeded but the output was truncated. Full output saved to: ${file}\nUse Grep to search the full content or Read with offset/limit to view specific sections.`
 
@@ -136,7 +146,7 @@ const layer = Layer.effect(
             ? `${preview}\n\n...${removed} ${unit} truncated...\n\n${hint}`
             : `...${removed} ${unit} truncated...\n\n${hint}\n\n${preview}`,
         truncated: true,
-        outputPath: file,
+        ...(file ? { outputPath: file } : {}),
       } as const
     })
 

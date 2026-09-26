@@ -29,6 +29,7 @@ import { DbCommand } from "./cli/cmd/db"
 import { errorMessage } from "./util/error"
 import { PluginCommand } from "./cli/cmd/plug"
 import { Heap } from "./cli/heap"
+import { Flag } from "@opencode-ai/core/flag/flag"
 
 const args = hideBin(process.argv)
 
@@ -94,27 +95,42 @@ const cli = yargs(args)
     process.env.OPENCODE = "1"
     process.env.OPENCODE_PID = String(process.pid)
 
-    // Start System One daemon if not already running
-    try {
-      const { spawn } = await import("node:child_process")
-      const { existsSync } = await import("node:fs")
-      const daemonDir = require("path").join(require("os").homedir(), "Projects", "opencode", "packages", "system-one-daemon")
-      const pidFile = require("path").join(daemonDir, "daemon.pid")
-      
-      if (existsSync(pidFile)) {
-        const pid = parseInt((await require("node:fs").promises.readFile(pidFile, "utf-8")).trim())
-        try {
-          process.kill(pid, 0)
-          // Daemon is already running
-        } catch {
-          // Stale PID file, start daemon
-          await startDaemon(daemonDir)
+    // System One is opt-in. Required mode is an explicit enablement request.
+    if (process.env.SYSTEM_ONE_REQUIRED === "1") process.env.SYSTEM_ONE_ENABLED = "1"
+    if (process.env.SYSTEM_ONE_START_DAEMON === "1" && !Flag.OPENCODE_PURE && !opts.pure) {
+      try {
+        const { existsSync } = await import("node:fs")
+        const path = await import("node:path")
+        const daemonDir = process.env.SYSTEM_ONE_DAEMON_DIR
+        if (daemonDir && existsSync(daemonDir)) {
+          const pidFile = path.join(daemonDir, "daemon.pid")
+          if (existsSync(pidFile)) {
+            const pid = Number.parseInt((await (await import("node:fs/promises")).readFile(pidFile, "utf-8")).trim(), 10)
+            if (!Number.isInteger(pid) || pid <= 0) throw new Error("invalid daemon pid")
+            try {
+              process.kill(pid, 0)
+            } catch {
+              await startDaemon(daemonDir)
+              return
+            }
+            const healthUrl = `${process.env.SYSTEM_ONE_URL ?? "http://127.0.0.1:9999"}/health`
+            const health = (await fetch(healthUrl, { signal: AbortSignal.timeout(500) }).then((response) => response.json())) as {
+              status?: string
+              model_loaded?: boolean
+            }
+            if (health.status !== "ok" || health.model_loaded !== true) {
+              throw new Error("System One daemon exists but is not ready")
+            }
+          } else {
+            await startDaemon(daemonDir)
+          }
         }
-      } else {
-        await startDaemon(daemonDir)
+      } catch (error) {
+        if (process.env.SYSTEM_ONE_REQUIRED === "1") {
+          throw new Error(`System One daemon is required but unavailable: ${errorMessage(error)}`)
+        }
+        process.stderr.write(`System One daemon startup skipped: ${errorMessage(error)}\n`)
       }
-    } catch {
-      // Silently ignore daemon startup failures - the prompt.ts code will handle it
     }
   })
   .usage("")
@@ -158,29 +174,57 @@ const cli = yargs(args)
 
 async function startDaemon(daemonDir: string) {
   const { spawn } = await import("node:child_process")
-  const logFile = require("path").join(daemonDir, "daemon.log")
-  
-  return new Promise<void>((resolve) => {
-    const child = spawn("python3", ["-m", "system_one_daemon.server"], {
+  const { access, readFile } = await import("node:fs/promises")
+  const path = await import("node:path")
+  const healthUrl = `${process.env.SYSTEM_ONE_URL ?? "http://127.0.0.1:9999"}/health`
+  const timeoutMs = Number.parseInt(process.env.SYSTEM_ONE_START_TIMEOUT_MS ?? "15000", 10)
+  const deadline = Date.now() + (Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 15000)
+  const pidFile = path.join(daemonDir, "daemon.pid")
+
+  try {
+    await access(path.join(daemonDir, "start.sh"))
+  } catch {
+    throw new Error(`System One daemon directory is missing or invalid: ${daemonDir}`)
+  }
+
+  await new Promise<void>((resolve, reject) => {
+    // start.sh owns dependency setup, model-cache environment, logging, and
+    // daemon.pid. Keep its output hidden so prompts/credentials can never be
+    // copied into CLI diagnostics.
+    const child = spawn("/bin/bash", [path.join(daemonDir, "start.sh")], {
       cwd: daemonDir,
-      detached: true,
       stdio: "ignore",
+      env: { ...process.env, PYTHONUNBUFFERED: "1" },
     })
-    child.unref()
-    
-    // Wait a moment for the daemon to start
-    setTimeout(() => {
-      (async () => {
-        try {
-          const response = await fetch("http://127.0.0.1:9999/health")
-          if (response.ok) resolve()
-          else resolve()
-        } catch {
-          resolve()
-        }
-      })()
-    }, 3000)
+    let settled = false
+    const finish = (error?: Error) => {
+      if (settled) return
+      settled = true
+      child.removeAllListeners()
+      if (error) reject(error)
+      else resolve()
+    }
+    child.once("error", () => finish(new Error("System One daemon startup command failed")))
+    child.once("exit", (code, signal) => {
+      if (code !== 0) finish(new Error(`System One daemon startup command failed (code=${code ?? "null"}, signal=${signal ?? "none"})`))
+      else finish()
+    })
   })
+
+  const check = async (): Promise<void> => {
+    if (Date.now() >= deadline) throw new Error("System One daemon readiness timed out")
+    try {
+      const pid = Number.parseInt((await readFile(pidFile, "utf-8")).trim(), 10)
+      if (!Number.isInteger(pid) || pid <= 0) throw new Error("System One daemon did not write a valid PID")
+      process.kill(pid, 0)
+      const response = await fetch(healthUrl, { signal: AbortSignal.timeout(500) })
+      const health = (await response.json()) as { status?: string; model_loaded?: boolean }
+      if (!response.ok || health.status !== "ok" || health.model_loaded !== true) return new Promise<void>((resolve) => setTimeout(resolve, 100)).then(check)
+    } catch {
+      return new Promise<void>((resolve) => setTimeout(resolve, 100)).then(check)
+    }
+  }
+  await check()
 }
 
 try {

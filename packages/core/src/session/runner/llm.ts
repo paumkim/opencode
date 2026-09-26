@@ -189,25 +189,38 @@ const layer = Layer.effect(
       const session = yield* getSession(sessionID)
       if (session.location.directory !== location.directory || session.location.workspaceID !== location.workspaceID)
         return yield* Effect.interrupt
+      const promotionCutoff = promotion ? yield* EventV2.latestSequence(db, session.id) : undefined
       const agent = yield* agents.select(session.agent)
-      const model = yield* models.resolve(session)
-      const modelInfo = yield* models.modelInfo(session)
-      const initialized = yield* SessionContextEpoch.initialize(db, loadSystemContext(agent, modelInfo, session), session.id)
       const toolFibers = yield* FiberSet.make<void, ToolOutputStore.Error>()
       let needsContinuation = false
       let currentStep = step
-      if (promotion) {
-        const cutoff = yield* EventV2.latestSequence(db, session.id)
+      // Capture the request boundary before any asynchronous preparation. Inputs admitted while
+      // model resolution or initial context setup is in progress belong to the next turn.
+      const model = yield* models.resolve(session)
+      const modelInfo = yield* models.modelInfo(session)
+      const initialized = yield* SessionContextEpoch.initialize(db, loadSystemContext(agent, modelInfo, session), session.id)
+      let system = initialized
+      if (!system) {
+        // For an existing epoch, promotion remains before ordinary prepare/reconcile.
+        if (promotion) {
+          let promoted = 0
+          if (promotion === "steer") promoted = yield* SessionInput.promoteSteers(db, events, session.id, promotionCutoff!)
+          if (promotion === "queue") {
+            promoted += Number(yield* SessionInput.promoteNextQueued(db, events, session.id, promotionCutoff))
+            promoted += yield* SessionInput.promoteSteers(db, events, session.id, promotionCutoff!)
+          }
+          if (promoted > 0) currentStep = 1
+        }
+        system = yield* SessionContextEpoch.prepare(db, events, loadSystemContext(agent, modelInfo, session), session.id)
+      } else if (promotion) {
         let promoted = 0
-        if (promotion === "steer") promoted = yield* SessionInput.promoteSteers(db, events, session.id, cutoff)
+        if (promotion === "steer") promoted = yield* SessionInput.promoteSteers(db, events, session.id, promotionCutoff!)
         if (promotion === "queue") {
-          promoted += Number(yield* SessionInput.promoteNextQueued(db, events, session.id))
-          promoted += yield* SessionInput.promoteSteers(db, events, session.id, cutoff)
+          promoted += Number(yield* SessionInput.promoteNextQueued(db, events, session.id, promotionCutoff))
+          promoted += yield* SessionInput.promoteSteers(db, events, session.id, promotionCutoff!)
         }
         if (promoted > 0) currentStep = 1
       }
-      const system =
-        initialized ?? (yield* SessionContextEpoch.prepare(db, events, loadSystemContext(agent, modelInfo, session), session.id))
       if (!system) return { needsContinuation: false, step: currentStep }
       const entries = yield* SessionHistory.entriesForRunner(db, session.id, system.baselineSeq)
       const context = entries.map((entry) => entry.message)

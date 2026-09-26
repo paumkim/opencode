@@ -99,6 +99,11 @@ export interface Interface {
   }
   readonly change: {
     readonly capture: (input: { repository: Repository; path: AbsolutePath }) => Effect.Effect<ChangeSet, PatchError>
+    readonly applied: (input: {
+      repository: Repository
+      path: AbsolutePath
+      changes: ChangeSet
+    }) => Effect.Effect<boolean, PatchError>
     readonly apply: (input: {
       repository: Repository
       path: AbsolutePath
@@ -786,6 +791,33 @@ const layer = Layer.effect(
       return ChangeSet.make([tracked.text, ...created].filter(Boolean).join("\n"))
     })
 
+    const applied = Effect.fn("Git.change.applied")(function* (input: {
+      repository: Repository
+      path: AbsolutePath
+      changes: ChangeSet
+    }) {
+      const result = yield* proc
+        .run(
+          ChildProcess.make("git", ["apply", "--reverse", "--check", "-"], {
+            cwd: input.path,
+            extendEnv: true,
+            stdin: Stream.make(new TextEncoder().encode(input.changes)),
+          }),
+        )
+        .pipe(
+          Effect.mapError(
+            (cause) => new PatchError({ operation: "apply", directory: input.path, message: cause.message, cause }),
+          ),
+        )
+      if (result.exitCode === 0) return true
+      if (result.exitCode === 1) return false
+      return yield* new PatchError({
+        operation: "apply",
+        directory: input.path,
+        message: result.stderr.toString("utf8").trim() || result.stdout.toString("utf8").trim() || "Failed to inspect changes",
+      })
+    })
+
     const apply = Effect.fn("Git.change.apply")(function* (input: {
       repository: Repository
       path: AbsolutePath
@@ -927,7 +959,7 @@ const layer = Layer.effect(
       remote: { get: remote },
       history: { head, branch, defaultRemoteBranch: remoteHead, rootCommits: roots },
       sync: { fetchRemotes: fetch, fetchBranch, checkoutRemoteBranch: checkout, resetHard: reset },
-      change: { capture, apply, discard },
+      change: { capture, applied, apply, discard },
       worktree: { create: worktreeCreate, remove: worktreeRemove, list: worktreeList },
       index: { refresh, ignored },
       tree: {

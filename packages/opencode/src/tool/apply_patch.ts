@@ -219,6 +219,8 @@ export const ApplyPatchTool = Tool.define(
 
       for (const change of fileChanges) {
         const edited = change.type === "delete" ? undefined : (change.movePath ?? change.filePath)
+        yield* assertExternalDirectoryEffect(ctx, change.filePath)
+        if (change.movePath) yield* assertExternalDirectoryEffect(ctx, change.movePath)
         switch (change.type) {
           case "add":
             // Create parent directories (recursive: true is safe on existing/root dirs)

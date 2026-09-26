@@ -280,7 +280,7 @@ export type FooterEvent =
       state: FooterSubagentState
     }
 
-export type PermissionReply = Parameters<OpencodeClient["permission"]["reply"]>[0]
+export type PermissionReply = Omit<Parameters<OpencodeClient["permission"]["reply"]>[0], "sessionID"> & { sessionID?: string }
 
 export type QuestionReply = Parameters<OpencodeClient["question"]["reply"]>[0]
 

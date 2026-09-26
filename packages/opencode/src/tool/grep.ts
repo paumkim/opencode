@@ -52,10 +52,11 @@ export const GrepTool = Tool.define(
             ? (params.path ?? ins.directory)
             : path.join(ins.directory, params.path ?? ".")
           const requestedInfo = yield* fs.stat(requested).pipe(Effect.catch(() => Effect.succeed(undefined)))
-          yield* assertExternalDirectoryEffect(ctx, requested, {
-            bypass: false,
-            kind: requestedInfo?.type === "Directory" ? "directory" : "file",
-          })
+          const kind = requestedInfo?.type === "Directory" ? "directory" : "file"
+          const external = yield* assertExternalDirectoryEffect(ctx, requested, { bypass: false, kind })
+          if (!external) {
+            yield* assertExternalDirectoryEffect(ctx, requested, { kind })
+          }
 
           const search = FSUtil.resolve(requested)
           const info = yield* fs.stat(search).pipe(Effect.catch(() => Effect.succeed(undefined)))

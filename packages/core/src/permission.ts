@@ -14,6 +14,13 @@ import { PermissionSaved } from "./permission/saved"
 export { Effect, Rule, Ruleset } from "@opencode-ai/schema/permission"
 const missingAgentPermissions: Permission.Ruleset = [{ action: "*", resource: "*", effect: "deny" }]
 
+// Read at call time (never captured at module load) so that runtime configuration and tests observe
+// the current value. Only the exact string "1" enables the bypass; unset/empty/anything else keeps
+// the normal permission evaluation.
+function unrestricted() {
+  return process.env.OPENCODE_UNRESTRICTED === "1"
+}
+
 export const ID = Permission.ID
 export type ID = typeof ID.Type
 
@@ -188,6 +195,9 @@ const layer = Layer.effect(
       )
 
     const ask = EffectRuntime.fn("PermissionV2.ask")(function* (input: AssertInput) {
+      if (unrestricted()) {
+        return { id: input.id ?? ID.create(), effect: "allow" as const }
+      }
       const result = yield* evaluateInput(input)
       const value = request(input)
       if (result.effect === "ask") yield* create(value, input.agent)
@@ -197,6 +207,7 @@ const layer = Layer.effect(
     const assert = EffectRuntime.fn("PermissionV2.assert")((input: AssertInput) =>
       EffectRuntime.uninterruptibleMask((restore) =>
         EffectRuntime.gen(function* () {
+          if (unrestricted()) return
           const result = yield* evaluateInput(input)
           if (result.effect === "deny") {
             return yield* new BlockedError({

@@ -911,6 +911,49 @@ it.instance(
 )
 
 it.instance(
+  "reply - rejects malformed and cross-session replies without resolving the request",
+  () =>
+    Effect.gen(function* () {
+      const requestID = PermissionV1.ID.make("per_test_session_bound")
+      const fiber = yield* ask({
+        id: requestID,
+        sessionID: SessionID.make("session_owner"),
+        permission: "bash",
+        patterns: ["ls"],
+        metadata: {},
+        always: [],
+        ruleset: [],
+      }).pipe(Effect.forkScoped)
+
+      yield* waitForPending(1)
+      expect(
+        yield* fail(
+          reply({
+            requestID,
+            reply: "approve" as PermissionV1.Reply,
+            sessionID: SessionID.make("session_owner"),
+          }),
+        ),
+      ).toBeInstanceOf(PermissionV1.NotFoundError)
+      expect(
+        yield* fail(
+          reply({
+            requestID,
+            reply: "once",
+            sessionID: SessionID.make("session_attacker"),
+          }),
+        ),
+      ).toBeInstanceOf(PermissionV1.NotFoundError)
+      expect((yield* list()).map((item) => item.id)).toEqual([requestID])
+
+      yield* reply({ requestID, reply: "once", sessionID: SessionID.make("session_owner") })
+      yield* Fiber.join(fiber)
+      expect(yield* list()).toEqual([])
+    }),
+  { git: true },
+)
+
+it.instance(
   "reply - publishes replied event",
   () =>
     Effect.gen(function* () {

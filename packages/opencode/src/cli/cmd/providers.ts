@@ -25,9 +25,12 @@ const promptValue = <Value>(value: Option.Option<Value>) => {
   return Effect.succeed(value.value)
 }
 
+const authOrCli = <A>(effect: Effect.Effect<A, Auth.AuthError>) =>
+  effect.pipe(Effect.mapError((error) => new CliError({ message: error.message })))
+
 const put = Effect.fn("Cli.providers.put")(function* (key: string, info: Auth.Info) {
   const auth = yield* Auth.Service
-  yield* Effect.orDie(auth.set(key, info))
+  yield* authOrCli(auth.set(key, info))
 })
 
 const cliTry = <Value>(message: string, fn: () => PromiseLike<Value>) =>
@@ -260,7 +263,7 @@ export const ProvidersListCommand = effectCmd({
     const homedir = os.homedir()
     const displayPath = authPath.startsWith(homedir) ? authPath.replace(homedir, "~") : authPath
     yield* Prompt.intro(`Credentials ${UI.Style.TEXT_DIM}${displayPath}`)
-    const results = Object.entries(yield* Effect.orDie(authSvc.all()))
+    const results = Object.entries(yield* authOrCli(authSvc.all()))
     const database = yield* modelsDev.get()
 
     for (const [providerID, result] of results) {
@@ -345,7 +348,7 @@ export const ProvidersLoginCommand = effectCmd({
         yield* Prompt.outro("Done")
         return
       }
-      yield* Effect.orDie(authSvc.set(url, { type: "wellknown", key: wellknown.auth.env, token: token.trim() }))
+      yield* authOrCli(authSvc.set(url, { type: "wellknown", key: wellknown.auth.env, token: token.trim() }))
       yield* Prompt.log.success("Logged into " + url)
       yield* Prompt.outro("Done")
       return
@@ -465,7 +468,7 @@ export const ProvidersLoginCommand = effectCmd({
 
       // Check whether the user already has a Devin API token configured
       // in OpenCode auth, or as an environment variable.
-      const existing = yield* authSvc.get(provider)
+      const existing = yield* authOrCli(authSvc.get(provider))
       const envKey = process.env["DEVIN_API_KEY"]
       if (existing || envKey) {
         yield* Prompt.log.info("Devin credentials already configured.")
@@ -521,7 +524,7 @@ export const ProvidersLoginCommand = effectCmd({
       validate: (x) => (x && x.length > 0 ? undefined : "Required"),
     })
     const apiKey = yield* promptValue(key)
-    yield* Effect.orDie(authSvc.set(provider, { type: "api", key: apiKey }))
+    yield* authOrCli(authSvc.set(provider, { type: "api", key: apiKey }))
 
     yield* Prompt.outro("Done")
   }),
@@ -542,7 +545,7 @@ export const ProvidersLogoutCommand = effectCmd({
     const modelsDev = yield* ModelsDev.Service
 
     UI.empty()
-    const credentials: Array<[string, Auth.Info]> = Object.entries(yield* Effect.orDie(authSvc.all()))
+    const credentials: Array<[string, Auth.Info]> = Object.entries(yield* authOrCli(authSvc.all()))
     yield* Prompt.intro("Remove credential")
     if (credentials.length === 0) {
       yield* Prompt.log.error("No credentials found")
@@ -567,7 +570,7 @@ export const ProvidersLogoutCommand = effectCmd({
           }),
         )
     if (!provider) return yield* fail(`Unknown configured provider "${args.provider}"`)
-    yield* Effect.orDie(authSvc.remove(provider))
+    yield* authOrCli(authSvc.remove(provider))
     yield* Prompt.outro("Logout successful")
   }),
 })

@@ -1057,6 +1057,22 @@ const layer = Layer.effect(
       "SessionPrompt.prompt",
     )(function* (input: PromptInput) {
       const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
+
+      const permissions: PermissionV1.Rule[] = Object.entries(input.tools ?? {}).map(([tool, enabled]) => ({
+        permission: tool,
+        action: enabled ? "allow" : "deny",
+        pattern: "*",
+      }))
+      if (permissions.length > 0) {
+        // The deprecated `tools` field is a full snapshot of the client's tool
+        // toggles, not a patch: a tool omitted from the payload is no longer
+        // restricted. Replacing (rather than merging) keeps repeated prompts
+        // idempotent and lets a later prompt re-enable a tool an earlier prompt
+        // disabled.
+        session.permission = permissions
+        yield* sessions.setPermission({ sessionID: session.id, permission: permissions })
+      }
+
       yield* revert.cleanup(session)
       // If a checkpoint exists for this session (e.g. from a prior interrupted run),
       // surface its context as a synthetic part on the resumed user message so the
@@ -1080,14 +1096,14 @@ const layer = Layer.effect(
           text: lines.join("\n"),
         })
       }
-      // System One: mandatory silent pre-filter — judges every user message before it reaches the Orchestrator.
-      // If the daemon is down, the pipeline stops and no message is created.
+      // System One: optional silent pre-filter — judges every user message before it reaches the Orchestrator.
+      // If the daemon is down, the pipeline falls back unless SYSTEM_ONE_REQUIRED=1.
       const userText = input.parts
         .filter((p): p is SessionV1.TextPartInput => p.type === "text")
         .map((p) => p.text)
         .join("\n")
 
-      if (userText && !input.noReply) {
+      if (userText && !input.noReply && process.env.SYSTEM_ONE_ENABLED === "1") {
         const systemOneUrl = process.env.SYSTEM_ONE_URL ?? "http://127.0.0.1:9999"
         const decision = yield* Effect.promise(async () => {
           const controller = new AbortController()
@@ -1099,7 +1115,9 @@ const layer = Layer.effect(
               body: JSON.stringify({ message: userText.split("\n")[0] }),
               signal: controller.signal as any,
             })
-            return await res.json()
+            return (await res.json()) as { effort: string; category: string; reason: string } | undefined
+          } catch {
+            return undefined
           } finally {
             clearTimeout(timeoutId)
           }
@@ -1107,7 +1125,12 @@ const layer = Layer.effect(
 
         if (!decision?.effort) {
           yield* Effect.logError("system-one-down", { "session.id": input.sessionID })
-          throw new Error("System One pre-filter is unavailable. Message not sent.")
+          if (process.env.SYSTEM_ONE_REQUIRED === "1") {
+            throw new Error("System One pre-filter is unavailable. Message not sent.")
+          }
+          const message = yield* createUserMessage(input)
+          yield* sessions.touch(input.sessionID)
+          return yield* loop({ sessionID: input.sessionID })
         }
 
         const systemOneDecision = decision

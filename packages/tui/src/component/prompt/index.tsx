@@ -243,18 +243,22 @@ export function Prompt(props: PromptProps) {
   let promptPartTypeId = 0
   const event = useEvent()
 
-  event.on("tui.prompt.append", (evt, { workspace }) => {
-    if (workspace !== project.workspace.current()) return
-    if (!input || input.isDestroyed) return
-    input.insertText(evt.properties.text)
-    setTimeout(() => {
-      // setTimeout is a workaround and needs to be addressed properly
+  // Prompt is mounted per route/session, so the subscription must be released on teardown or
+  // every remount leaves a handler bound to a destroyed renderable on the shared emitter.
+  onCleanup(
+    event.on("tui.prompt.append", (evt, { workspace }) => {
+      if (workspace !== project.workspace.current()) return
       if (!input || input.isDestroyed) return
-      input.getLayoutNode().markDirty()
-      input.gotoBufferEnd()
-      renderer.requestRender()
-    }, 0)
-  })
+      input.insertText(evt.properties.text)
+      setTimeout(() => {
+        // setTimeout is a workaround and needs to be addressed properly
+        if (!input || input.isDestroyed) return
+        input.getLayoutNode().markDirty()
+        input.gotoBufferEnd()
+        renderer.requestRender()
+      }, 0)
+    }),
+  )
 
   createEffect(() => {
     if (!input || input.isDestroyed) return
@@ -1069,12 +1073,7 @@ export function Prompt(props: PromptProps) {
     if (store.mode === "shell") {
       move.startSubmit()
       if (sharedWs) {
-        sharedWs.sendPrompt(sessionID, {
-          type: "shell",
-          command: inputText,
-          agent: agent.name,
-          model: `${selectedModel.providerID}/${selectedModel.modelID}`,
-        })
+        sharedWs.sendShell(sessionID, inputText, `${selectedModel.providerID}/${selectedModel.modelID}`, agent.name)
       } else {
         void sdk.client.session.shell({
           sessionID,
@@ -1100,7 +1099,7 @@ export function Prompt(props: PromptProps) {
       const args = firstLineArgs.join(" ") + (restOfInput ? "\n" + restOfInput : "")
 
       if (sharedWs) {
-        sharedWs.sendCommand(sessionID, command.slice(1), args)
+        sharedWs.sendCommand(sessionID, command.slice(1), args, `${selectedModel.providerID}/${selectedModel.modelID}`, agent.name, variant)
       } else {
         void sdk.client.session.command({
           sessionID,
@@ -1131,6 +1130,7 @@ export function Prompt(props: PromptProps) {
           modelID: selectedModel.modelID,
           providerID: selectedModel.providerID,
           variant,
+          parts: textParts,
         })
       } else {
         sdk.client.session

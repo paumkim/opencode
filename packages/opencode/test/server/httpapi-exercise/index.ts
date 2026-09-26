@@ -285,6 +285,7 @@ const scenarios: Scenario[] = [
     .at((ctx) => ({
       path: route("/permission/{requestID}/reply", { requestID: "per_httpapi" }),
       headers: ctx.headers(),
+      query: { sessionID: "ses_httpapi" },
       body: { reply: "bad" },
     }))
     .status(400),
@@ -293,6 +294,7 @@ const scenarios: Scenario[] = [
     .at((ctx) => ({
       path: route("/permission/{requestID}/reply", { requestID: "per_httpapi" }),
       headers: ctx.headers(),
+      query: { sessionID: "ses_httpapi" },
       body: { reply: "once" },
     }))
     .json(404, object, "status"),

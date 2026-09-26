@@ -5,44 +5,35 @@ import { OAUTH_CALLBACK_PORT, OAUTH_CALLBACK_PATH, parseRedirectUri } from "./oa
 
 const OAUTH_CALLBACK_HOST = "127.0.0.1"
 
-// Current callback server configuration (may differ from defaults if custom redirectUri is used)
-let currentPort = OAUTH_CALLBACK_PORT
-let currentPath = OAUTH_CALLBACK_PATH
+interface CallbackServer {
+  server: ReturnType<typeof createServer>
+  port: number
+  path: string
+  owners: Set<symbol>
+  starting?: Promise<void>
+}
 
 interface PendingAuth {
   resolve: (code: string) => void
   reject: (error: Error) => void
   timeout: ReturnType<typeof setTimeout>
+  owner: symbol
 }
 
-let server: ReturnType<typeof createServer> | undefined
+const servers = new Map<string, CallbackServer>()
 const pendingAuths = new Map<string, PendingAuth>()
-// Reverse index: mcpName → oauthState, so cancelPending(mcpName) can
-// find the right entry in pendingAuths (which is keyed by oauthState).
-const mcpNameToState = new Map<string, string>()
+const mcpNameToOwner = new Map<string, symbol>()
 
 const CALLBACK_TIMEOUT_MS = 5 * 60 * 1000 // 5 minutes
 
-function cleanupStateIndex(oauthState: string) {
-  for (const [name, state] of mcpNameToState) {
-    if (state === oauthState) {
-      mcpNameToState.delete(name)
-      break
-    }
-  }
+function key(port: number, path: string) {
+  return `${port}:${path}`
 }
 
-function stopIfIdle() {
-  if (pendingAuths.size > 0 || !server) return
+function handleRequest(listener: CallbackServer, req: import("http").IncomingMessage, res: import("http").ServerResponse) {
+  const url = new URL(req.url || "/", `http://localhost:${listener.port}`)
 
-  server.close()
-  server = undefined
-}
-
-function handleRequest(req: import("http").IncomingMessage, res: import("http").ServerResponse) {
-  const url = new URL(req.url || "/", `http://localhost:${currentPort}`)
-
-  if (url.pathname !== currentPath) {
+  if (url.pathname !== listener.path) {
     res.writeHead(404)
     res.end("Not found")
     return
@@ -67,12 +58,12 @@ function handleRequest(req: import("http").IncomingMessage, res: import("http").
       const pending = pendingAuths.get(state)!
       clearTimeout(pending.timeout)
       pendingAuths.delete(state)
-      cleanupStateIndex(state)
+      cleanupOwnerIndex(pending.owner)
       pending.reject(new Error(errorMsg))
+      release(pending.owner)
     }
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" })
     res.end(OauthCallbackPage.error(errorMsg, { provider: "MCP" }))
-    stopIfIdle()
     return
   }
 
@@ -94,101 +85,127 @@ function handleRequest(req: import("http").IncomingMessage, res: import("http").
 
   clearTimeout(pending.timeout)
   pendingAuths.delete(state)
-  cleanupStateIndex(state)
+  cleanupOwnerIndex(pending.owner)
   pending.resolve(code)
+  release(pending.owner)
 
   res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" })
   res.end(OauthCallbackPage.success({ provider: "MCP" }))
-  stopIfIdle()
 }
 
-export async function ensureRunning(redirectUri?: string): Promise<void> {
-  // Parse the redirect URI to get port and path (uses defaults if not provided)
+async function closeListener(listener: CallbackServer) {
+  if (!listener.server.listening) return
+  await new Promise<void>((resolve) => listener.server.close(() => resolve()))
+}
+
+function cleanupOwnerIndex(owner: symbol) {
+  for (const [name, value] of mcpNameToOwner) if (value === owner) mcpNameToOwner.delete(name)
+}
+
+function release(owner: symbol) {
+  for (const listener of servers.values()) listener.owners.delete(owner)
+  for (const listener of servers.values()) {
+    if (listener.owners.size === 0) {
+      servers.delete(key(listener.port, listener.path))
+      void closeListener(listener)
+    }
+  }
+}
+
+export async function ensureRunning(redirectUri?: string, mcpName?: string): Promise<symbol> {
   const { port, path } = parseRedirectUri(redirectUri)
-
-  // If server is running on a different port/path, stop it first
-  if (server && (currentPort !== port || currentPath !== path)) {
-    await stop()
+  const id = key(port, path)
+  const owner = Symbol(id)
+  const existing = servers.get(id)
+  if (existing) {
+    if (existing.starting) await existing.starting
+    existing.owners.add(owner)
+    if (mcpName) mcpNameToOwner.set(mcpName, owner)
+    return owner
   }
 
-  if (server) return
-
-  const running = await isPortInUse(port)
-  if (running) {
-    return
+  const listener: CallbackServer = {
+    server: createServer((req, res) => handleRequest(listener, req, res)),
+    port,
+    path,
+    owners: new Set([owner]),
   }
-
-  currentPort = port
-  currentPath = path
-
-  server = createServer(handleRequest)
-  await new Promise<void>((resolve, reject) => {
-    server!.listen(currentPort, OAUTH_CALLBACK_HOST, () => {
+  const starting = new Promise<void>((resolve, reject) => {
+    listener.server.once("error", reject)
+    listener.server.listen(port, OAUTH_CALLBACK_HOST, () => {
+      listener.server.removeListener("error", reject)
       resolve()
     })
-    server!.on("error", reject)
   })
+  listener.starting = starting
+  servers.set(id, listener)
+  try {
+    await starting
+    listener.starting = undefined
+    // The only 'error' listener above is scoped to the startup race. Keep a
+    // permanent listener on the running server: an unhandled 'error' event on
+    // an EventEmitter throws and would crash the whole process.
+    listener.server.on("error", () => {})
+    if (mcpName) mcpNameToOwner.set(mcpName, owner)
+    return owner
+  } catch (error) {
+    if (servers.get(id) === listener) servers.delete(id)
+    listener.owners.clear()
+    throw error
+  }
 }
 
-export function waitForCallback(oauthState: string, mcpName?: string): Promise<string> {
-  if (mcpName) mcpNameToState.set(mcpName, oauthState)
+export function waitForCallback(oauthState: string, mcpName?: string, owner?: symbol): Promise<string> {
+  const resolvedOwner = owner ?? [...servers.values()].find((listener) => listener.owners.size > 0)?.owners.values().next().value
+  if (!resolvedOwner) return Promise.reject(new Error("OAuth callback server is not running"))
+  owner = resolvedOwner
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
-      if (pendingAuths.has(oauthState)) {
-        pendingAuths.delete(oauthState)
-        if (mcpName) mcpNameToState.delete(mcpName)
-        reject(new Error("OAuth callback timeout - authorization took too long"))
-        stopIfIdle()
-      }
+      if (pendingAuths.get(oauthState)?.owner !== owner) return
+      pendingAuths.delete(oauthState)
+      cleanupOwnerIndex(owner)
+      reject(new Error("OAuth callback timeout - authorization took too long"))
+      release(owner)
     }, CALLBACK_TIMEOUT_MS)
-
-    pendingAuths.set(oauthState, { resolve, reject, timeout })
+    pendingAuths.set(oauthState, { resolve, reject, timeout, owner: resolvedOwner })
+    if (mcpName) mcpNameToOwner.set(mcpName, owner)
   })
 }
 
-export function cancelPending(mcpName: string): void {
-  // Look up the oauthState for this mcpName via the reverse index
-  const oauthState = mcpNameToState.get(mcpName)
-  const key = oauthState ?? mcpName
-  const pending = pendingAuths.get(key)
-  if (pending) {
+export async function cancelPending(mcpName: string): Promise<void> {
+  const owner = mcpNameToOwner.get(mcpName)
+  if (!owner) return
+  for (const [state, pending] of pendingAuths) if (pending.owner === owner) {
     clearTimeout(pending.timeout)
-    pendingAuths.delete(key)
-    mcpNameToState.delete(mcpName)
+    pendingAuths.delete(state)
     pending.reject(new Error("Authorization cancelled"))
-    stopIfIdle()
   }
+  cleanupOwnerIndex(owner)
+  release(owner)
 }
 
 export async function isPortInUse(port: number = OAUTH_CALLBACK_PORT): Promise<boolean> {
   return new Promise((resolve) => {
     const socket = createConnection(port, "127.0.0.1")
-    socket.on("connect", () => {
-      socket.destroy()
-      resolve(true)
-    })
-    socket.on("error", () => {
-      resolve(false)
-    })
+    socket.on("connect", () => { socket.destroy(); resolve(true) })
+    socket.on("error", () => resolve(false))
   })
 }
 
 export async function stop(): Promise<void> {
-  if (server) {
-    await new Promise<void>((resolve) => server!.close(() => resolve()))
-    server = undefined
-  }
-
-  for (const [_name, pending] of pendingAuths) {
+  const listeners = [...servers.values()]
+  servers.clear()
+  await Promise.all(listeners.map(closeListener))
+  for (const pending of pendingAuths.values()) {
     clearTimeout(pending.timeout)
     pending.reject(new Error("OAuth callback server stopped"))
   }
   pendingAuths.clear()
-  mcpNameToState.clear()
+  mcpNameToOwner.clear()
 }
 
 export function isRunning(): boolean {
-  return server !== undefined
+  return [...servers.values()].some((listener) => listener.server.listening)
 }
 
 export * as McpOAuthCallback from "./oauth-callback"

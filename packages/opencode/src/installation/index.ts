@@ -17,6 +17,17 @@ import { InstallationEvent } from "@opencode-ai/schema/installation-event"
 
 export type Method = "curl" | "npm" | "yarn" | "pnpm" | "bun" | "brew" | "scoop" | "choco" | "unknown"
 
+const REPOSITORY = "paumkim/opencode"
+const BETA_REPOSITORY = "paumkim/opencode-beta"
+
+function releaseRepository() {
+  return InstallationChannel === "beta" ? BETA_REPOSITORY : REPOSITORY
+}
+
+function installScript() {
+  return `https://raw.githubusercontent.com/${releaseRepository()}/dev/install`
+}
+
 export type ReleaseType = "patch" | "minor" | "major"
 
 export const Event = InstallationEvent
@@ -144,7 +155,7 @@ const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProcess.Serv
 
     const upgradeCurl = Effect.fnUntraced(
       function* (target: string) {
-        const response = yield* httpOk.execute(HttpClientRequest.get("https://opencode.ai/install"))
+        const response = yield* httpOk.execute(HttpClientRequest.get(installScript()))
         const body = yield* response.text
         const bodyBytes = new TextEncoder().encode(body)
         const shell = yield* upgradeScriptShell()
@@ -255,7 +266,7 @@ const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProcess.Serv
         }
 
         const response = yield* httpOk.execute(
-          HttpClientRequest.get("https://api.github.com/repos/anomalyco/opencode/releases/latest").pipe(
+          HttpClientRequest.get(`https://api.github.com/repos/${releaseRepository()}/releases/latest`).pipe(
             HttpClientRequest.acceptJson,
           ),
         )

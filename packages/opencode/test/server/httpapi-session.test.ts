@@ -12,6 +12,8 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { Ripgrep } from "@opencode-ai/core/ripgrep"
+import { Permission } from "../../src/permission"
+import { EventV2Bridge } from "../../src/event-v2-bridge"
 import { registerAdapter } from "../../src/control-plane/adapters"
 import type { WorkspaceAdapter } from "../../src/control-plane/types"
 import { Workspace } from "../../src/control-plane/workspace"
@@ -44,7 +46,16 @@ const noopBootstrapLayer = Layer.succeed(
   InstanceBootstrapService.Service.of({ run: Effect.void }),
 )
 const appLayer = AppNodeBuilder.build(
-  LayerNode.group([InstanceStore.node, Project.node, Session.node, Workspace.node, Database.node, Ripgrep.node]),
+  LayerNode.group([
+    InstanceStore.node,
+    Project.node,
+    Session.node,
+    Workspace.node,
+    Database.node,
+    Ripgrep.node,
+    Permission.node,
+    EventV2Bridge.node,
+  ]),
   [[InstanceStore.bootstrapNode, noopBootstrapLayer]],
 )
 const servedRoutes: Layer.Layer<never, Config.ConfigError, HttpServer.HttpServer> = HttpRouter.serve(
@@ -1066,7 +1077,33 @@ describe("session HttpApi", () => {
           }),
         ).toMatchObject({ id: session.id })
 
-        const permissionID = String(PermissionV1.ID.ascending())
+        const owner = yield* createSession({ title: "permission owner" })
+        const attacker = yield* createSession({ title: "permission attacker" })
+        const permissionID = PermissionV1.ID.ascending()
+        const permissionService = yield* Permission.Service
+        yield* permissionService
+          .ask({
+            id: permissionID,
+            sessionID: owner.id,
+            permission: "bash",
+            patterns: ["ls"],
+            metadata: {},
+            always: [],
+            ruleset: [],
+          })
+          .pipe(Effect.forkScoped)
+        yield* pollWithTimeout(
+          permissionService.list().pipe(Effect.map((items) => items.some((item) => item.id === permissionID))),
+          "permission request not registered",
+        )
+        const crossSession = yield* request(
+          pathFor(SessionPaths.permissions, { sessionID: attacker.id, permissionID }),
+          { method: "POST", headers, body: JSON.stringify({ response: "once" }) },
+        )
+        expect(crossSession.status).toBe(404)
+        expect((yield* permissionService.list()).map((item) => item.id)).toEqual([permissionID])
+
+        const foreignID = String(PermissionV1.ID.ascending())
         const permission = yield* request(
           pathFor(SessionPaths.permissions, {
             sessionID: session.id,

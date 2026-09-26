@@ -66,9 +66,15 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/ControlPlaneMoveSession") {}
 
-const layer = Layer.effect(
-  Service,
-  Effect.gen(function* () {
+export interface Hooks {
+  readonly afterDiscard?: (input: { readonly source: AbsolutePath; readonly destination: AbsolutePath }) => Effect.Effect<void>
+  readonly beforePublish?: (input: { readonly sessionID: SessionSchema.ID; readonly destination: AbsolutePath }) => Effect.Effect<void>
+}
+
+export const layerWith = (hooks: Hooks = {}) =>
+  Layer.effect(
+    Service,
+    Effect.gen(function* () {
     const git = yield* Git.Service
     const events = yield* EventV2.Service
     const project = yield* ProjectV2.Service
@@ -98,18 +104,18 @@ const layer = Layer.effect(
       if (patch) {
         const repository = yield* git.repo.discover(directory)
         if (!repository) return yield* new ApplyChangesError({ message: "Destination is not a Git repository" })
-        yield* git.change
-          .apply({ repository, path: directory, changes: patch })
+        const alreadyApplied = yield* git.change
+          .applied({ repository, path: directory, changes: patch })
           .pipe(Effect.mapError((error) => new ApplyChangesError({ message: error.message })))
+        if (!alreadyApplied)
+          yield* git.change
+            .apply({ repository, path: directory, changes: patch })
+            .pipe(Effect.mapError((error) => new ApplyChangesError({ message: error.message })))
       }
 
-      yield* events.publish(SessionEvent.Moved, {
-        sessionID: input.sessionID,
-        location: Location.Ref.make({ directory }),
-        subdirectory: RelativePath.make(path.relative(destination.directory, directory).replaceAll("\\", "/")),
-        timestamp: yield* DateTime.now,
-      })
-
+      // Cleanup must finish before the durable location event. If either cleanup or publication fails,
+      // the projection still points at the source, so a retry can recognize the destination patch
+      // with `git apply --reverse --check` instead of applying it twice.
       if (patch) {
         const repository = yield* git.repo.discover(current.location.directory)
         if (!repository)
@@ -135,6 +141,15 @@ const layer = Layer.effect(
             ),
           )
       }
+
+      if (hooks?.afterDiscard) yield* hooks.afterDiscard({ source: current.location.directory, destination: directory })
+      if (hooks?.beforePublish) yield* hooks.beforePublish({ sessionID: input.sessionID, destination: directory })
+      yield* events.publish(SessionEvent.Moved, {
+        sessionID: input.sessionID,
+        location: Location.Ref.make({ directory }),
+        subdirectory: RelativePath.make(path.relative(destination.directory, directory).replaceAll("\\", "/")),
+        timestamp: yield* DateTime.now,
+      })
     })
 
     return Service.of({ moveSession })
@@ -143,6 +158,6 @@ const layer = Layer.effect(
 
 export const node = makeGlobalNode({
   service: Service,
-  layer,
+  layer: layerWith(),
   deps: [Git.node, EventV2.node, ProjectV2.node, SessionStore.node],
 })

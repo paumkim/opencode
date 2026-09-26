@@ -37,6 +37,7 @@ export const ripgrepLayer = Layer.effect(
         cwd: location.directory,
         pattern: "*",
         limit: location.vcs ? Number.MAX_SAFE_INTEGER : 100_000,
+        index: true,
         onEntry: (entry) =>
           Effect.sync(() => {
             state.files.push(entry.path)
@@ -123,6 +124,8 @@ export const fffLayer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const location = yield* Location.Service
+    const ripgrep = yield* Ripgrep.Service
+    const scope = yield* Scope.Scope
     const result = yield* Effect.try({
       try: () =>
         Fff.create({
@@ -135,13 +138,94 @@ export const fffLayer = Layer.effect(
     }).pipe(
       Effect.catch((error) => Effect.logWarning("failed to initialize fff", { error }).pipe(Effect.as(undefined))),
     )
+    // Without fff there is no fuzzy engine available, so `find` has to fall back to the
+    // same ripgrep-index + fuzzysort path the ripgrep layer uses. Passing the raw query to
+    // ripgrep.find would instead compile it into a `--glob` filter and always yield files.
+    const state = {
+      files: [] as string[],
+      directories: [] as string[],
+    }
+    const directories = new Set<string>()
+    let indexed = false
+    const ensureIndexed = Effect.gen(function* () {
+      if (indexed) return
+      indexed = true
+      yield* ripgrep
+        .find({
+          cwd: location.directory,
+          pattern: "*",
+          limit: location.vcs ? Number.MAX_SAFE_INTEGER : 100_000,
+          index: true,
+          onEntry: (entry) =>
+            Effect.sync(() => {
+              state.files.push(entry.path)
+              const parts = entry.path.split("/")
+              parts.slice(0, -1).forEach((_, index) => directories.add(parts.slice(0, index + 1).join("/") + path.sep))
+              state.directories = Array.from(directories)
+            }),
+        })
+        .pipe(Effect.orDie, Effect.asVoid, Effect.forkIn(scope))
+    })
+    // Ripgrep resolves every row against its own cwd, so the fallback must rebase
+    // matches onto the Location root instead of the narrowing directory.
+    const fallback = () =>
+      Service.of({
+        find: (input) =>
+          Effect.gen(function* () {
+            yield* ensureIndexed
+            const items =
+              input.type === "file"
+                ? state.files
+                : input.type === "directory"
+                  ? state.directories
+                  : [...state.files, ...state.directories]
+            return fuzzysort.go(input.query, items, { limit: input.limit ?? 50 }).map((item) => {
+              const relative = item.target
+              const type = relative.endsWith(path.sep) ? ("directory" as const) : ("file" as const)
+              return FileSystem.Entry.make({
+                path: RelativePath.make(relative),
+                type,
+              })
+            })
+          }),
+        glob: (input) =>
+          Effect.gen(function* () {
+            const cwd = path.resolve(location.directory, input.path ?? ".")
+            const items = yield* ripgrep
+              .glob({ cwd, pattern: input.pattern, limit: input.limit ?? Ripgrep.MAX_RESULTS })
+              .pipe(Effect.orDie)
+            return items.map((item) =>
+              FileSystem.Entry.make({
+                path: RelativePath.make(path.relative(location.directory, path.resolve(cwd, item.path))),
+                type: "file",
+              }),
+            )
+          }),
+        grep: (input) =>
+          Effect.gen(function* () {
+            const cwd = path.resolve(location.directory, input.path ?? ".")
+            const items = yield* ripgrep
+              .grep({ cwd, pattern: input.pattern, include: input.include, limit: input.limit ?? Ripgrep.MAX_RESULTS })
+              .pipe(Effect.orDie)
+            return items.map((match) =>
+              FileSystem.Match.make({
+                ...match,
+                entry: FileSystem.Entry.make({
+                  ...match.entry,
+                  path: RelativePath.make(path.relative(location.directory, path.resolve(cwd, match.entry.path))),
+                }),
+              }),
+            )
+          }),
+      })
     if (!result?.ok) {
       if (result) yield* Effect.logWarning("failed to initialize fff", { error: result.error })
-      return Service.of({
-        find: () => Effect.succeed([]),
-        glob: () => Effect.succeed([]),
-        grep: () => Effect.succeed([]),
-      })
+      return fallback()
+    }
+    const ready = yield* Effect.promise(() => result.value.waitForScan())
+    if (!ready.ok) {
+      yield* Effect.promise(async () => result.value.destroy()).pipe(Effect.ignore)
+      return fallback()
     }
     yield* Effect.addFinalizer(() => Effect.sync(() => result.value.destroy()).pipe(Effect.ignore))
     return Service.of({

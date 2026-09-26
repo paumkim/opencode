@@ -6,6 +6,7 @@ import path from "path"
 import { makeLocationNode } from "../effect/app-node"
 import { FileSystem } from "../filesystem"
 import { Location } from "../location"
+import { FSUtil } from "../fs-util"
 import { Ripgrep } from "../ripgrep"
 import { RelativePath } from "../schema"
 import { PermissionV2 } from "../permission"
@@ -39,6 +40,7 @@ const layer = Layer.effectDiscard(
   Effect.gen(function* () {
     const tools = yield* Tools.Service
     const ripgrep = yield* Ripgrep.Service
+    const fs = yield* FSUtil.Service
     const location = yield* Location.Service
     const permission = yield* PermissionV2.Service
 
@@ -72,12 +74,19 @@ const layer = Layer.effectDiscard(
                 agent: context.agent,
                 source: { type: "tool", messageID: context.assistantMessageID, callID: context.toolCallID },
               })
-              const cwd = path.resolve(location.directory, input.path ?? ".")
+              const root = yield* fs.realPath(location.directory).pipe(Effect.orDie)
+              const lexical = path.resolve(root, input.path ?? ".")
+              if (!FSUtil.contains(root, lexical)) return yield* Effect.fail(new Error("Path escapes the active Location"))
+              const cwd = yield* fs
+                .realPath(lexical)
+                .pipe(Effect.catch(() => Effect.succeed(lexical)))
+              if (!FSUtil.contains(root, cwd))
+                return yield* Effect.fail(new Error("Path escapes the active Location"))
               return yield* ripgrep
                 .glob({
                   cwd,
                   pattern: input.pattern,
-                  limit: input.limit ?? Number.MAX_SAFE_INTEGER,
+                  limit: input.limit ?? Ripgrep.MAX_RESULTS,
                 })
                 .pipe(
                   Effect.map((result) =>
@@ -101,5 +110,5 @@ const layer = Layer.effectDiscard(
 export const node = makeLocationNode({
   name: "tool/glob",
   layer,
-  deps: [ToolRegistry.node, Ripgrep.node, Location.node, PermissionV2.node],
+  deps: [ToolRegistry.node, FSUtil.node, Ripgrep.node, Location.node, PermissionV2.node],
 })

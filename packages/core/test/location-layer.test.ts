@@ -8,7 +8,7 @@ import { AgentV2 } from "@opencode-ai/core/agent"
 import { Catalog } from "@opencode-ai/core/catalog"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
-import { LocationServiceMap } from "@opencode-ai/core/location-services"
+import { invalidateLocationServiceMaps, LocationServiceMap } from "@opencode-ai/core/location-services"
 import { Location } from "@opencode-ai/core/location"
 import { PluginV2 } from "@opencode-ai/core/plugin"
 import { ModelV2 } from "@opencode-ai/core/model"
@@ -16,6 +16,7 @@ import { ProjectV2 } from "@opencode-ai/core/project"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { AbsolutePath } from "@opencode-ai/core/schema"
 import { SessionV2 } from "@opencode-ai/core/session"
+import { WorkspaceV2 } from "@opencode-ai/core/workspace"
 import { SessionRunnerModel } from "@opencode-ai/core/session/runner/model"
 import { tmpdir } from "./fixture/tmpdir"
 import { testEffect } from "./lib/effect"
@@ -57,6 +58,24 @@ describe("LocationServiceMap", () => {
             expect(yield* locations.contextEffect(constructed)).toBe(yield* locations.contextEffect(decoded))
           }),
         ),
+      ),
+    ),
+  )
+
+  it.live("invalidates workspace-qualified entries by directory", () =>
+    Effect.acquireRelease(
+      Effect.promise(() => tmpdir()),
+      (dir) => Effect.promise(() => dir[Symbol.asyncDispose]()),
+    ).pipe(
+      Effect.flatMap((dir) =>
+        Effect.gen(function* () {
+          const locations = yield* LocationServiceMap.Service
+          const ref = Location.Ref.make({ directory: AbsolutePath.make(dir.path), workspaceID: WorkspaceV2.ID.make("wrk_workspace-1") })
+          locations.get(ref)
+          const before = yield* locations.contextEffect(ref)
+          yield* Effect.promise(() => invalidateLocationServiceMaps(dir.path))
+          expect(yield* locations.contextEffect(ref)).not.toBe(before)
+        }),
       ),
     ),
   )

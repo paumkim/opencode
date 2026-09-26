@@ -1,3 +1,4 @@
+import { invalidateLocationServiceMaps } from "@opencode-ai/core/location-services"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { makeGlobalNode, Node } from "@opencode-ai/core/effect/app-node"
 import { GlobalBus } from "@/bus/global"
@@ -93,6 +94,7 @@ const layer: Layer.Layer<Service, never, Project.Service | InstanceBootstrap.Ser
 
     const disposeContext = Effect.fn("InstanceStore.disposeContext")(function* (ctx: InstanceContext) {
       yield* Effect.logInfo("disposing instance", { directory: ctx.directory })
+      yield* Effect.promise(() => invalidateLocationServiceMaps(ctx.directory))
       yield* Effect.promise(() => runDisposers(ctx.directory))
       yield* emitDisposed({ directory: ctx.directory, project: ctx.project.id })
     })
@@ -134,6 +136,7 @@ const layer: Layer.Layer<Service, never, Project.Service | InstanceBootstrap.Ser
             yield* Effect.logInfo("reloading instance", { directory: directory })
             if (previous) {
               yield* Deferred.await(previous.deferred).pipe(Effect.ignore)
+              yield* Effect.promise(() => invalidateLocationServiceMaps(directory))
               yield* Effect.promise(() => runDisposers(directory))
               yield* emitDisposed({ directory, project: input.project?.id })
             }

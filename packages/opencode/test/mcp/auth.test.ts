@@ -2,11 +2,12 @@ import { expect, test } from "bun:test"
 import { setTimeout as sleep } from "node:timers/promises"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { Effect, Layer } from "effect"
+import { PlatformError, SystemError } from "effect/PlatformError"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { McpAuth } from "../../src/mcp/auth"
 
 function authFile() {
-  let raw = ""
+  let raw: string | undefined
   let activeWrites = 0
   let sawOverlap = false
 
@@ -17,16 +18,25 @@ function authFile() {
 
       return FSUtil.Service.of({
         ...fs,
-        readJson: (file) =>
-          file.endsWith("mcp-auth.json")
-            ? Effect.try({
-                try: () => {
-                  if (!raw) throw new Error("mcp-auth.json missing")
-                  return JSON.parse(raw)
-                },
+        readJson: (file) => {
+          if (!file.endsWith("mcp-auth.json")) return fs.readJson(file)
+          const content = raw
+          return content === undefined
+            ? Effect.fail(
+                new PlatformError(
+                  new SystemError({
+                    _tag: "NotFound",
+                    module: "FileSystem",
+                    method: "readFileString",
+                    pathOrDescriptor: file,
+                  }),
+                ),
+              )
+            : Effect.try({
+                try: () => JSON.parse(content),
                 catch: (cause) => new FSUtil.FileSystemError({ method: "readJson", cause }),
               })
-            : fs.readJson(file),
+        },
         writeJson: (file, value, mode) =>
           file.endsWith("mcp-auth.json")
             ? Effect.promise(async () => {
@@ -43,7 +53,12 @@ function authFile() {
     }),
   ).pipe(Layer.provide(AppNodeBuilder.build(FSUtil.node)))
 
-  return { fsLayer, raw: () => raw }
+  const readRaw = (): string => {
+    if (raw === undefined) throw new Error("mcp-auth.json missing")
+    return raw
+  }
+
+  return { fsLayer, raw: readRaw, setRaw: (value: string) => (raw = value) }
 }
 
 function authService(fsLayer: Layer.Layer<FSUtil.Service>) {
@@ -51,6 +66,34 @@ function authService(fsLayer: Layer.Layer<FSUtil.Service>) {
     Effect.provide(AppNodeBuilder.build(McpAuth.node, [[FSUtil.node, fsLayer]])),
   )
 }
+
+test("returns an empty store when the auth file is missing", async () => {
+  const file = authFile()
+
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const auth = yield* authService(file.fsLayer)
+      expect(yield* auth.all()).toEqual({})
+    }),
+  )
+})
+
+test("rejects malformed auth data without overwriting the file", async () => {
+  const file = authFile()
+
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const auth = yield* authService(file.fsLayer)
+      const original = '{ "broken": true'
+      file.setRaw(original)
+
+      const result = yield* Effect.exit(auth.all())
+
+      expect(result._tag).toBe("Failure")
+      expect(file.raw()).toBe(original)
+    }),
+  )
+})
 
 test("serializes concurrent auth file updates across service instances", async () => {
   const file = authFile()

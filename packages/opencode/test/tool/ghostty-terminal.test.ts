@@ -1,4 +1,4 @@
-import { expect, spyOn } from "bun:test"
+import { expect, spyOn, test as bunTest } from "bun:test"
 import fs from "node:fs/promises"
 import path from "node:path"
 import { Cause, Effect, Exit, Fiber, Layer, Schema } from "effect"
@@ -12,9 +12,9 @@ import { Agent } from "@/agent/agent"
 import { Truncate } from "@/tool/truncate"
 import { Config } from "@/config/config"
 import { Plugin } from "@/plugin"
-import { GhosttyTerminalTool, Parameters } from "@/tool/ghostty-terminal"
+import { GhosttyTerminalAvailable, GhosttyTerminalTool, Parameters } from "@/tool/ghostty-terminal"
 import { Tool } from "@/tool/tool"
-import { TerminalSessions } from "@opencode-ai/ghostty-terminal/sessions"
+import { TerminalSessions, type SessionInfo } from "@opencode-ai/ghostty-terminal/sessions"
 import { MessageID } from "@/session/schema"
 import { InstanceState } from "@/effect/instance-state"
 import { Session } from "@/session/session"
@@ -56,6 +56,25 @@ function failure(exit: Exit.Exit<unknown, unknown>) {
 const init = Effect.gen(function* () {
   const info = yield* GhosttyTerminalTool
   return yield* Tool.init(info)
+})
+
+it.instance("is available on the Bun host", () => Effect.sync(() => {
+  expect(GhosttyTerminalAvailable).toBe(true)
+}))
+
+bunTest("Node build gate disables the tool and omits the Bun runtime", async () => {
+  const result = await Bun.build({
+    target: "node",
+    format: "esm",
+    define: { __GHOSTTY_TERMINAL_BUN__: "false" },
+    external: ["@opencode-ai/ghostty-terminal/sessions"],
+    entrypoints: [path.join(import.meta.dirname, "../../src/tool/ghostty-terminal.ts")],
+  })
+  expect(result.success).toBe(true)
+  const output = await result.outputs[0].text()
+  expect(output).toContain("GhosttyTerminalAvailable = false")
+  expect(output).not.toContain("bun:ffi")
+  expect(output).not.toContain("bun-pty")
 })
 
 it.instance("real shell persistence, plain/HTML readScreen, resize and dispose through wrapped tool", () => Effect.gen(function* () {
@@ -158,16 +177,18 @@ it.instance("restrictive agent and session Bash rules reject create/write before
   const tool = yield* init
   const ctx = yield* context
   const sessions = yield* Session.Service
-  const createSpy = spyOn(TerminalSessions.prototype, "create").mockImplementation(() => {})
+  const createSpy = spyOn(TerminalSessions.prototype, "create").mockImplementation((_name, _opts, _file, _args) => ({
+    name: "benign", pid: 1, cols: 80, rows: 24, exited: false,
+  } satisfies SessionInfo))
   const writeSpy = spyOn(TerminalSessions.prototype, "write").mockImplementation(() => {})
   yield* Effect.addFinalizer(() => Effect.sync(() => { createSpy.mockRestore(); writeSpy.mockRestore() }))
   // Test with bash deny: tool should fail before creating a terminal.
   yield* sessions.setPermission({ sessionID: ctx.sessionID, permission: Permission.fromConfig({ bash: "deny" }) })
   ctx.ask = (req) => Effect.gen(function* () {
     if (req.permission === "bash") {
-      return yield* new PermissionV1.DeniedError({
+      return yield* Effect.die(new PermissionV1.DeniedError({
         ruleset: [{ permission: "bash", action: "deny", pattern: "*" }],
-      })
+      }))
     }
     return
   })
@@ -180,7 +201,7 @@ it.instance("restrictive agent and session Bash rules reject create/write before
   yield* sessions.setPermission({ sessionID: ctx.sessionID, permission: Permission.fromConfig({ bash: "ask" }) })
   ctx.ask = (req) => Effect.gen(function* () {
     if (req.permission === "bash") {
-      return yield* new PermissionV1.RejectedError()
+      return yield* Effect.die(new PermissionV1.RejectedError())
     }
     return
   })
@@ -221,12 +242,12 @@ it.instance("real permission API broad ask waits for explicit reply; denied rule
   const ctx = yield* context
   const sessions = yield* Session.Service
   // Track pending permissions for this test.
-  const pending = new Map<string, { resolve: () => void; reject: (error: Error) => void }>()
+  const pending = new Map<string, { resolve: (value?: unknown) => void; reject: (error: Error) => void }>()
   yield* sessions.setPermission({ sessionID: ctx.sessionID, permission: Permission.fromConfig({ bash: "ask" }) })
   ctx.ask = (req) => Effect.gen(function* () {
     if (req.permission === "bash") {
       return yield* Effect.promise(() => new Promise((resolve, reject) => {
-        pending.set(req.id ?? "unknown", { resolve, reject })
+        pending.set("bash", { resolve, reject })
       }))
     }
     return
@@ -245,7 +266,7 @@ it.instance("real permission API broad ask waits for explicit reply; denied rule
   yield* sessions.setPermission({ sessionID: ctx.sessionID, permission: Permission.fromConfig({ bash: "deny" }) })
   ctx.ask = (req) => Effect.gen(function* () {
     if (req.permission === "bash") {
-      return yield* Effect.fail(new Error("denied"))
+      return yield* Effect.die(new Error("denied"))
     }
     return
   })

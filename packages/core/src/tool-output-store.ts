@@ -155,7 +155,14 @@ const layer = Layer.effect(
           outputPaths: [],
         }
 
-      const outputPath = yield* write(contextual)
+      const outputPath = yield* write(contextual).pipe(
+        Effect.catch(() =>
+          Effect.logWarning("Tool output retention unavailable; returning the complete tool result").pipe(
+            Effect.as(undefined),
+          ),
+        ),
+      )
+      if (!outputPath) return { output: input.output, outputPaths: [] }
       const marker = `... output truncated; full content saved to ${outputPath} ...`
 
       return {

@@ -1,7 +1,7 @@
 import { HttpApi, HttpApiEndpoint, HttpApiGroup, OpenApi } from "effect/unstable/httpapi"
 import { Authorization } from "../middleware/authorization"
 import { InstanceContextMiddleware } from "../middleware/instance-context"
-import { WorkspaceRoutingMiddleware } from "../middleware/workspace-routing"
+import { WorkspaceRoutingMiddleware, WorkspaceRoutingQuery } from "../middleware/workspace-routing"
 
 export const SharedPaths = {
   ws: "/ws",
@@ -11,6 +11,7 @@ export const SharedApi = HttpApi.make("shared").add(
   HttpApiGroup.make("shared")
     .add(
       HttpApiEndpoint.get("ws", SharedPaths.ws, {
+        query: WorkspaceRoutingQuery,
         success: undefined,
       }).annotateMerge(
         OpenApi.annotations({

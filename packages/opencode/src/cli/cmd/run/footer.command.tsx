@@ -4,6 +4,7 @@ import { useKeyboard, type JSX } from "@opentui/solid"
 import fuzzysort from "fuzzysort"
 import { createEffect, createMemo, createSignal, type Accessor } from "solid-js"
 import { RunFooterMenu, createFooterMenuState, type RunFooterMenuItem } from "./footer.menu"
+import { Default } from "@/command"
 import type { RunFooterTheme } from "./theme"
 import type { FooterQueuedPrompt, FooterSubagentTab, RunCommand, RunInput, RunProvider } from "./types"
 
@@ -449,7 +450,11 @@ export function RunCommandMenuBody(props: {
   const skills = createMemo(() => (props.commands() ?? []).filter((item) => item.source === "skill"))
   const activeSubagentCount = createMemo(() => props.subagents().filter((item) => item.status === "running").length)
   const entries = createMemo<CommandEntry[]>(() => {
-    const builtins = ["editor", "new"]
+    // Native server commands (/init, /review, /goal) get their own category so
+    // they do not surface under "Project Commands", which is reserved for
+    // user-authored command files. They must still be listed somewhere, so they
+    // are re-added below as `native`.
+    const builtins = ["editor", "new", ...Object.values(Default)]
     const session: CommandEntry[] = [
       {
         action: "editor",
@@ -534,6 +539,20 @@ export function RunCommandMenuBody(props: {
           ]
         : []),
     ]
+    const nativeNames = Object.values(Default) as string[]
+    const native: CommandEntry[] = (props.commands() ?? [])
+      .filter((item) => item.source === "command" && nativeNames.includes(item.name))
+      .map(
+        (item) =>
+          ({
+            action: "slash",
+            category: "Native Commands",
+            name: item.name,
+            display: item.name,
+            footer: `/${item.name}`,
+            keywords: `/${item.name} ${item.name} ${item.description ?? ""}`,
+          }) satisfies CommandEntry,
+      )
     const commands = (props.commands() ?? [])
       .filter((item) => item.source !== "skill" && !builtins.includes(item.name))
       .map(
@@ -556,6 +575,7 @@ export function RunCommandMenuBody(props: {
       ...session,
       ...prompt,
       ...agent,
+      ...native,
       ...commands,
       { action: "exit", category: "System", display: "Exit", footer: "/exit", keywords: "/exit exit" },
     ]

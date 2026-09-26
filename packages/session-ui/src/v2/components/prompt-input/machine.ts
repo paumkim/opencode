@@ -207,7 +207,10 @@ function keyDown(
     return changed({ ...state, popover: { type: "closed" }, focus: "editor" }, [{ type: "focus.editor" }], true)
   }
   if (event.key === "Tab" || (event.key === "Enter" && !event.composing)) {
-    if (!state.popover.activeID) return unchanged(state, true)
+    // An open popover with no active item means the result list is empty (nothing matched, or the
+    // async context lookup has not resolved yet). Enter must fall through to the caller's submit
+    // handler instead of being swallowed, otherwise the user cannot send the message at all.
+    if (!state.popover.activeID) return unchanged(state, event.key !== "Enter")
     return unchanged(state, true, [{ type: "suggestion.select", id: state.popover.activeID }])
   }
   const direction =

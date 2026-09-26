@@ -756,6 +756,55 @@ describe("tool.shell permissions", () => {
     }),
   )
 
+  it.live(
+    "asks for canonical external_directory permission for a symlinked workdir",
+    () =>
+      Effect.gen(function* () {
+        const tmp = yield* tmpdirScoped()
+        const outside = yield* tmpdirScoped()
+        yield* runIn(
+          tmp,
+          Effect.gen(function* () {
+            const link = path.join(tmp, "escape")
+            yield* Effect.promise(() => Bun.$`ln -s ${outside} ${link}`.quiet())
+            const err = new Error("stop after permission")
+            const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
+            expect(
+              yield* fail({ command: "echo ok", workdir: link }, capture(requests, err)),
+            ).toMatchObject({ message: err.message })
+            expect(requests.find((request) => request.permission === "external_directory")?.patterns).toContain(
+              glob(path.join(outside, "*")),
+            )
+          }),
+        )
+      }),
+  )
+
+  it.live(
+    "asks for canonical external_directory permission for a symlinked file argument",
+    () =>
+      Effect.gen(function* () {
+        const tmp = yield* tmpdirScoped()
+        const outside = yield* tmpdirScoped()
+        yield* Effect.promise(() => Bun.write(path.join(outside, "secret.txt"), "secret"))
+        yield* runIn(
+          tmp,
+          Effect.gen(function* () {
+            const link = path.join(tmp, "alias")
+            yield* Effect.promise(() => Bun.$`ln -s ${outside} ${link}`.quiet())
+            const err = new Error("stop after permission")
+            const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
+            expect(yield* fail({ command: `cat ${path.join(link, "secret.txt")}` }, capture(requests, err))).toMatchObject({
+              message: err.message,
+            })
+            expect(requests.find((request) => request.permission === "external_directory")?.patterns).toContain(
+              glob(path.join(outside, "*")),
+            )
+          }),
+        )
+      }),
+  )
+
   each("asks for external_directory permission when workdir is outside project", () =>
     Effect.gen(function* () {
       const tmp = yield* tmpdirScoped()

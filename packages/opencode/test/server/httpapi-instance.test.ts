@@ -135,7 +135,7 @@ describe("instance HttpApi", () => {
         )
       const [permission, questionReply, questionReject] = yield* Effect.all(
         [
-          request("/permission/invalid-permission-id/reply", {
+          request("/permission/invalid-permission-id/reply?sessionID=ses_instance", {
             method: "POST",
             body: JSON.stringify({ reply: "once" }),
           }),
@@ -172,7 +172,7 @@ describe("instance HttpApi", () => {
       const questionRejectID = QuestionID.ascending()
       const [permission, questionReply, questionReject] = yield* Effect.all(
         [
-          request(`/permission/${permissionID}/reply`, {
+          request(`/permission/${permissionID}/reply?sessionID=ses_instance`, {
             method: "POST",
             body: JSON.stringify({ reply: "once" }),
           }),
@@ -203,6 +203,31 @@ describe("instance HttpApi", () => {
         requestID: questionRejectID,
         message: `Question request not found: ${questionRejectID}`,
       })
+    }),
+  )
+
+  it.live("requires session authorization for global permission replies", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped({ git: true })
+      const request = (path: string, body?: unknown) =>
+        Effect.promise(() =>
+          HttpApiApp.webHandler().handler(
+            new Request(`http://localhost${path}`, {
+              method: "POST",
+              headers: { "x-opencode-directory": dir, "content-type": "application/json" },
+              body: body === undefined ? undefined : JSON.stringify(body),
+            }),
+            handlerContext,
+          ),
+        )
+      const permissionID = PermissionV1.ID.ascending()
+      const missingScope = yield* request(`/permission/${permissionID}/reply`, { reply: "once" })
+      const wrongScope = yield* request(`/permission/${permissionID}/reply?sessionID=ses_other`, { reply: "once" })
+      const malformedID = yield* request("/permission/not-a-permission/reply?sessionID=ses_instance", { reply: "once" })
+
+      expect(missingScope.status).toBe(400)
+      expect(wrongScope.status).toBe(404)
+      expect(malformedID.status).toBe(400)
     }),
   )
 

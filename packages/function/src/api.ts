@@ -98,14 +98,16 @@ export class SyncServer extends DurableObject<Env> {
 
   async clear() {
     const sessionID = await this.getSessionID()
-    const list = await this.env.Bucket.list({
-      prefix: `session/message/${sessionID}/`,
-      limit: 1000,
-    })
-    for (const item of list.objects) {
-      await this.env.Bucket.delete(item.key)
+    // Objects are written under `share/<key>.json` by `publish`, so the delete
+    // prefixes must carry the same `share/` prefix and the `.json` suffix -
+    // otherwise nothing is ever removed from the bucket.
+    for (const prefix of [`share/session/message/${sessionID}/`, `share/session/part/${sessionID}/`]) {
+      const list = await this.env.Bucket.list({ prefix, limit: 1000 })
+      for (const item of list.objects) {
+        await this.env.Bucket.delete(item.key)
+      }
     }
-    await this.env.Bucket.delete(`session/info/${sessionID}`)
+    await this.env.Bucket.delete(`share/session/info/${sessionID}.json`)
     await this.ctx.storage.deleteAll()
   }
 

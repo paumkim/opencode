@@ -134,6 +134,7 @@ interface CreateResult {
 interface AuthResult {
   authorizationUrl: string
   oauthState: string
+  callbackOwner?: symbol
   client?: MCPClient
 }
 
@@ -819,7 +820,7 @@ const layer = Layer.effect(
         (oauthConfig?.callbackPort ? `http://127.0.0.1:${oauthConfig.callbackPort}${OAUTH_CALLBACK_PATH}` : undefined)
 
       // Start the callback server with custom redirectUri if configured
-      yield* Effect.promise(() => McpOAuthCallback.ensureRunning(effectiveRedirectUri))
+      const owner = yield* Effect.promise(() => McpOAuthCallback.ensureRunning(effectiveRedirectUri, mcpName))
 
       const oauthState = Array.from(crypto.getRandomValues(new Uint8Array(32)))
         .map((b) => b.toString(16).padStart(2, "0"))
@@ -854,7 +855,7 @@ const layer = Layer.effect(
           const client = createClient(directory)
           return client.connect(transport).then(async () => {
             await authProvider.commit()
-            return { authorizationUrl: "", oauthState, client } satisfies AuthResult
+            return { authorizationUrl: "", oauthState, callbackOwner: owner, client } satisfies AuthResult
           })
         },
         catch: (error) => error,
@@ -862,7 +863,7 @@ const layer = Layer.effect(
         Effect.catch((error) => {
           if (error instanceof UnauthorizedError && capturedUrl) {
             pendingOAuthTransports.set(mcpName, { transport, provider: authProvider })
-            return Effect.succeed({ authorizationUrl: capturedUrl.toString(), oauthState } satisfies AuthResult)
+            return Effect.succeed({ authorizationUrl: capturedUrl.toString(), oauthState, callbackOwner: owner } satisfies AuthResult)
           }
           return Effect.die(error)
         }),
@@ -895,7 +896,7 @@ const layer = Layer.effect(
         return yield* storeClient(s, mcpName, client, listed, client.getInstructions()?.trim(), mcpConfig.timeout)
       }
 
-      const callbackPromise = McpOAuthCallback.waitForCallback(result.oauthState, mcpName)
+      const callbackPromise = McpOAuthCallback.waitForCallback(result.oauthState, mcpName, result.callbackOwner!)
       onAuthorization?.(result.authorizationUrl)
 
       yield* browser.open(result.authorizationUrl).pipe(
@@ -943,7 +944,7 @@ const layer = Layer.effect(
 
     const removeAuth = Effect.fn("MCP.removeAuth")(function* (mcpName: string) {
       yield* auth.remove(mcpName)
-      McpOAuthCallback.cancelPending(mcpName)
+      yield* Effect.promise(() => McpOAuthCallback.cancelPending(mcpName))
       pendingOAuthTransports.delete(mcpName)
     })
 

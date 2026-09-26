@@ -21,12 +21,14 @@ await Bun.build({
   outdir: "./dist/node",
   format: "esm",
   sourcemap: "linked",
-  external: ["jsonc-parser", "@lydell/node-pty"],
+  external: ["jsonc-parser", "@lydell/node-pty", "@opencode-ai/ghostty-terminal/sessions"],
   define: {
     OPENCODE_MODELS_DEV: generated.modelsData,
     OPENCODE_VERSION: `'${Script.version}'`,
     OPENCODE_INTERNAL_VERSION: JSON.stringify(internalVersion),
     OPENCODE_CHANNEL: `'${Script.channel}'`,
+    // Electron/server run on Node and must not bundle Bun FFI/PTY/native assets.
+    __GHOSTTY_TERMINAL_BUN__: "false",
   },
   files: {
     "opencode-web-ui.gen.ts": "",

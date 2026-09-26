@@ -300,17 +300,23 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
                                     <TuiConfigProvider config={input.config}>
                                       <PluginRuntimeProvider value={pluginRuntime}>
                                         {input.shared ? (
-                                          <SharedWorkspaceProvider>
-                                            <SDKProvider
+                                           <SDKProvider
+
                                               url={input.url}
                                               directory={input.directory}
                                               fetch={input.fetch}
                                               headers={input.headers}
-                                              events={createSharedWorkspaceEventSource(input.url)}
+                                               events={createSharedWorkspaceEventSource(input.url, {
+                                                 directory: input.directory,
+                                                 headers: input.headers,
+                                               })}
+
                                             >
-                                              <PermissionProvider>
-                                                <ProjectProvider>
-                                                  <SyncProvider>
+                                               <PermissionProvider>
+                                                 <ProjectProvider>
+                                                   <SharedWorkspaceProvider>
+                                                     <SyncProvider>
+
                                                     <DataProvider>
                                                       <ThemeProvider mode={mode}>
                                                         <LocalProvider>
@@ -335,11 +341,13 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
                                                         </LocalProvider>
                                                       </ThemeProvider>
                                                     </DataProvider>
-                                                  </SyncProvider>
-                                                </ProjectProvider>
-                                              </PermissionProvider>
-                                            </SDKProvider>
-                                          </SharedWorkspaceProvider>
+                                                   </SyncProvider>
+                                                 </SharedWorkspaceProvider>
+                                               </ProjectProvider>
+                                               </PermissionProvider>
+
+                                             </SDKProvider>
+
                                         ) : (
                                           <SDKProvider
                                             url={input.url}

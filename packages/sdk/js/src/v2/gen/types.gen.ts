@@ -9288,7 +9288,8 @@ export type PermissionReplyData = {
   path: {
     requestID: string
   }
-  query?: {
+  query: {
+    sessionID: string
     directory?: string
     workspace?: string
   }

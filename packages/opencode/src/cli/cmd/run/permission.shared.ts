@@ -146,6 +146,7 @@ export function permissionReply(requestID: string, reply: PermissionReply["reply
   return {
     requestID,
     reply,
+    sessionID: undefined,
     ...(message && message.trim() ? { message: message.trim() } : {}),
   }
 }

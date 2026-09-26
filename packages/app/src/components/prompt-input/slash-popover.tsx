@@ -27,6 +27,16 @@ export interface SlashCommand {
   keybind?: string
   type: "builtin" | "custom"
   source?: "command" | "mcp" | "skill"
+  /**
+   * Native server commands (/goal, /init, /review) are grouped with the builtins because the
+   * server owns them, but they still run by putting their trigger in the prompt on submit.
+   */
+  native?: boolean
+}
+
+/** Only genuinely user/plugin/skill provided commands get an origin badge. */
+export function showSlashCommandBadge(command: SlashCommand) {
+  return command.type === "custom" && command.source !== "command"
 }
 
 type PromptPopoverProps = {
@@ -332,7 +342,7 @@ export const PromptPopover: Component<PromptPopoverProps> = (props) => {
                         </Show>
                       </div>
                       <div class="flex items-center gap-2 shrink-0">
-                        <Show when={cmd.type === "custom" && cmd.source !== "command"}>
+                        <Show when={showSlashCommandBadge(cmd)}>
                           <Show
                             when={props.newLayoutDesigns}
                             fallback={

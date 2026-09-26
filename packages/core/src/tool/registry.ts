@@ -72,7 +72,15 @@ const registryLayer = Layer.effect(
       )
       if ("result" in pending) return pending
       const output = pending.output
-      const bounded = yield* resources.bound({ sessionID: input.sessionID, toolCallID: input.call.id, output })
+      const bounded = yield* resources
+        .bound({ sessionID: input.sessionID, toolCallID: input.call.id, output })
+        .pipe(
+          Effect.catch(() =>
+            Effect.logWarning("Tool output retention unavailable; returning the validated tool result").pipe(
+              Effect.as({ output, outputPaths: [] as ReadonlyArray<string> }),
+            ),
+          ),
+        )
       const result = ToolOutput.toResultValue(bounded.output)
       if (result.type === "error")
         return bounded.outputPaths.length > 0 ? { result, outputPaths: bounded.outputPaths } : { result }

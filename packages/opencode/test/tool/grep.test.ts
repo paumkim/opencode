@@ -170,7 +170,7 @@ describe("tool.grep", () => {
     }),
   )
 
-  it.instance("does not ask for external_directory when alias path is allowed", () =>
+  it.instance("asks for canonical external_directory when only the symlink alias is allowed", () =>
     Effect.gen(function* () {
       if (process.platform === "win32") return
 
@@ -189,6 +189,59 @@ describe("tool.grep", () => {
         grep: "allow",
         external_directory: {
           [path.join(alias, "*")]: "allow",
+        },
+      })
+      const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
+      const next: Tool.Context = {
+        ...ctx,
+        ask: (req) =>
+          Effect.sync(() => {
+            const needsAsk = req.patterns.some(
+              (pattern) => Permission.evaluate(req.permission, pattern, ruleset).action !== "allow",
+            )
+            if (needsAsk) requests.push(req)
+          }),
+      }
+
+      const info = yield* GrepTool
+      const grep = yield* info.init()
+      const result = yield* grep.execute(
+        {
+          pattern: "needle",
+          path: alias,
+          include: "*.txt",
+        },
+        next,
+      )
+
+      expect(result.metadata.matches).toBe(1)
+      expect(result.output).toContain(path.join(alias, "test.txt"))
+      expect(result.output).not.toContain(path.join(real, "test.txt"))
+      const request = requests.find((req) => req.permission === "external_directory")
+      expect(request).toBeDefined()
+      expect(request?.always).toEqual([path.join(real, "*")])
+    }),
+  )
+
+  it.instance("does not ask for external_directory when the canonical target is allowed", () =>
+    Effect.gen(function* () {
+      if (process.platform === "win32") return
+
+      yield* TestInstance
+      const tmp = yield* Effect.acquireRelease(
+        Effect.promise(() => fs.mkdtemp(path.join(os.tmpdir(), "opencode-grep-alias-"))),
+        (dir) => Effect.promise(() => fs.rm(dir, { recursive: true, force: true })),
+      )
+      const real = path.join(tmp, "real")
+      const alias = path.join(tmp, "alias")
+      yield* Effect.promise(() => fs.mkdir(real))
+      yield* Effect.promise(() => fs.symlink(real, alias, "dir"))
+      yield* Effect.promise(() => Bun.write(path.join(real, "test.txt"), "needle"))
+
+      const ruleset = Permission.fromConfig({
+        grep: "allow",
+        external_directory: {
+          [path.join(real, "*")]: "allow",
         },
       })
       const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []

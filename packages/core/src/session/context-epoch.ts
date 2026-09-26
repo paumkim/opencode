@@ -1,7 +1,7 @@
 export * as SessionContextEpoch from "./context-epoch"
 
 import { eq } from "drizzle-orm"
-import { DateTime, Effect, Schema } from "effect"
+import { Cause, DateTime, Effect, Schema } from "effect"
 import type { Database } from "../database/database"
 import { EventV2 } from "../event"
 import { SystemContext } from "../system-context/index"
@@ -116,7 +116,12 @@ export const reset = Effect.fn("SessionContextEpoch.reset")(function* (
     .delete(SessionContextEpochTable)
     .where(eq(SessionContextEpochTable.session_id, sessionID))
     .run()
-    .pipe(Effect.orDie)
+    .pipe(
+      Effect.catchCause((cause) => {
+        if (Cause.pretty(cause).includes("no such table: session_context_epoch")) return Effect.void
+        return Effect.die(cause)
+      }),
+    )
 })
 
 const insert = Effect.fnUntraced(function* (

@@ -5,6 +5,7 @@ import * as Tool from "./tool"
 import path from "path"
 import { containsPath, type InstanceContext } from "../project/instance-context"
 import { InstanceState } from "@/effect/instance-state"
+import { assertExternalDirectoryEffect, canonicalDirectoryEffect, containsCanonicalPathEffect } from "./external-directory"
 import { lazy } from "@/util/lazy"
 import { Language, type Node } from "web-tree-sitter"
 
@@ -398,9 +399,10 @@ export const ShellTool = Tool.define(
           for (const arg of pathArgs(command, ps, shellKind === "cmd")) {
             const resolved = yield* argPath(arg, cwd, ps, shell)
             yield* Effect.logInfo("resolved path", { arg, resolved })
-            if (!resolved || containsPath(resolved, instance)) continue
-            const dir = (yield* fs.isDir(resolved)) ? resolved : path.dirname(resolved)
-            scan.dirs.add(dir)
+            if (!resolved || (containsPath(resolved, instance) && (yield* containsCanonicalPathEffect(resolved, instance))))
+              continue
+            const kind = (yield* fs.isDir(resolved)) ? "directory" : "file"
+            scan.dirs.add((yield* canonicalDirectoryEffect(resolved, kind)) ?? path.dirname(resolved))
           }
         }
 
@@ -617,13 +619,28 @@ export const ShellTool = Tool.define(
               }
               const timeout = params.timeout ?? defaultTimeoutMs
               const ps = Shell.ps(shell)
-              yield* Effect.scoped(
+              const approved = yield* Effect.scoped(
                 Effect.gen(function* () {
+                  yield* assertExternalDirectoryEffect(ctx, cwd, { kind: "directory" })
                   const tree = yield* Effect.acquireRelease(parse(params.command, ps), (tree) =>
                     Effect.sync(() => tree.delete()),
                   )
                   const scan = yield* collect(tree.rootNode, cwd, ps, shell, instanceCtx)
-                  if (!containsPath(cwd, instanceCtx)) scan.dirs.add(cwd)
+                  yield* ask(ctx, scan, params)
+                  return scan.dirs
+                }),
+              )
+
+              // Re-scan immediately before spawning so a symlink retarget after
+              // the initial permission check cannot silently reuse the old grant.
+              yield* Effect.scoped(
+                Effect.gen(function* () {
+                  yield* assertExternalDirectoryEffect(ctx, cwd, { kind: "directory" })
+                  const tree = yield* Effect.acquireRelease(parse(params.command, ps), (tree) =>
+                    Effect.sync(() => tree.delete()),
+                  )
+                  const scan = yield* collect(tree.rootNode, cwd, ps, shell, instanceCtx)
+                  if (approved.size === scan.dirs.size && Array.from(approved).every((dir) => scan.dirs.has(dir))) return
                   yield* ask(ctx, scan, params)
                 }),
               )

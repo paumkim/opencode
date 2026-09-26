@@ -5,9 +5,11 @@ import path from "path"
 import { eq } from "drizzle-orm"
 import { Effect } from "effect"
 import { MoveSession } from "@opencode-ai/core/control-plane/move-session"
+import { Git } from "@opencode-ai/core/git"
 import { Database } from "@opencode-ai/core/database/database"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import { makeGlobalNode } from "@opencode-ai/core/effect/app-node"
 import { EventV2 } from "@opencode-ai/core/event"
 import { Project } from "@opencode-ai/core/project"
 import { ProjectTable } from "@opencode-ai/core/project/sql"
@@ -48,6 +50,72 @@ async function initRepo(directory: string) {
   await fs.writeFile(path.join(directory, "tracked.txt"), "initial\n")
   await $`git add tracked.txt`.cwd(directory).quiet()
   await $`git commit -m root`.cwd(directory).quiet()
+}
+
+let injectedFailure: "cleanup" | "publish" | undefined
+const faultIt = testEffect(
+  AppNodeBuilder.build(
+    LayerNode.group([
+      MoveSession.node,
+      Database.node,
+      EventV2.node,
+      ProjectDirectories.node,
+      Project.node,
+      SessionProjector.node,
+      SessionStore.node,
+    ]),
+    [
+      [
+        MoveSession.node,
+        makeGlobalNode({
+          service: MoveSession.Service,
+          layer: MoveSession.layerWith({
+            afterDiscard: () =>
+              Effect.sync(() => {
+                if (injectedFailure !== "cleanup") return
+                injectedFailure = undefined
+                throw new Error("injected cleanup failure")
+              }),
+            beforePublish: () =>
+              Effect.sync(() => {
+                if (injectedFailure !== "publish") return
+                injectedFailure = undefined
+                throw new Error("injected publish failure")
+              }),
+          }),
+          deps: [Git.node, EventV2.node, Project.node, SessionStore.node],
+        }),
+      ],
+    ],
+  ),
+)
+
+function insertSession(source: ReturnType<typeof abs>, sessionID: SessionV2.ID) {
+  return Effect.gen(function* () {
+    const projectID = (yield* Project.Service.use((service) => service.resolve(source))).id
+    const { db } = yield* Database.Service
+    yield* db
+      .insert(ProjectTable)
+      .values({ id: projectID, worktree: source, sandboxes: [], time_created: 1, time_updated: 1 })
+      .onConflictDoNothing()
+      .run()
+      .pipe(Effect.orDie)
+    yield* db
+      .insert(SessionTable)
+      .values({
+        id: sessionID,
+        project_id: projectID,
+        slug: sessionID,
+        directory: source,
+        title: sessionID,
+        version: "test",
+        time_created: 1,
+        time_updated: 1,
+      })
+      .run()
+      .pipe(Effect.orDie)
+    return { db, projectID }
+  })
 }
 
 describe("MoveSession", () => {
@@ -106,6 +174,57 @@ describe("MoveSession", () => {
           .where(eq(SessionTable.id, sessionID))
           .get(),
       ).toEqual({ directory: moved, path: "" })
+    }),
+  )
+
+  faultIt.live("retries idempotently after source cleanup and event publication failures", () =>
+    Effect.gen(function* () {
+      for (const failure of ["cleanup", "publish"] as const) {
+        const root = yield* Effect.acquireRelease(
+          Effect.promise(() => tmpdir()),
+          (dir) => Effect.promise(() => dir[Symbol.asyncDispose]()),
+        )
+        yield* Effect.promise(() => initRepo(root.path))
+        const source = abs(yield* Effect.promise(() => fs.realpath(root.path)))
+        const destination = abs(`${root.path}-${failure}-destination`)
+        yield* Effect.addFinalizer(() =>
+          Effect.promise(() => fs.rm(destination, { recursive: true, force: true })).pipe(Effect.ignore),
+        )
+        yield* Effect.promise(() => $`git worktree add --detach ${destination} HEAD`.cwd(root.path).quiet())
+        const moved = abs(yield* Effect.promise(() => fs.realpath(destination)))
+        yield* Effect.promise(() => fs.writeFile(path.join(source, "tracked.txt"), `${failure}\n`))
+        yield* Effect.promise(() => fs.writeFile(path.join(source, "untracked.txt"), `${failure}\n`))
+        const sessionID = SessionV2.ID.make(`ses_move_${failure}`)
+        const { db } = yield* insertSession(source, sessionID)
+
+        injectedFailure = failure
+        const first = yield* MoveSession.Service.use((service) =>
+          service.moveSession({ sessionID, destination: { directory: moved }, moveChanges: true }),
+        ).pipe(Effect.exit)
+        expect(first._tag).toBe("Failure")
+        expect(
+          yield* db
+            .select({ directory: SessionTable.directory })
+            .from(SessionTable)
+            .where(eq(SessionTable.id, sessionID))
+            .get(),
+        ).toEqual({ directory: source })
+
+        yield* MoveSession.Service.use((service) =>
+          service.moveSession({ sessionID, destination: { directory: moved }, moveChanges: true }),
+        )
+        expect(yield* Effect.promise(() => fs.readFile(path.join(moved, "tracked.txt"), "utf8"))).toBe(`${failure}\n`)
+        expect(yield* Effect.promise(() => fs.readFile(path.join(moved, "untracked.txt"), "utf8"))).toBe(`${failure}\n`)
+        expect(yield* Effect.promise(() => fs.readFile(path.join(source, "tracked.txt"), "utf8"))).toBe("initial\n")
+        expect(yield* Effect.promise(() => Bun.file(path.join(source, "untracked.txt")).exists())).toBe(false)
+        expect(
+          yield* db
+            .select({ directory: SessionTable.directory })
+            .from(SessionTable)
+            .where(eq(SessionTable.id, sessionID))
+            .get(),
+        ).toEqual({ directory: moved })
+      }
     }),
   )
 
