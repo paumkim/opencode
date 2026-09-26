@@ -155,5 +155,5 @@ export function compactionContext(goal: GoalSnapshot) {
 
 ${formatGoal(goal)}
 
-Preserve the goal objective, status, elapsed time, budget usage, latest checkpoint, and any completion evidence or blocker in the compacted context. After compaction, continue from the next concrete unfinished step only if the goal remains active. Before closing the goal, audit real artifacts and command outputs; close with update_goal status "complete" only with evidence, or status "unmet" only with a concrete blocker.`
+Preserve the goal objective, status, elapsed time, budget usage, the completed work already recorded, latest checkpoint, and any completion evidence or blocker in the compacted context. The completed list is the goal's only durable record of what it has already finished, so carry it forward verbatim - a goal that loses it re-derives its own history from the repo and redoes the work. After compaction, continue from the next concrete unfinished step only if the goal remains active. Before closing the goal, audit real artifacts and command outputs; close with update_goal status "complete" only with evidence, or status "unmet" only with a concrete blocker.`
 }
