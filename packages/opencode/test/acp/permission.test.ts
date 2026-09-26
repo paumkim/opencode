@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test"
+import { afterEach, describe, expect, it } from "bun:test"
 import type {
   AgentSideConnection,
   RequestPermissionRequest,
@@ -19,18 +19,6 @@ type PermissionEvent = Extract<Event, { type: "permission.asked" }>
 type PermissionReplyParams = Parameters<OpencodeClient["permission"]["reply"]>[0]
 type SessionUpdateParams = Parameters<AgentSideConnection["sessionUpdate"]>[0]
 const cleanupDirs: string[] = []
-
-// Inherited OPENCODE_UNRESTRICTED=1 (common in a developer's shell profile) bypasses every
-// permission check, so these tests stop exercising the request/reply flow they exist to cover.
-// Pin it off for the file and restore the caller's value afterwards.
-const priorUnrestricted = process.env.OPENCODE_UNRESTRICTED
-beforeAll(() => {
-  delete process.env.OPENCODE_UNRESTRICTED
-})
-afterAll(() => {
-  if (priorUnrestricted === undefined) delete process.env.OPENCODE_UNRESTRICTED
-  else process.env.OPENCODE_UNRESTRICTED = priorUnrestricted
-})
 
 afterEach(async () => {
   await Promise.all(cleanupDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })))

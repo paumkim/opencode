@@ -82,6 +82,11 @@ delete process.env["OPENCODE_ENABLE_EXPERIMENTAL_MODELS"]
 delete process.env["OTEL_EXPORTER_OTLP_ENDPOINT"]
 delete process.env["OTEL_EXPORTER_OTLP_HEADERS"]
 delete process.env["OTEL_RESOURCE_ATTRIBUTES"]
+// `unrestricted()` reads this at call time, and it is commonly exported in a developer's shell
+// profile. Inherited, it bypasses every permission check, so deny/ask/reject tests silently stop
+// testing permissions and fail on unrelated timeouts. The suite must not depend on how a
+// developer's shell happens to be configured.
+delete process.env["OPENCODE_UNRESTRICTED"]
 
 // Use in-memory sqlite
 process.env["OPENCODE_DB"] = ":memory:"
