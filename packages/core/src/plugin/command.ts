@@ -1,10 +1,9 @@
 export * as CommandPlugin from "./command"
-export { default as GOAL_PROMPT } from "./command/goal.txt"
 
 import { define } from "./internal"
 import { Effect } from "effect"
 import { Location } from "../location"
-import PROMPT_GOAL from "./command/goal.txt"
+import { GOAL_PROMPT as PROMPT_GOAL } from "../prompt/command"
 import PROMPT_INITIALIZE from "./command/initialize.txt"
 import PROMPT_REVIEW from "./command/review.txt"
 

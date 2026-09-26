@@ -1,108 +1,31 @@
-import type { Plugin } from "@opencode-ai/plugin"
-import { z } from "zod"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import type { Hooks } from "@opencode-ai/plugin"
+import { Effect, Layer, Context } from "effect"
 import {
   accountUsage,
-  clearGoal,
-  completeGoal,
-  createGoal,
-  estimateTokensFromText,
-  extendGoal,
-  formatGoalHistory,
   getGoal,
-  markGoalUnmet,
   pauseGoalForPlanMode,
   recordAssistantProgress,
   recordContinuationResult,
   recordPromptAgent,
   reserveContinuation,
-  setGoalStatus,
-  updateGoalObjective,
 } from "@/goal/impl"
 import { compactionContext, continuationPrompt, limitPrompt, systemReminder } from "@/goal/prompts"
-
-type Options = {
-  auto_continue?: boolean
-  defer_while_tasks_active?: boolean
-  max_auto_turns?: number
-  min_continue_interval_seconds?: number
-  max_turn_time?: number
-  max_prompt_failures?: number
-  default_token_budget?: number
-  max_goal_duration_seconds?: number
-  no_progress_token_threshold?: number
-  max_no_progress_turns?: number
-  restricted_agents?: string[]
-  allow_goal_execution_from_plan?: boolean
-}
-
-type CreateGoalArgs = {
-  objective: string
-  token_budget?: number | null
-  max_auto_turns?: number | null
-  max_duration_seconds?: number | null
-  no_progress_token_threshold?: number | null
-  max_no_progress_turns?: number | null
-  max_prompt_failures?: number | null
-}
-
-type ExtendGoalArgs = {
-  token_budget?: number | null
-  max_auto_turns?: number | null
-  max_duration_seconds?: number | null
-}
-
-type UpdateGoalArgs =
-  | {
-      status: "complete"
-      evidence?: string
-      blocker?: string
-    }
-  | {
-      status: "unmet"
-      evidence?: string
-      blocker?: string
-    }
-
-// 0 means unbounded: goals are never capped at a default number of auto-continues.
-// An explicit positive `max_auto_turns` plugin option still wins (see positiveIntegerOrNull below).
-const DEFAULT_MAX_AUTO_TURNS = 0
-const DEFAULT_CONTINUE_INTERVAL_SECONDS = 3
-const DEFAULT_MAX_PROMPT_FAILURES = 3
-const DEFAULT_RESTRICTED_AGENTS = ["plan"]
-const GOAL_SYSTEM_MARKER = "OpenCode goal mode"
-const TASK_SETTLE_DELAY_MS = 25
-const SNAPSHOT_IDLE_HOLD_MS = 250
-const MAX_TIMER_DELAY_MS = 2_147_483_647
-const TASK_TERMINAL_STATES = new Set<TaskState>(["completed", "error", "cancelled"])
-const PLAN_MODE_CREATE_NOTICE =
-  'Goal recorded while the session is in Plan mode, so execution is paused. Do not start implementation work now. Ask the user to switch to Build mode and resume the goal (for example with "/goal resume") to begin execution.'
-// Module-scoped so a session cannot be double-continued across plugin instances, but bounded:
-// a continuation that never settles (a hung HTTP call — the SDK disables request timeouts) would
-// otherwise hold its sessionID forever and silently kill goal mode for that session.
-const CONTINUATION_CLAIM_TTL_MS = 120_000
-const activeContinuations = new Map<string, number>()
-
-function claimContinuation(sessionID: string) {
-  const now = Date.now()
-  for (const [id, claimedAt] of activeContinuations) {
-    if (now - claimedAt > CONTINUATION_CLAIM_TTL_MS) activeContinuations.delete(id)
-  }
-  if (activeContinuations.has(sessionID)) return false
-  activeContinuations.set(sessionID, now)
-  return true
-}
-
-function releaseContinuation(sessionID: string) {
-  activeContinuations.delete(sessionID)
-}
-
-/** Exposed for tests: backdate every claim past the TTL to simulate an aged-out hung call. */
-export function staleAllContinuationClaims() {
-  const stale = Date.now() - CONTINUATION_CLAIM_TTL_MS - 1_000
-  for (const [id, claimedAt] of activeContinuations) {
-    activeContinuations.set(id, Math.min(claimedAt, stale))
-  }
-}
+import { Config } from "@/config/config"
+import { EventV2Bridge } from "@/event-v2-bridge"
+import { InstanceState } from "@/effect/instance-state"
+import {
+  goalClient,
+  isRecord,
+  positiveIntegerOrNull,
+  readGoalOptions,
+  restrictedAgentSet,
+  textFromMessage,
+  textFromPart,
+  tokensFromMessages,
+  type Client,
+  type Options,
+} from "@/goal/shared"
 
 type TaskState = "running" | "completed" | "error" | "cancelled"
 
@@ -135,23 +58,38 @@ type TurnWatchdog = {
   timer: ReturnType<typeof setTimeout>
 }
 
-function restrictedAgentSet(options?: Options) {
-  if (options?.allow_goal_execution_from_plan === true) return new Set<string>()
-  const names = Array.isArray(options?.restricted_agents) ? options.restricted_agents : DEFAULT_RESTRICTED_AGENTS
-  return new Set(names.map((name) => (typeof name === "string" ? name.trim().toLowerCase() : "")).filter(Boolean))
+const DEFAULT_CONTINUE_INTERVAL_SECONDS = 3
+const DEFAULT_MAX_PROMPT_FAILURES = 3
+const GOAL_SYSTEM_MARKER = "OpenCode goal mode"
+const TASK_SETTLE_DELAY_MS = 25
+const SNAPSHOT_IDLE_HOLD_MS = 250
+const MAX_TIMER_DELAY_MS = 2_147_483_647
+const TASK_TERMINAL_STATES = new Set<TaskState>(["completed", "error", "cancelled"])
+// Module-scoped so a session cannot be double-continued across instances, but bounded:
+// a continuation that never settles (a hung HTTP call — the SDK disables request timeouts) would
+// otherwise hold its sessionID forever and silently kill goal mode for that session.
+const CONTINUATION_CLAIM_TTL_MS = 120_000
+const activeContinuations = new Map<string, number>()
+
+function claimContinuation(sessionID: string) {
+  const now = Date.now()
+  for (const [id, claimedAt] of activeContinuations) {
+    if (now - claimedAt > CONTINUATION_CLAIM_TTL_MS) activeContinuations.delete(id)
+  }
+  if (activeContinuations.has(sessionID)) return false
+  activeContinuations.set(sessionID, now)
+  return true
 }
 
-function positiveIntegerOrNull(value: unknown) {
-  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null
+function releaseContinuation(sessionID: string) {
+  activeContinuations.delete(sessionID)
 }
 
-export function resolveCreateGoalLimits(input: CreateGoalArgs, options?: Options) {
-  return {
-    tokenBudget: Object.hasOwn(input, "token_budget") ? input.token_budget ?? null : options?.default_token_budget ?? null,
-    maxAutoTurns: Object.hasOwn(input, "max_auto_turns") ? input.max_auto_turns ?? null : null,
-    maxDurationSeconds: Object.hasOwn(input, "max_duration_seconds")
-      ? input.max_duration_seconds ?? null
-      : options?.max_goal_duration_seconds ?? null,
+/** Exposed for tests: backdate every claim past the TTL to simulate an aged-out hung call. */
+export function staleAllContinuationClaims() {
+  const stale = Date.now() - CONTINUATION_CLAIM_TTL_MS - 1_000
+  for (const [id, claimedAt] of activeContinuations) {
+    activeContinuations.set(id, Math.min(claimedAt, stale))
   }
 }
 
@@ -160,60 +98,16 @@ function timeoutMillisecondsFromSeconds(value: unknown) {
   return Math.min(Math.ceil(value * 1000), MAX_TIMER_DELAY_MS)
 }
 
-function textFromPart(part: unknown): string {
-  if (!part || typeof part !== "object") return ""
-  const value = part as Record<string, unknown>
-  if (value.type === "text" && typeof value.text === "string") return value.text
-  if (typeof value.content === "string") return value.content
-  return ""
-}
-
-function textFromMessage(message: { parts?: unknown[] }) {
-  return (message.parts ?? []).map(textFromPart).filter(Boolean).join("\n").trim()
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null
-}
-
 function sessionIDFromMessage(message: { info?: unknown; sessionID?: unknown }) {
   if (typeof message.sessionID === "string") return message.sessionID
   if (isRecord(message.info) && typeof message.info.sessionID === "string") return message.info.sessionID
   return undefined
 }
 
-function estimateMessages(messages: { parts?: unknown[] }[]) {
-  return messages.reduce<number>((sum, message) => sum + estimateTokensFromText(textFromMessage(message)), 0)
-}
-
-function tokensFromRecord(value: unknown): number | undefined {
-  if (!value || typeof value !== "object") return undefined
-  const tokens = value as Record<string, unknown>
-  if (typeof tokens.total === "number") return tokens.total
-  const cache = tokens.cache && typeof tokens.cache === "object" ? (tokens.cache as Record<string, unknown>) : {}
-  const fields = [tokens.input, tokens.output, tokens.reasoning, cache.read, cache.write]
-  if (!fields.some((field) => typeof field === "number")) return undefined
-  return fields.reduce<number>((sum, field) => sum + (typeof field === "number" && Number.isFinite(field) ? field : 0), 0)
-}
-
 function outputTokensFromRecord(value: unknown): number | undefined {
   if (!value || typeof value !== "object") return undefined
   const output = (value as Record<string, unknown>).output
   return typeof output === "number" && Number.isFinite(output) ? output : undefined
-}
-
-function exactTokensFromPart(part: unknown): number | undefined {
-  if (!part || typeof part !== "object") return undefined
-  const value = part as Record<string, unknown>
-  if (value.type !== "step-finish") return undefined
-  return tokensFromRecord(value.tokens)
-}
-
-function exactTokensFromMessage(message: { info?: unknown; parts?: unknown[] }) {
-  const partTotal = (message.parts ?? []).reduce<number>((sum, part) => sum + (exactTokensFromPart(part) ?? 0), 0)
-  if (partTotal > 0) return partTotal
-  if (message.info && typeof message.info === "object") return tokensFromRecord((message.info as Record<string, unknown>).tokens)
-  return undefined
 }
 
 function outputTokensFromMessage(message: { info?: unknown; parts?: unknown[] }) {
@@ -225,13 +119,9 @@ function outputTokensFromMessage(message: { info?: unknown; parts?: unknown[] })
     }
   }
   if (total != null) return total
-  if (message.info && typeof message.info === "object") return outputTokensFromRecord((message.info as Record<string, unknown>).tokens)
+  if (message.info && typeof message.info === "object")
+    return outputTokensFromRecord((message.info as Record<string, unknown>).tokens)
   return undefined
-}
-
-function tokensFromMessages(messages: { info?: unknown; parts?: unknown[] }[]) {
-  const exactTotal = messages.reduce<number>((sum, message) => sum + (exactTokensFromMessage(message) ?? 0), 0)
-  return exactTotal > 0 ? exactTotal : estimateMessages(messages)
 }
 
 function taskHeader(output: string) {
@@ -267,13 +157,21 @@ function parseTaskStatus(output: unknown): TaskStatus | undefined {
 }
 
 function messageCompletedAt(message: { info?: unknown; time?: unknown }) {
-  const time =
-    isRecord(message.time) ? message.time : isRecord(message.info) && isRecord(message.info.time) ? message.info.time : undefined
+  const time = isRecord(message.time)
+    ? message.time
+    : isRecord(message.info) && isRecord(message.info.time)
+      ? message.info.time
+      : undefined
   const completed = time?.completed
   return typeof completed === "number" && Number.isFinite(completed) ? completed : null
 }
 
-function assistantMarker(message: { info?: unknown; role?: unknown; id?: unknown; time?: unknown }): AssistantMarker | undefined {
+function assistantMarker(message: {
+  info?: unknown
+  role?: unknown
+  id?: unknown
+  time?: unknown
+}): AssistantMarker | undefined {
   if (messageRole(message) !== "assistant") return undefined
   return {
     id: messageID(message) ?? null,
@@ -294,7 +192,7 @@ function agentFromMessage(message: { info?: unknown } | undefined) {
 }
 
 async function resolveContinuationModel(
-  client: Parameters<Plugin>[0]["client"],
+  client: Client,
   sessionID: string,
 ): Promise<{ providerID: string; modelID: string; variant?: string } | undefined> {
   // Inherit the parent session's current model so continuations don't fall back
@@ -348,7 +246,7 @@ async function resolveContinuationModel(
   return undefined
 }
 
-async function sendContinuation(client: Parameters<Plugin>[0]["client"], sessionID: string, prompt: string, agent?: string | null) {
+async function sendContinuation(client: Client, sessionID: string, prompt: string, agent?: string | null) {
   let model: { providerID: string; modelID: string } | undefined
   let variant: string | undefined
   try {
@@ -391,7 +289,12 @@ function errorDetail(value: unknown) {
 function isIdleEvent(event: { type?: string; properties?: Record<string, unknown> }) {
   if (event.type === "session.idle") return true
   const status = event.properties?.status
-  return event.type === "session.status" && typeof status === "object" && status !== null && (status as { type?: unknown }).type === "idle"
+  return (
+    event.type === "session.status" &&
+    typeof status === "object" &&
+    status !== null &&
+    (status as { type?: unknown }).type === "idle"
+  )
 }
 
 function sessionIDFromEvent(event: { type?: string; properties?: Record<string, unknown> }) {
@@ -399,7 +302,8 @@ function sessionIDFromEvent(event: { type?: string; properties?: Record<string, 
   if (typeof direct === "string") return direct
   const info = event.properties?.info
   if (typeof info === "object" && info !== null) {
-    if (typeof (info as { sessionID?: unknown }).sessionID === "string") return (info as { sessionID: string }).sessionID
+    if (typeof (info as { sessionID?: unknown }).sessionID === "string")
+      return (info as { sessionID: string }).sessionID
     if (event.type === "session.deleted" && typeof (info as { id?: unknown }).id === "string") {
       return (info as { id: string }).id
     }
@@ -417,7 +321,11 @@ function messageID(message: { info?: unknown; id?: unknown }) {
 
 function messageRole(message: { info?: unknown; role?: unknown }) {
   if (typeof message.role === "string") return message.role
-  if (message.info && typeof message.info === "object" && typeof (message.info as { role?: unknown }).role === "string") {
+  if (
+    message.info &&
+    typeof message.info === "object" &&
+    typeof (message.info as { role?: unknown }).role === "string"
+  ) {
     return (message.info as { role: string }).role
   }
   return undefined
@@ -427,16 +335,10 @@ function latestAssistantMessage(messages: { info?: unknown; role?: unknown; id?:
   return [...messages].reverse().find((message) => messageRole(message) === "assistant")
 }
 
-async function fetchLatestAssistant(client: Parameters<Plugin>[0]["client"], sessionID: string) {
+async function fetchLatestAssistant(client: Client, sessionID: string) {
   const result = await client.session.messages({ path: { id: sessionID }, query: { limit: 20 } })
   const data = Array.isArray(result.data) ? result.data : []
   return latestAssistantMessage(data as { info?: unknown; role?: unknown; id?: unknown; parts?: unknown[] }[])
-}
-
-async function fetchSessionTokens(client: Parameters<Plugin>[0]["client"], sessionID: string) {
-  const result = await client.session.messages({ path: { id: sessionID } })
-  const data = Array.isArray(result.data) ? result.data : []
-  return tokensFromMessages(data as { info?: unknown; parts?: unknown[] }[])
 }
 
 class TaskTracker {
@@ -452,10 +354,13 @@ class TaskTracker {
     if (typeof input.callID === "string") this.pendingTaskCalls.set(input.callID, input.sessionID)
   }
 
-  noteTaskOutput(input: { tool?: unknown; sessionID?: unknown; callID?: unknown }, output: { output?: unknown } | undefined) {
+  noteTaskOutput(
+    input: { tool?: unknown; sessionID?: unknown; callID?: unknown },
+    output: { output?: unknown } | undefined,
+  ) {
     if (typeof input.tool !== "string" || input.tool.toLowerCase() !== "task") return
     const parentSessionID =
-      typeof input.callID === "string" ? this.pendingTaskCalls.get(input.callID) ?? input.sessionID : input.sessionID
+      typeof input.callID === "string" ? (this.pendingTaskCalls.get(input.callID) ?? input.sessionID) : input.sessionID
     if (typeof input.callID === "string") this.pendingTaskCalls.delete(input.callID)
     if (typeof parentSessionID !== "string") return
     const status = output?.output === undefined ? undefined : parseTaskStatus(output.output)
@@ -540,7 +445,7 @@ class TaskTracker {
     return next
   }
 
-  async refreshLiveChildren(client: Parameters<Plugin>[0]["client"], parentSessionID: string) {
+  async refreshLiveChildren(client: Client, parentSessionID: string) {
     let childIDs: string[]
     try {
       const result = await client.session.children({ path: { id: parentSessionID } })
@@ -655,7 +560,8 @@ class TaskTracker {
 
   private markAbsentRunningChildren(parentSessionID: string, liveChildIDs: Set<string>) {
     for (const task of this.tasks.values()) {
-      if (task.parentSessionID !== parentSessionID || task.state !== "running" || liveChildIDs.has(task.taskID)) continue
+      if (task.parentSessionID !== parentSessionID || task.state !== "running" || liveChildIDs.has(task.taskID))
+        continue
       this.markSnapshotIdle(parentSessionID, task.taskID)
     }
   }
@@ -675,7 +581,8 @@ class TaskTracker {
   }
 
   private assistantReconcilesTask(task: TaskRecord, marker: AssistantMarker) {
-    if (marker.id && task.lastAssistantMessageIDAtTerminal && marker.id !== task.lastAssistantMessageIDAtTerminal) return true
+    if (marker.id && task.lastAssistantMessageIDAtTerminal && marker.id !== task.lastAssistantMessageIDAtTerminal)
+      return true
     if (marker.completedAt != null && task.terminalAt != null && marker.completedAt >= task.terminalAt) return true
     return false
   }
@@ -742,13 +649,26 @@ function isCompactionTransform(messages: unknown[]) {
   })
 }
 
-const server: Plugin = async ({ client }, options?: Options) => {
-  const autoContinue = options?.auto_continue ?? true
-  const deferWhileTasksActive = options?.defer_while_tasks_active ?? true
-  const maxAutoTurns = positiveIntegerOrNull(options?.max_auto_turns) ?? DEFAULT_MAX_AUTO_TURNS
-  const minInterval = positiveIntegerOrNull(options?.min_continue_interval_seconds) ?? DEFAULT_CONTINUE_INTERVAL_SECONDS
-  const maxTurnTimeMs = timeoutMillisecondsFromSeconds(options?.max_turn_time)
-  const maxPromptFailures = positiveIntegerOrNull(options?.max_prompt_failures) ?? DEFAULT_MAX_PROMPT_FAILURES
+export interface Runtime {
+  readonly hooks: Hooks
+  readonly handleEvent: (event: unknown) => Promise<void>
+  readonly dispose: () => Promise<void>
+}
+
+/**
+ * The per-instance goal driver. It owns the task tracker, the continuation/timer state and the
+ * session client, and it exposes the chat/tool hooks the goal feature participates in. The tools
+ * themselves live in `@/goal/tools` and are registered as core tools.
+ */
+export function createGoalRuntime(input: { client: Client; options?: Options }): Runtime {
+  const { client } = input
+  const options = input.options ?? {}
+  const autoContinue = options.auto_continue ?? true
+  const deferWhileTasksActive = options.defer_while_tasks_active ?? true
+  const maxAutoTurns = positiveIntegerOrNull(options.max_auto_turns) ?? 0
+  const minInterval = positiveIntegerOrNull(options.min_continue_interval_seconds) ?? DEFAULT_CONTINUE_INTERVAL_SECONDS
+  const maxTurnTimeMs = timeoutMillisecondsFromSeconds(options.max_turn_time)
+  const maxPromptFailures = positiveIntegerOrNull(options.max_prompt_failures) ?? DEFAULT_MAX_PROMPT_FAILURES
   const taskTracker = new TaskTracker()
   const taskDeferredSessions = new Set<string>()
   const scheduledContinuations = new Map<string, ReturnType<typeof setTimeout>>()
@@ -756,24 +676,6 @@ const server: Plugin = async ({ client }, options?: Options) => {
   const busySessions = new Set<string>()
   const planAgents = restrictedAgentSet(options)
   const isPlanAgent = (agent: unknown) => typeof agent === "string" && planAgents.has(agent.trim().toLowerCase())
-
-  async function createGoalFromTool(input: CreateGoalArgs, context: { sessionID: string; agent?: string }) {
-    const planningOnly = isPlanAgent(context.agent)
-    const sessionTokensAtCreation = await fetchSessionTokens(client, context.sessionID).catch(() => null)
-    const goal = await createGoal(context.sessionID, input.objective, {
-      ...resolveCreateGoalLimits(input, options),
-      // A per-call value wins over the plugin default. The defaults are tuned for interactive
-      // use and self-pause an unattended run quickly, so a caller that asks for a tolerant goal
-      // must not be silently downgraded to them.
-      noProgressTokenThreshold: input.no_progress_token_threshold ?? options?.no_progress_token_threshold ?? null,
-      maxNoProgressTurns: input.max_no_progress_turns ?? options?.max_no_progress_turns ?? null,
-      maxPromptFailures: input.max_prompt_failures ?? null,
-      agent: typeof context.agent === "string" ? context.agent : null,
-      initialStatus: planningOnly ? "paused" : "active",
-      sessionTokensAtCreation,
-    })
-    return JSON.stringify(planningOnly ? { goal, plan_mode_notice: PLAN_MODE_CREATE_NOTICE } : { goal }, null, 2)
-  }
 
   async function taskBlockStatus(sessionID: string) {
     if (!deferWhileTasksActive) return false
@@ -818,12 +720,18 @@ const server: Plugin = async ({ client }, options?: Options) => {
       if (taskStatus && taskStatus.blocked) return
       const current = await getGoal(sessionID)
       if (turnWatchdogs.get(sessionID) !== watchdog || !busySessions.has(sessionID)) return
-      if (current?.status !== "active" || isPlanAgent(current.lastPromptAgent) || activeContinuations.has(sessionID)) return
+      if (current?.status !== "active" || isPlanAgent(current.lastPromptAgent) || activeContinuations.has(sessionID))
+        return
 
       turnWatchdogs.delete(sessionID)
       if (!claimContinuation(sessionID)) return
       claimedContinuation = true
-      await sendContinuation(client, sessionID, continuationPrompt(current), current.lastPromptAgent ?? latestTurnAgent ?? null)
+      await sendContinuation(
+        client,
+        sessionID,
+        continuationPrompt(current),
+        current.lastPromptAgent ?? latestTurnAgent ?? null,
+      )
       // A watchdog continuation is a real continuation: it must feed the same failure accounting
       // so repeated rejections trip the circuit breaker instead of failing silently forever.
       await recordContinuationResult(sessionID, "success", maxPromptFailures)
@@ -855,10 +763,13 @@ const server: Plugin = async ({ client }, options?: Options) => {
 
   function scheduleSettledContinuation(sessionID: string, delayMs = TASK_SETTLE_DELAY_MS) {
     if (scheduledContinuations.has(sessionID)) return
-    const timer = setTimeout(() => {
-      scheduledContinuations.delete(sessionID)
-      void runAutoContinue(sessionID, true)
-    }, Math.max(0, delayMs))
+    const timer = setTimeout(
+      () => {
+        scheduledContinuations.delete(sessionID)
+        void runAutoContinue(sessionID, true)
+      },
+      Math.max(0, delayMs),
+    )
     const maybeUnref = timer as { unref?: () => void }
     if (typeof maybeUnref.unref === "function") maybeUnref.unref()
     scheduledContinuations.set(sessionID, timer)
@@ -877,11 +788,14 @@ const server: Plugin = async ({ client }, options?: Options) => {
         // A running task has no retryAt. Without a bounded poll the deferral is dropped entirely:
         // the only re-entry is the CHILD session's idle event, which resolves to a different
         // sessionID and therefore no-ops. The parent would never resume auto-continue.
-        scheduleSettledContinuation(sessionID, taskStatus.retryAt != null ? taskStatus.retryAt - Date.now() : TASK_SETTLE_DELAY_MS)
+        scheduleSettledContinuation(
+          sessionID,
+          taskStatus.retryAt != null ? taskStatus.retryAt - Date.now() : TASK_SETTLE_DELAY_MS,
+        )
         return
       }
       if (busySessions.has(sessionID)) return
-      await recordAssistantMessage(sessionID, latestAssistant, options ?? {}, true)
+      await recordAssistantMessage(sessionID, latestAssistant, options, true)
       const current = await getGoal(sessionID)
       if (!current) return
       const latestTurnAgent = agentFromMessage(latestAssistant)
@@ -933,214 +847,67 @@ const server: Plugin = async ({ client }, options?: Options) => {
     }
   }
 
-  return {
+  async function handleEvent(event: unknown) {
+    const sessionID = sessionIDFromEvent(event as never)
+    const eventType = (event as { type?: string }).type
+    if (eventType === "session.created") {
+      taskTracker.observeSessionCreated(event as { properties?: Record<string, unknown> })
+    }
+    if (sessionID && eventType === "session.status") {
+      const status = (event as { properties?: Record<string, unknown> }).properties?.status
+      if (isRecord(status) && typeof status.type === "string") {
+        if (status.type === "busy") busySessions.add(sessionID)
+        if (status.type === "busy") armTurnWatchdog(sessionID)
+        if (status.type === "idle") {
+          busySessions.delete(sessionID)
+          clearTurnWatchdog(sessionID)
+        }
+        if (status.type === "retry") clearTurnWatchdog(sessionID)
+        taskTracker.observeSessionStatus(sessionID, status.type)
+      }
+    }
+    if (sessionID && eventType === "session.idle") {
+      busySessions.delete(sessionID)
+      clearTurnWatchdog(sessionID)
+      taskTracker.observeSessionStatus(sessionID, "idle")
+    }
+    if (sessionID && eventType === "session.deleted") {
+      busySessions.delete(sessionID)
+      clearTurnWatchdog(sessionID)
+      const scheduled = scheduledContinuations.get(sessionID)
+      if (scheduled) clearTimeout(scheduled)
+      scheduledContinuations.delete(sessionID)
+      taskDeferredSessions.delete(sessionID)
+      taskTracker.observeSessionDeleted(sessionID)
+    }
+    if (sessionID && (event as { type?: string }).type === "message.updated") {
+      const props = (event as { properties?: Record<string, unknown> }).properties ?? {}
+      const message = [props.info, props.message].find((value) => value && typeof value === "object") as
+        | { info?: unknown; role?: unknown; id?: unknown; time?: unknown; parts?: unknown[] }
+        | undefined
+      taskTracker.observeAssistantMessage(sessionID, message)
+      // The event is dispatched fire-and-forget by the subscription with no rejection handler,
+      // so a throw here becomes an unhandled rejection. Also: only assistant messages may advance
+      // the continuation baseline, or a user/compaction message ID corrupts no-progress detection.
+      if (assistantMarker(message ?? {})) {
+        await goalBookkeeping("recordAssistantMessage", () => recordAssistantMessage(sessionID, message, options))
+      }
+    }
+
+    if (!autoContinue || !isIdleEvent(event as never)) return
+    if (!sessionID) return
+    await runAutoContinue(sessionID)
+  }
+
+  const hooks: Hooks = {
+    async event(input) {
+      await handleGoalEvent(input.event, { handle: handleEvent })
+    },
     async dispose() {
       for (const timer of scheduledContinuations.values()) clearTimeout(timer)
       scheduledContinuations.clear()
       for (const watchdog of turnWatchdogs.values()) clearTimeout(watchdog.timer)
       turnWatchdogs.clear()
-    },    tool: {
-      get_goal: {
-        description:
-          "Get the current goal for this OpenCode session, including status, observed token usage, elapsed-time usage, budgets, checkpoints, and history.",
-        args: {},
-        async execute(_args, context) {
-          return JSON.stringify({ goal: await getGoal(context.sessionID) }, null, 2)
-        },
-      },
-      get_goal_history: {
-        description: "Get the current goal lifecycle history and recent checkpoints for this OpenCode session.",
-        args: {},
-        async execute(_args, context) {
-          const goal = await getGoal(context.sessionID)
-          return JSON.stringify({ goal, history_report: formatGoalHistory(goal) }, null, 2)
-        },
-      },
-      create_goal: {
-        description:
-          "Create a goal only when explicitly requested by the user or system/developer instructions; do not infer goals from ordinary tasks. Fails if a non-complete goal exists. Limits are unlimited by default: omitting a limit arg (or passing null) means no token budget, no auto-continue cap, and no duration cap, so only pass numbers the user explicitly asked for. While the session is in Plan mode, the goal is recorded as paused and execution requires the user to switch to Build mode.",
-        args: {
-          objective: z.string().min(1).max(4000).describe("The concrete objective to start pursuing."),
-          token_budget: z.number().int().positive().nullable().optional().describe("Optional positive token budget. Omit or pass null for unlimited."),
-          max_auto_turns: z.number().int().positive().nullable().optional().describe("Optional per-goal auto-continue limit. Omit or pass null for unlimited."),
-          max_duration_seconds: z.number().int().positive().nullable().optional().describe("Optional per-goal duration limit. Omit or pass null for unlimited."),
-          no_progress_token_threshold: z
-            .number()
-            .int()
-            .positive()
-            .nullable()
-            .optional()
-            .describe(
-              "Optional per-goal minimum output tokens for a continuation turn to count as progress. Raise it only to tolerate genuinely long-running single turns.",
-            ),
-          max_no_progress_turns: z
-            .number()
-            .int()
-            .positive()
-            .nullable()
-            .optional()
-            .describe(
-              "Optional consecutive low-progress turns tolerated before auto-pausing. Raise for unattended/overnight runs; the default (2) pauses quickly.",
-            ),
-          max_prompt_failures: z
-            .number()
-            .int()
-            .positive()
-            .nullable()
-            .optional()
-            .describe(
-              "Optional consecutive failed auto-continue prompts tolerated before auto-pausing. Raise for unattended runs so transient provider/network failures do not stop the goal.",
-            ),
-        },
-        async execute(args, context) {
-          return createGoalFromTool(args as CreateGoalArgs, context)
-        },
-      },
-      set_goal: {
-        description:
-          "Set a new goal when the user explicitly asks the AGENT to formulate and set its own goal (the model writes the objective itself). Prefer create_goal when passing the user's own words. Fails if a non-complete goal exists. Limits are unlimited by default: omitting a limit arg (or passing null) means no token budget, no auto-continue cap, and no duration cap, so only pass numbers the user explicitly asked for. While the session is in Plan mode, the goal is recorded as paused and execution requires the user to switch to Build mode.",
-        args: {
-          objective: z.string().min(1).max(4000).describe("The model-formulated concrete objective to start pursuing."),
-          token_budget: z.number().int().positive().nullable().optional().describe("Optional positive token budget. Omit or pass null for unlimited."),
-          max_auto_turns: z.number().int().positive().nullable().optional().describe("Optional per-goal auto-continue limit. Omit or pass null for unlimited."),
-          max_duration_seconds: z.number().int().positive().nullable().optional().describe("Optional per-goal duration limit. Omit or pass null for unlimited."),
-          no_progress_token_threshold: z
-            .number()
-            .int()
-            .positive()
-            .nullable()
-            .optional()
-            .describe(
-              "Optional per-goal minimum output tokens for a continuation turn to count as progress. Raise it only to tolerate genuinely long-running single turns.",
-            ),
-          max_no_progress_turns: z
-            .number()
-            .int()
-            .positive()
-            .nullable()
-            .optional()
-            .describe(
-              "Optional consecutive low-progress turns tolerated before auto-pausing. Raise for unattended/overnight runs; the default (2) pauses quickly.",
-            ),
-          max_prompt_failures: z
-            .number()
-            .int()
-            .positive()
-            .nullable()
-            .optional()
-            .describe(
-              "Optional consecutive failed auto-continue prompts tolerated before auto-pausing. Raise for unattended runs so transient provider/network failures do not stop the goal.",
-            ),
-        },
-        async execute(args, context) {
-          return createGoalFromTool(args as CreateGoalArgs, context)
-        },
-      },
-      update_goal_objective: {
-        description: "Edit the current OpenCode goal objective when the user explicitly asks to edit or replace it.",
-        args: {
-          objective: z.string().min(1).max(4000).describe("The updated concrete objective."),
-          status: z.enum(["active", "paused"]).optional().describe("Whether the edited goal should be active or paused."),
-        },
-        async execute(args, context) {
-          const input = args as { objective: string; status?: "active" | "paused" }
-          const requested = input.status ?? "active"
-          const planningOnly = requested === "active" && isPlanAgent(context.agent)
-          const goal = await updateGoalObjective(context.sessionID, input.objective, planningOnly ? "paused" : requested, {
-            agent: typeof context.agent === "string" ? context.agent : null,
-            planModePause: planningOnly,
-          })
-          return JSON.stringify(planningOnly ? { goal, plan_mode_notice: PLAN_MODE_CREATE_NOTICE } : { goal }, null, 2)
-        },
-      },
-      update_goal: {
-        description:
-          "Close the existing goal only after an audit against real evidence. Use status complete only when the objective is achieved and no required work remains, and include evidence. Use status unmet only when the objective cannot be achieved or is blocked, and include the blocker. Do not close a goal merely because work is stopping.",
-        args: {
-          status: z.enum(["complete", "unmet"]).describe("Required. complete means achieved; unmet means blocked or impossible."),
-          evidence: z
-            .string()
-            .min(1)
-            .max(4000)
-            .optional()
-            .describe("Required when status is complete. Summarize the concrete evidence verified."),
-          blocker: z
-            .string()
-            .min(1)
-            .max(4000)
-            .optional()
-            .describe("Required when status is unmet. Explain the concrete blocker or impossibility."),
-        },
-        async execute(args, context) {
-          const input = args as UpdateGoalArgs
-          if (input.status === "complete") {
-            const goal = await completeGoal(context.sessionID, input.evidence ?? "")
-            const budget = goal.tokenBudget == null ? "" : ` Token usage: ${goal.tokensUsed}/${goal.tokenBudget}.`
-            const report = `Goal achieved. Time used: ${goal.timeUsedSeconds} seconds.${budget} Evidence: ${goal.completionEvidence}.`
-            return JSON.stringify({ goal, completion_report: report }, null, 2)
-          }
-          const goal = await markGoalUnmet(context.sessionID, input.blocker ?? "")
-          const report = `Goal unmet. Time used: ${goal.timeUsedSeconds} seconds. Blocker: ${goal.blocker}.`
-          return JSON.stringify({ goal, unmet_report: report }, null, 2)
-        },
-      },
-      extend_goal: {
-        description:
-          "Explicitly extend the budgets of a goal that stopped at a token, turn, or duration limit. Requires at least one higher limit or a deliberate null for token/duration; preserves usage and history. Closed and ordinary active goals are rejected.",
-        args: {
-          token_budget: z.number().int().positive().nullable().optional().describe("Higher token budget, or null for no token limit."),
-          max_auto_turns: z
-            .number()
-            .int()
-            .positive()
-            .nullable()
-            .optional()
-            .describe("Higher auto-continue limit, or null for no auto-continue limit."),
-          max_duration_seconds: z.number().int().positive().nullable().optional().describe("Higher duration limit, or null for no duration limit."),
-        },
-        async execute(args, context) {
-          if (isPlanAgent(context.agent)) {
-            throw new Error("cannot extend or reactivate the goal while the session is in Plan mode; switch to Build mode first")
-          }
-          const input = args as ExtendGoalArgs
-          // Pass the SAME configured turn default that runtime enforcement uses, so extension
-          // reactivation eligibility can never disagree with enforcement.
-          const goal = await extendGoal(
-            context.sessionID,
-            {
-              tokenBudget: input.token_budget,
-              maxAutoTurns: input.max_auto_turns,
-              maxDurationSeconds: input.max_duration_seconds,
-            },
-            maxAutoTurns,
-          )
-          return JSON.stringify({ goal }, null, 2)
-        },
-      },
-      update_goal_status: {
-        description:
-          "Pause or resume the current OpenCode goal when the user explicitly asks to pause or resume it. Resuming is not allowed while the session is in Plan mode; the user must switch to Build mode first.",
-        args: {
-          status: z.enum(["active", "paused"]).describe("active resumes a goal; paused pauses it without clearing it."),
-        },
-        async execute(args, context) {
-          const input = args as { status: "active" | "paused" }
-          if (input.status === "active" && isPlanAgent(context.agent)) {
-            throw new Error(
-              "cannot resume the goal while the session is in Plan mode; ask the user to switch to Build mode and resume the goal from there",
-            )
-          }
-          const goal = await setGoalStatus(context.sessionID, input.status, typeof context.agent === "string" ? context.agent : null)
-          return JSON.stringify({ goal }, null, 2)
-        },
-      },
-      clear_goal: {
-        description: "Clear the current OpenCode goal for this session when the user explicitly asks to clear it.",
-        args: {},
-        async execute(_args, context) {
-          return JSON.stringify({ cleared: await clearGoal(context.sessionID) }, null, 2)
-        },
-      },
     },
     async "tool.execute.before"(input) {
       taskTracker.noteTaskCall(input as { tool?: unknown; sessionID?: unknown; callID?: unknown })
@@ -1172,7 +939,7 @@ const server: Plugin = async ({ client }, options?: Options) => {
       // charge the entire retained context as fresh usage.
       if (isCompactionTransform(output.messages)) return
       await goalBookkeeping("recordAssistantMessage", () =>
-        recordAssistantMessage(sessionID, latestAssistantMessage(output.messages), options ?? {}),
+        recordAssistantMessage(sessionID, latestAssistantMessage(output.messages), options),
       )
     },
     async "experimental.chat.system.transform"(input, output) {
@@ -1192,75 +959,89 @@ const server: Plugin = async ({ client }, options?: Options) => {
       const goal = await goalBookkeeping("getGoal", () => getGoal(input.sessionID))
       if (goal?.status === "active") output.enabled = false
     },
-    async event({ event }) {
-      try {
-        await handleEvent(event)
-      } catch (error) {
-        // The plugin loader dispatches this hook with no rejection handler
-        // (`void hook.event?.(...)`), so any throw becomes an unhandled rejection.
-        console.warn(`[goal] event handling failed: ${error instanceof Error ? error.message : String(error)}`)
-      }
-    },
   }
 
-  async function handleEvent(event: unknown) {
-    const sessionID = sessionIDFromEvent(event as never)
-      const eventType = (event as { type?: string }).type
-      if (eventType === "session.created") {
-        taskTracker.observeSessionCreated(event as { properties?: Record<string, unknown> })
-      }
-      if (sessionID && eventType === "session.status") {
-        const status = (event as { properties?: Record<string, unknown> }).properties?.status
-        if (isRecord(status) && typeof status.type === "string") {
-          if (status.type === "busy") busySessions.add(sessionID)
-          if (status.type === "busy") armTurnWatchdog(sessionID)
-          if (status.type === "idle") {
-            busySessions.delete(sessionID)
-            clearTurnWatchdog(sessionID)
-          }
-          if (status.type === "retry") clearTurnWatchdog(sessionID)
-          taskTracker.observeSessionStatus(sessionID, status.type)
-        }
-      }
-      if (sessionID && eventType === "session.idle") {
-        busySessions.delete(sessionID)
-        clearTurnWatchdog(sessionID)
-        taskTracker.observeSessionStatus(sessionID, "idle")
-      }
-      if (sessionID && eventType === "session.deleted") {
-        busySessions.delete(sessionID)
-        clearTurnWatchdog(sessionID)
-        const scheduled = scheduledContinuations.get(sessionID)
-        if (scheduled) clearTimeout(scheduled)
-        scheduledContinuations.delete(sessionID)
-        taskDeferredSessions.delete(sessionID)
-        taskTracker.observeSessionDeleted(sessionID)
-      }
-      if (sessionID && (event as { type?: string }).type === "message.updated") {
-        const props = (event as { properties?: Record<string, unknown> }).properties ?? {}
-        const message = [props.info, props.message].find((value) => value && typeof value === "object") as
-          | { info?: unknown; role?: unknown; id?: unknown; time?: unknown; parts?: unknown[] }
-          | undefined
-        taskTracker.observeAssistantMessage(sessionID, message)
-        // This hook is dispatched fire-and-forget by the plugin loader with no rejection handler,
-        // so a throw here becomes an unhandled rejection. Also: only assistant messages may advance
-        // the continuation baseline, or a user/compaction message ID corrupts no-progress detection.
-        if (assistantMarker(message ?? {})) {
-          await goalBookkeeping("recordAssistantMessage", () =>
-            recordAssistantMessage(sessionID, message, options ?? {}),
-          )
-        }
-      }
-
-      if (!autoContinue || !isIdleEvent(event as never)) return
-      if (!sessionID) return
-      await runAutoContinue(sessionID)
+  return {
+    hooks,
+    handleEvent: (event: unknown) => handleGoalEvent(event, { handle: handleEvent }),
+    dispose: () => Promise.resolve(hooks.dispose?.()),
   }
 }
 
-export const GOAL_PLUGIN_ID = "local.goal-mode.server"
-
-export default {
-  id: GOAL_PLUGIN_ID,
-  server,
+/**
+ * Dispatches one core event into the goal driver. The subscription that calls this runs
+ * fire-and-forget with no rejection handler, so any throw must degrade to a warning.
+ */
+export async function handleGoalEvent(event: unknown, options: { handle: (event: unknown) => Promise<void> }) {
+  try {
+    await options.handle(event)
+  } catch (error) {
+    console.warn(`[goal] event handling failed: ${error instanceof Error ? error.message : String(error)}`)
+  }
 }
+
+export interface Interface {
+  readonly init: () => Effect.Effect<void>
+  readonly deps: () => Effect.Effect<{ client: Client; options: Options }>
+  readonly trigger: (name: string, input: unknown, output: unknown) => Effect.Effect<void>
+}
+
+export class Service extends Context.Service<Service, Interface>()("@opencode/GoalDriver") {}
+
+const layer = Layer.effect(
+  Service,
+  Effect.gen(function* () {
+    const events = yield* EventV2Bridge.Service
+    const config = yield* Config.Service
+
+    const state = yield* InstanceState.make<{ client: Client; options: Options; runtime: Runtime }>(
+      Effect.fn("GoalDriver.state")(function* (ctx) {
+        const options = readGoalOptions(yield* config.get())
+        const client = yield* goalClient(ctx.directory)
+        const runtime = createGoalRuntime({ client, options })
+
+        // Per-instance subscription on the same event service the plugin used, so directory
+        // filtering and the instance-scoped lifetime are preserved. The scope is the instance
+        // cache's scope, so the listener is torn down when the instance is disposed.
+        const unsubscribe = yield* events.listen((event) => {
+          if (event.location?.directory !== ctx.directory) return Effect.void
+          return Effect.sync(() => {
+            void runtime.handleEvent({ id: event.id, type: event.type, properties: event.data })
+          })
+        })
+        yield* Effect.addFinalizer(() => unsubscribe)
+        yield* Effect.addFinalizer(() => Effect.promise(() => runtime.dispose()))
+
+        return { client, options, runtime }
+      }),
+    )
+
+    const init = Effect.fn("GoalDriver.init")(function* () {
+      yield* InstanceState.get(state)
+    })
+
+    const deps = Effect.fn("GoalDriver.deps")(function* () {
+      const s = yield* InstanceState.get(state)
+      return { client: s.client, options: s.options }
+    })
+
+    // Goal hooks are dispatched from core, not from a plugin, so `disableDefaultPlugins` cannot
+    // remove them. External plugins still run afterwards, matching the previous ordering where the
+    // goal plugin was registered before any externally loaded plugin.
+    const trigger = Effect.fn("GoalDriver.trigger")(function* (name: string, input: unknown, output: unknown) {
+      const hook = (yield* InstanceState.get(state)).runtime.hooks[name as keyof Hooks]
+      if (typeof hook !== "function") return
+      yield* Effect.promise(async () => (hook as (input: unknown, output: unknown) => Promise<void>)(input, output))
+    })
+
+    return Service.of({ init, deps, trigger })
+  }),
+)
+
+export const node = LayerNode.make({
+  service: Service,
+  layer,
+  deps: [EventV2Bridge.node, Config.node],
+})
+
+export * as GoalDriver from "./driver"

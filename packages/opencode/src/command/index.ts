@@ -7,9 +7,9 @@ import { Effect, Layer, Context, Schema } from "effect"
 import { Config } from "@/config/config"
 import { MCP } from "../mcp"
 import { Skill } from "../skill"
-// Single source of truth for the /goal prompt. The copy under packages/core/src/plugin/command/ is
-// exported as GOAL_PROMPT so the two command registries cannot drift.
-import { GOAL_PROMPT as PROMPT_GOAL } from "@opencode-ai/core/plugin/command"
+// Single source of truth for the /goal prompt. It ships as a plain command prompt asset (not a
+// plugin asset) so both command registries read the same text.
+import { GOAL_PROMPT as PROMPT_GOAL } from "@opencode-ai/core/prompt/command"
 import PROMPT_INITIALIZE from "./template/initialize.txt"
 import PROMPT_REVIEW from "./template/review.txt"
 import { LegacyEvent } from "@opencode-ai/schema/legacy-event"

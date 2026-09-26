@@ -16,7 +16,7 @@ import {
   setGoalStatus,
   updateGoalObjective,
 } from "@/goal/impl"
-import { resolveCreateGoalLimits } from "@/plugin/goal/server"
+import { resolveCreateGoalLimits } from "@/goal/shared"
 
 let stateDir: string | undefined
 const previous = process.env.OPENCODE_GOAL_STATE_PATH
