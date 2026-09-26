@@ -9,10 +9,38 @@ import {
   recordContinuationResult,
   recordGoalCompletion,
   reserveContinuation,
+  setGoalStatus,
   statePath,
 } from "@/goal/impl"
 import { continuationPrompt } from "@/goal/prompts"
 import { GOAL_MAX_COMPLETED_ITEMS } from "@/goal/schema"
+import { goalTools } from "@/goal/tools"
+import { Effect } from "effect"
+
+/**
+ * Runs one goal tool the way the model does and returns its raw output string, so the test can
+ * assert on what the model is actually told - not on the implementation returning a value the tool
+ * then swallows.
+ */
+async function runTool(tool: string, args: unknown, sessionID: string) {
+  const tools = goalTools({
+    client: { session: { messages: () => ({ data: [] }) } } as never,
+    options: {},
+    agent: { get: () => Effect.succeed({} as never) } as never,
+    truncate: {
+      output: (text: string) => Effect.succeed({ content: text, truncated: false as const }),
+    } as never,
+  })
+  const result = await Effect.runPromise(
+    tools[tool].execute(args as never, {
+      sessionID,
+      messageID: "msg-1",
+      agent: "build",
+      abort: new AbortController().signal,
+    } as never),
+  )
+  return result.output
+}
 
 let stateDir: string | undefined
 const previous = process.env.OPENCODE_GOAL_STATE_PATH
@@ -83,6 +111,37 @@ describe("the completed-work ledger", () => {
     const sessionID = "ledger-3"
     await createGoal(sessionID, "keep improving", { maxAutoTurns: 100 })
     expect(recordGoalCompletion(sessionID, "   ")).rejects.toThrow()
+  })
+
+  test("the tool tells the model when a record was not kept", async () => {
+    const sessionID = "ledger-paused"
+    await createGoal(sessionID, "keep improving", { maxAutoTurns: 100 })
+    await setGoalStatus(sessionID, "paused")
+
+    // The bug: `recordGoalCompletion` only records onto an ACTIVE goal, and for any other status it
+    // returns the goal snapshot. The tool tests only `if (!goal)`, and a snapshot is truthy, so a
+    // record against a paused/limited/closed goal came back as a success-shaped `{goal}` payload
+    // while the ledger was untouched. The model is told to call this tool the moment a unit is done
+    // and that recording nothing pauses the goal for no progress - so it believes it closed the unit
+    // out, the next turn's ledger does not list it, and the work is redone. That is precisely the
+    // loop the ledger exists to prevent, and the tool is what makes it invisible.
+    const output = await runTool("record_goal_completion", { item: "fixed the retry backoff" }, sessionID)
+
+    expect(output).toContain("nothing was recorded")
+    expect(output).not.toContain('"status": "paused"')
+    expect((await getGoal(sessionID))?.completed).toEqual([])
+  })
+
+  test("the tool still reports a genuine record as recorded", async () => {
+    const sessionID = "ledger-active"
+    await createGoal(sessionID, "keep improving", { maxAutoTurns: 100 })
+
+    // The control for the test above: on an active goal the record IS kept, so the tool must not
+    // report "nothing was recorded" - otherwise a fix that always refuses would pass both tests.
+    const output = await runTool("record_goal_completion", { item: "fixed the retry backoff" }, sessionID)
+
+    expect(output).not.toContain("nothing was recorded")
+    expect((await getGoal(sessionID))?.completed).toEqual(["fixed the retry backoff"])
   })
 
   test("a full ledger still records the new item instead of calling it a no-op", async () => {
