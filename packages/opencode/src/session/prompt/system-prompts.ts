@@ -1,4 +1,5 @@
 import {
+  FUNDAMENTAL_LIMITS,
   LOOP_AWARENESS,
   LOOP_WORD_GUARD,
   NATIVE_TOOLCALL_GUARD,
@@ -18,6 +19,7 @@ export function buildSystemPrompt(base: string): string {
     wrapSystemDirective(NATIVE_TOOLCALL_GUARD),
     wrapSystemDirective(SUBAGENT_DELEGATION_GUARD),
     wrapSystemDirective(ORCHESTRATOR_BEHAVIOR),
+    wrapSystemDirective(FUNDAMENTAL_LIMITS),
   ].join("\n\n")
   return `${shared}\n\n${base}`
 }
