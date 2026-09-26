@@ -740,7 +740,6 @@ const reasoning = ctx.reasoningMap[value.id]
               attachments: attachments.length ? attachments : undefined,
             }
             yield* completeToolCall(value.id, output)
-            ctx.stateChanged = true
             const toolName = toolCall?.part.tool ?? value.name
             yield* saveToolLearning({
               tool: toolName,
@@ -805,6 +804,15 @@ const reasoning = ctx.reasoningMap[value.id]
               const patch = yield* snapshot.patch(ctx.snapshot)
               if (patch.files.length) {
                 ctx.hasEditInStep = true
+                // The snapshot diff is the ONE honest signal of real state change available here.
+                // `stateChanged` used to be set on every completed tool call, which is not the same
+                // thing: a read returns bytes without changing them, and re-reading the same file
+                // while narrating the same sentence is exactly the shape a looping model produces.
+                // Each read therefore cleared the cross-turn repetition streak below, so the text
+                // and reasoning thresholds were unreachable and an unattended run repeating itself
+                // around a read was never told to stop. `hasEditInStep` already reads this same
+                // patch, so the two now agree by construction: both mean "files actually changed".
+                ctx.stateChanged = true
                 yield* session.updatePart({
                   id: PartID.ascending(),
                   messageID: ctx.assistantMessage.id,
@@ -1191,13 +1199,13 @@ if (ctx.currentText.text.trim()) {
               })
             }
           }
-          // Real progress (a tool result that changed state, or a file patch)
-          // clears the cross-turn repetition streaks. Without this a model that
-          // breaks out of a text/reasoning loop for one turn then falls back
-          // into it keeps accumulating and never trips the threshold. The
-          // alternation window is intentionally NOT reset here: a model that
-          // alternates text A/B across turns, even with tool calls in between,
-          // should still be caught.
+          // Real file change clears the cross-turn repetition streaks. Without this a model that
+          // breaks out of a text/reasoning loop for one turn then falls back into it keeps
+          // accumulating and never trips the threshold. Scoped to a genuine patch - a completed tool
+          // call is not progress on its own, and treating it as such is what let a read-and-narrate
+          // loop reset the count on every pass. The alternation window is intentionally NOT reset
+          // here: a model that alternates text A/B across turns, even with edits in between, should
+          // still be caught.
           if (ctx.stateChanged) {
             textLoop.delete(ctx.sessionID)
             reasoningLoop.delete(ctx.sessionID)
