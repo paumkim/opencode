@@ -17,21 +17,42 @@ export const GOAL_METADATA_KEY = "opencode.goal"
 export const GOAL_MAX_OBJECTIVE = 4000
 export const GOAL_MAX_EVIDENCE = 4000
 /**
- * Upper bound on the assistant text a goal retains for its own bookkeeping. Every use of it goes
- * through a 280-character summary, so nothing is lost by capping it: without a cap, one verbose turn
- * is stored verbatim and then re-serialized by every subsequent LLM step (each `accountUsage` rewrites
- * the state file) and echoed in full by `get_goal` into the model's context.
- */
-/**
  * The ONE definition of "is this model-supplied string within its character limit?", shared by the
  * zod tool schemas and by `validateObjective`/`validateEvidence`. Counting lives here rather than
  * in each caller because the two previously used different units, which is precisely how a limit
  * ends up meaning two different things.
  */
 export function withinCharacterLimit(value: string, maxCodePoints: number) {
-  return [...value].length <= maxCodePoints
+  return codePoints(value).length <= maxCodePoints
 }
 
+/**
+ * The one truncation, in the same unit as `withinCharacterLimit`.
+ *
+ * Every truncation in the goal module has to cut on a code-point boundary and count in code points.
+ * `String.prototype.slice` counts UTF-16 code units, so cutting a string of emoji or any other
+ * astral character at a unit boundary can land in the middle of a surrogate pair and leave a LONE
+ * SURROGATE behind. That is not a cosmetic artifact: a lone surrogate serializes to `\udXXX`, is
+ * read back as a replacement character by anything that renders it, and - because
+ * `lastAssistantText` is what every progress summary and continuation baseline is derived from - it
+ * makes a summary differ from the same summary computed over the untruncated text, which is the
+ * comparison stall detection turns on.
+ */
+export function truncateToCodePoints(value: string, maxCodePoints: number) {
+  if (withinCharacterLimit(value, maxCodePoints)) return value
+  return codePoints(value).slice(0, maxCodePoints).join("")
+}
+
+function codePoints(value: string) {
+  return [...value]
+}
+
+/**
+ * Upper bound on the assistant text a goal retains for its own bookkeeping. Every use of it goes
+ * through a 280-character summary, so nothing is lost by capping it: without a cap, one verbose turn
+ * is stored verbatim and then re-serialized by every subsequent LLM step (each `accountUsage` rewrites
+ * the state file) and echoed in full by `get_goal` into the model's context.
+ */
 export const GOAL_MAX_RETAINED_TEXT = 4000
 export const GOAL_HISTORY_LIMIT = 50
 export const GOAL_CHECKPOINT_LIMIT = 8
@@ -173,12 +194,18 @@ export type ExtendGoalOptions = {
   maxDurationSeconds?: number | null
 }
 
+/**
+ * One assistant turn's observed output, as the progress scorer receives it.
+ *
+ * The goal's own `noProgressTokenThreshold` and `maxNoProgressTurns` are deliberately NOT overridable
+ * here: they are the values the goal was created with, and the plugin option of the same name is
+ * already folded into the goal as the default for a goal that did not ask. An override field here put
+ * the OPTION ahead of the goal on every scored turn; see `recordAssistantProgress`.
+ */
 export type AssistantProgressInput = {
   messageID?: string
   text?: string
   outputTokens?: number | null
-  noProgressTokenThreshold?: number | null
-  maxNoProgressTurns?: number | null
   evaluateContinuation?: boolean
   toolCalls?: number | null
 }

@@ -101,9 +101,13 @@ export function goalClient(directory: string) {
 
 export * as GoalShared from "./shared"
 
-export function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null
-}
+// The canonical `isRecord`, not a second copy of it. The local one this replaced read
+// `typeof value === "object" && value !== null`, which lets an ARRAY through; the shared util
+// excludes arrays. The two already disagreed, and every caller here is a guard on a value the goal
+// runtime reads off the wire (message info, child records, status records) where "is this a plain
+// object?" is the question being asked - so an array slipping through is a silent wrong answer, and a
+// second definition of the predicate is how that starts.
+export { isRecord } from "@/util/record"
 
 export function textFromPart(part: unknown): string {
   if (!part || typeof part !== "object") return ""

@@ -21,6 +21,7 @@ import {
   GOAL_MAX_RETAINED_TEXT,
   positiveIntegerOrNull,
   withinCharacterLimit,
+  truncateToCodePoints,
   GOAL_MAX_EVIDENCE,
   GOAL_MAX_OBJECTIVE,
   StateSchema,
@@ -47,6 +48,14 @@ class StateWriteError extends Data.TaggedError("StateWriteError")<{ readonly cau
  * state down with it, so the legacy file stays put and a later run retries.
  */
 function migrateLegacyStateFile() {
+  // `legacyStateFile` documents that an explicit override means "the legacy default is not a
+  // candidate", and that contract has to be enforced HERE, where the decision is made - not inferred
+  // from the two paths happening to differ, which an override guarantees they do. It is a rename,
+  // not a copy, so ignoring it did irreversible damage: pointing `OPENCODE_GOAL_STATE_PATH` at a
+  // path that did not exist yet (the ordinary way to isolate goal state) moved a real user's
+  // plugin-era goal file out of its home and into that path, and unsetting the override afterwards
+  // left the goal stranded wherever the override pointed.
+  if (process.env.OPENCODE_GOAL_STATE_PATH) return Effect.void
   const legacy = legacyStateFile()
   if (legacy === statePath()) return Effect.void
   return Effect.promise(async () => {
@@ -302,10 +311,15 @@ function wallClockCursor(value: unknown) {
   return Math.floor(value)
 }
 
-/** Keeps the message PREFIX, so every 280-character summary derived from it is unchanged. */
+/**
+ * Keeps the message PREFIX, so every summary derived from it is unchanged. Cutting on a code-point
+ * boundary is what makes that true: a unit-boundary cut can split a surrogate pair, and the resulting
+ * lone surrogate renders as a replacement character and makes the derived summary differ from the
+ * one computed over the full text - which is the comparison stall detection reads.
+ */
 function boundRetainedText(value: unknown) {
   if (typeof value !== "string") return ""
-  return value.length > GOAL_MAX_RETAINED_TEXT ? value.slice(0, GOAL_MAX_RETAINED_TEXT) : value
+  return truncateToCodePoints(value, GOAL_MAX_RETAINED_TEXT)
 }
 
 function isClosed(status: Goal["status"]) {
@@ -466,11 +480,12 @@ export async function updateGoalObjective(
   sessionID: string,
   objective: string,
   status: "active" | "paused" = "active",
-  options?: { agent?: string | null; planModePause?: boolean },
+  options?: { agent?: string | null; planModePause?: boolean; defaultMaxAutoTurns?: number },
 ) {
   const value = validateObjective(objective)
   const agent = typeof options?.agent === "string" && options.agent.trim() ? options.agent.trim() : null
   const planModePause = options?.planModePause === true
+  const defaultMaxAutoTurns = options?.defaultMaxAutoTurns ?? GOAL_DEFAULT_MAX_AUTO_TURNS
   // Editing the objective resumes the goal, so it must obey the same limit guard a plain resume
   // does. Without it this path reactivates a goal the budget/turn/duration re-check would refuse.
   return mutateStatus((state) => {
@@ -481,7 +496,7 @@ export async function updateGoalObjective(
       throw new GoalError({ message: "goal is limited; explicitly extend its limits before resuming" })
     }
     accountWallClock(goal)
-    if (status === "active" && !planModePause && exhaustGoalLimits(goal)) {
+    if (status === "active" && !planModePause && exhaustGoalLimits(goal, defaultMaxAutoTurns)) {
       return { goal: snapshot(goal), limited: true }
     }
     goal.objective = value
@@ -499,7 +514,11 @@ export async function updateGoalObjective(
       : goal.status === "active"
         ? "Goal objective updated and resumed."
         : "Goal objective updated and paused."
-    pushHistory(goal, "updated", `Goal objective updated: ${summarizeText(value, 400)}`)
+    // `pushHistory` applies the ONE history limit (`GOAL_CHECKPOINT_CHAR_LIMIT`), so the objective
+    // goes in raw. Summarizing to 400 first was a second, larger limit nested inside a smaller one:
+    // the result could never exceed the 280 the outer call enforces, so the 400 did nothing except
+    // imply that a history entry can hold 400 characters of objective when it can hold 280.
+    pushHistory(goal, "updated", `Goal objective updated: ${value}`)
     if (planModePause) pushHistory(goal, "paused", goal.lastStatus)
     return { goal: snapshot(goal), limited: false }
   })
@@ -534,7 +553,15 @@ export async function pauseGoalForPlanMode(sessionID: string) {
   })
 }
 
-export async function setGoalStatus(sessionID: string, status: "active" | "paused", agent?: string | null) {
+export async function setGoalStatus(
+  sessionID: string,
+  status: "active" | "paused",
+  agent?: string | null,
+  // The caller's configured turn default, so the resume guard below resolves the SAME effective cap
+  // that `reserveContinuation` enforces and `extendGoal` eligibility uses. All three disagreeing is
+  // what made the turn cap the one limit a resume could walk past.
+  defaultMaxAutoTurns: number = GOAL_DEFAULT_MAX_AUTO_TURNS,
+) {
   const agentValue = typeof agent === "string" && agent.trim() ? agent.trim() : null
   return mutateStatus((state) => {
     const goal = state.goals[sessionID]
@@ -546,7 +573,8 @@ export async function setGoalStatus(sessionID: string, status: "active" | "pause
     // A repeated "/goal pause" must not churn history or restate a transition that did not happen.
     if (goal.status === status) return { goal: snapshot(goal), limited: false }
     accountWallClock(goal)
-    if (status === "active" && exhaustGoalLimits(goal)) return { goal: snapshot(goal), limited: true }
+    if (status === "active" && exhaustGoalLimits(goal, defaultMaxAutoTurns))
+      return { goal: snapshot(goal), limited: true }
     goal.status = status
     goal.updatedAt = Math.floor(Date.now() / 1000)
     goal.lastAccountedAt = status === "active" ? goal.updatedAt : null
@@ -575,11 +603,19 @@ async function mutateStatus<T>(run: (state: State) => { goal: T; limited: boolea
  * Moves a goal into its limited status when it has already exhausted a limit, reporting whether it
  * did. Re-checked before every reactivation, not just the turn cap, so a goal that outgrew its
  * budget or duration while paused cannot be resumed and then corrected a turn later.
+ *
+ * `defaultMaxAutoTurns` MUST be the same value runtime enforcement and `extendGoal` eligibility use.
+ * Hardcoding the unbounded default here is what made the turn cap the one limit a resume could walk
+ * past: it reached this same `maybeStopForUsageLimit` call, but with a default that rendered its
+ * turn-cap branch inert, so only the duration branch could ever trip.
  */
-function exhaustGoalLimits(goal: Goal) {
+function exhaustGoalLimits(goal: Goal, defaultMaxAutoTurns: number) {
   if (goal.tokenBudget != null && goal.tokensUsed >= goal.tokenBudget) return maybeStopForBudget(goal)
+  // Covers the turn cap AND the duration: both are the same `usageLimited` status, and both are
+  // enforced from the same effective limit, so one call resolves them consistently.
   if (goal.maxDurationSeconds != null && goal.timeUsedSeconds >= goal.maxDurationSeconds)
-    return maybeStopForUsageLimit(goal, GOAL_DEFAULT_MAX_AUTO_TURNS)
+    return maybeStopForUsageLimit(goal, defaultMaxAutoTurns)
+  if (!hasAutoTurnHeadroom(goal, defaultMaxAutoTurns)) return maybeStopForUsageLimit(goal, defaultMaxAutoTurns)
   return false
 }
 
@@ -733,8 +769,16 @@ export async function recordAssistantProgress(sessionID: string, input: Assistan
     const text = input.text?.trim() ?? ""
     const messageID = input.messageID?.trim() ?? ""
     const outputTokens = positiveIntegerOrNull(input.outputTokens) ?? 0
-    const threshold = positiveIntegerOrNull(input.noProgressTokenThreshold) ?? goal.noProgressTokenThreshold
-    const maxNoProgressTurns = positiveIntegerOrNull(input.maxNoProgressTurns) ?? goal.maxNoProgressTurns
+    // The GOAL's own tolerance, always - it is resolved the same way `maxPromptFailures` is, and it
+    // must be. These two limits exist twice, as a plugin option and as a per-goal tool argument, and
+    // the tool documents the per-goal value as the one that wins: "a caller that asks for a tolerant
+    // goal must not be silently downgraded". Taking an override here instead put the OPTION ahead of
+    // the goal on every scored turn, so a goal created with `max_no_progress_turns: 8` for an
+    // overnight run self-paused after the option's 2 while `get_goal` reported 8 - the reported limit
+    // and the enforced one disagreeing, which is what the per-goal argument exists to prevent. The
+    // option still applies: `createGoal` folds it in as the default for any goal that did not ask.
+    const threshold = goal.noProgressTokenThreshold ?? GOAL_DEFAULT_NO_PROGRESS_TOKEN_THRESHOLD
+    const maxNoProgressTurns = goal.maxNoProgressTurns
     const summary = summarizeText(text)
     const previousSummary = summarizeText(goal.lastAssistantText)
     const repeatedMessage = Boolean(messageID && messageID === goal.lastAssistantMessageID)
@@ -754,7 +798,7 @@ export async function recordAssistantProgress(sessionID: string, input: Assistan
       // A turn that produced no output at all is the most degenerate no-progress case, so it must
       // NOT be scored as progress. Previously `outputTokens > 0 &&` made a zero-token turn reset
       // the counter, silently disabling stall detection for providers that report no step tokens.
-      const lowOutput = outputTokens < (threshold ?? GOAL_DEFAULT_NO_PROGRESS_TOKEN_THRESHOLD)
+      const lowOutput = outputTokens < threshold
       const changedSinceContinuation = Boolean(summary && summary !== goal.continuationBaselineSummary)
       // A turn that ran tools did something, even when the model narrated none of it. Scoring
       // on prose alone paused a long refactor or investigation - the common unattended shape -
@@ -930,7 +974,11 @@ function pushHistory(goal: Goal, type: GoalHistoryType, detail: string | null | 
 function summarizeText(text: string, limit = GOAL_CHECKPOINT_CHAR_LIMIT) {
   const normalized = text.replace(/\s+/g, " ").trim()
   if (!normalized) return ""
-  return normalized.length > limit ? `${normalized.slice(0, limit - 1)}...` : normalized
+  // The limit is a CHARACTER limit, so it is counted and cut in the same unit the model reads it
+  // in, matching `withinCharacterLimit`. A unit-based cut can end the summary on a lone surrogate,
+  // and every summary is compared against another summary to decide whether a turn did anything.
+  const shortened = truncateToCodePoints(normalized, limit)
+  return shortened.length === normalized.length ? shortened : `${truncateToCodePoints(normalized, limit - 1)}...`
 }
 
 function goalLimitSummary(goal: Goal) {
