@@ -14,6 +14,7 @@ import { Tool } from "@/tool/tool"
 import { ToolRegistry } from "@/tool/registry"
 import { Truncate } from "@/tool/truncate"
 import { Plugin } from "@/plugin"
+import { GoalDriver } from "@/goal/driver"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { Effect, Layer, Schema } from "effect"
 import { testEffect } from "../lib/effect"
@@ -48,6 +49,12 @@ const fakePlugin = Plugin.Service.of({
   trigger: (_name, _input, output) => Effect.succeed(output),
 } satisfies Plugin.Interface)
 
+const fakeGoalDriver = GoalDriver.Service.of({
+  init: () => Effect.void,
+  deps: () => Effect.succeed({ client: {} as any, options: {} }),
+  trigger: () => Effect.void,
+})
+
 const fakePermission = Permission.Service.of({
   ask: () => Effect.void,
   reply: () => Effect.void,
@@ -63,6 +70,7 @@ const fakeTruncate = Truncate.Service.of({
 
 const layer = Layer.mergeAll(
   Layer.succeed(Plugin.Service, fakePlugin),
+  Layer.succeed(GoalDriver.Service, fakeGoalDriver),
   Layer.succeed(Permission.Service, fakePermission),
   Layer.succeed(MCP.Service, fakeMcp()),
   Layer.succeed(Truncate.Service, fakeTruncate),

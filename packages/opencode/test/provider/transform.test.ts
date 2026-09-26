@@ -2,9 +2,16 @@ import { describe, expect, test } from "bun:test"
 import { Effect } from "effect"
 import { ProviderTransform } from "@/provider/transform"
 import { LLMRequestPrep } from "@/session/llm/request"
+import { GoalDriver } from "@/goal/driver"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { jsonSchema } from "ai"
+
+const fakeGoalDriver = GoalDriver.Service.of({
+  init: () => Effect.void,
+  deps: () => Effect.succeed({ client: {} as any, options: {} }),
+  trigger: () => Effect.void,
+})
 
 const mockModel = {
   id: "anthropic/claude-3-5-sonnet",
@@ -400,7 +407,7 @@ describe("ProviderTransform.options - gpt-5 textVerbosity", () => {
         } as any,
         flags: { outputTokenMax: 32_000, client: "test" } as any,
         isWorkflow: false,
-      }),
+      }).pipe(Effect.provideService(GoalDriver.Service, fakeGoalDriver)),
     )
     expect(result.params.options.reasoningEffort).toBe("high")
     expect(result.params.options.reasoningSummary).toBeUndefined()

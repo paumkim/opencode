@@ -8,6 +8,7 @@ import { Agent } from "@/agent/agent"
 import { Session } from "@/session/session"
 import { Permission } from "@/permission"
 import { Plugin } from "@/plugin"
+import { GoalDriver } from "@/goal/driver"
 
 export const CODE_MODE_TOOL = "execute"
 
@@ -133,15 +134,25 @@ function toolTree(catalog: readonly CatalogEntry[], run: (entry: CatalogEntry) =
 
 const invokeChildTool = Effect.fn("CodeMode.invokeChildTool")(function* (input: {
   plugin: Plugin.Interface
+  goal: GoalDriver.Interface
   entry: CatalogEntry
   args: Record<string, unknown>
   callID: string
   ctx: Tool.Context
 }) {
+  // Goal mode is core, not a plugin. Its hooks are dispatched here, before the external plugin
+  // hooks, matching the ordering from when the goal plugin was registered first.
+  const goal = input.goal
+  const beforeOutput = { args: input.args }
+  yield* goal.trigger(
+    "tool.execute.before",
+    { tool: input.entry.key, sessionID: input.ctx.sessionID, callID: input.callID },
+    beforeOutput,
+  )
   yield* input.plugin.trigger(
     "tool.execute.before",
     { tool: input.entry.key, sessionID: input.ctx.sessionID, callID: input.callID },
-    { args: input.args },
+    beforeOutput,
   )
   const result: CallToolResult = yield* Effect.gen(function* () {
     yield* input.ctx.ask({ permission: input.entry.key, metadata: {}, patterns: ["*"], always: ["*"] })
@@ -177,6 +188,11 @@ const invokeChildTool = Effect.fn("CodeMode.invokeChildTool")(function* (input: 
       },
     }),
   )
+  yield* goal.trigger(
+    "tool.execute.after",
+    { tool: input.entry.key, sessionID: input.ctx.sessionID, callID: input.callID, args: input.args },
+    result,
+  )
   yield* input.plugin.trigger(
     "tool.execute.after",
     { tool: input.entry.key, sessionID: input.ctx.sessionID, callID: input.callID, args: input.args },
@@ -192,6 +208,7 @@ export const CodeModeTool = Tool.define(
     const agents = yield* Agent.Service
     const sessions = yield* Session.Service
     const plugin = yield* Plugin.Service
+    const goal = yield* GoalDriver.Service
 
     const init: Tool.DefWithoutID<typeof Parameters, Metadata> = {
       description: DESCRIPTION,
@@ -222,6 +239,7 @@ export const CodeModeTool = Tool.define(
             childCalls += 1
             const result = yield* invokeChildTool({
               plugin,
+              goal,
               entry,
               args: (input ?? {}) as Record<string, unknown>,
               callID: `${ctx.callID ?? entry.key}/${childCalls}`,

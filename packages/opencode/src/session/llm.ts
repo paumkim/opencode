@@ -16,6 +16,7 @@ import { Config } from "@/config/config"
 import type { Agent } from "@/agent/agent"
 import type { MessageV2 } from "./message-v2"
 import { Plugin } from "@/plugin"
+import { GoalDriver } from "@/goal/driver"
 import { Permission } from "@/permission"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { EventV2 } from "@opencode-ai/core/event"
@@ -70,6 +71,7 @@ const live: Layer.Layer<
   | Config.Service
   | Provider.Service
   | Plugin.Service
+  | GoalDriver.Service
   | Permission.Service
   | EventV2Bridge.Service
   | LLMClientService
@@ -85,6 +87,9 @@ const live: Layer.Layer<
     const events = yield* EventV2Bridge.Service
     const llmClient = yield* LLMClient.Service
     const flags = yield* RuntimeFlags.Service
+    // Goal mode is core, not a plugin; its hooks are dispatched at each core call site ahead of the
+    // external plugin hooks.
+    const goal = yield* GoalDriver.Service
 
     const run = Effect.fn("LLM.run")(function* (input: StreamRequest) {
       yield* Effect.logInfo("stream", {
@@ -114,7 +119,7 @@ const live: Layer.Layer<
         plugin,
         flags,
         isWorkflow,
-      })
+      }).pipe(Effect.provideService(GoalDriver.Service, goal))
 
       const isOpenaiOauth = item.id === "openai" && info?.type === "oauth"
       if (input.preflight === true && shouldCompactRequest({
@@ -426,6 +431,7 @@ export const node = LayerNode.make({
     Config.node,
     Provider.node,
     Plugin.node,
+    GoalDriver.node,
     Permission.node,
     EventV2Bridge.node,
     llmClient,

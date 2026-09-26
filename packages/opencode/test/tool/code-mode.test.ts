@@ -6,6 +6,7 @@ import { Agent } from "@/agent/agent"
 import { MCP } from "@/mcp"
 import { Permission } from "@/permission"
 import { Plugin } from "@/plugin"
+import { GoalDriver } from "@/goal/driver"
 import { Session } from "@/session/session"
 import { Tool } from "@/tool/tool"
 import * as Truncate from "@/tool/truncate"
@@ -44,6 +45,7 @@ function harness(input: {
   trigger?: Plugin.Interface["trigger"]
 }) {
   return Layer.mergeAll(
+    Layer.mock(GoalDriver.Service, { trigger: () => Effect.void }),
     Layer.mock(Plugin.Service, {
       trigger: input.trigger ?? (((_name, _input, output) => Effect.succeed(output)) as Plugin.Interface["trigger"]),
     }),
