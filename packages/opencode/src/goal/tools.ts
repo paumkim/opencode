@@ -1,0 +1,343 @@
+import { Effect, Schema } from "effect"
+import { z } from "zod"
+import {
+  clearGoal,
+  completeGoal,
+  createGoal,
+  extendGoal,
+  formatGoalHistory,
+  getGoal,
+  markGoalUnmet,
+  setGoalStatus,
+  updateGoalObjective,
+} from "@/goal/impl"
+import { Agent } from "@/agent/agent"
+import * as Tool from "@/tool/tool"
+import * as Truncate from "@/tool/truncate"
+import { zodArgs } from "@/tool/zod"
+import {
+  positiveIntegerOrNull,
+  resolveCreateGoalLimits,
+  restrictedAgentSet,
+  tokensFromMessages,
+  type Client,
+  type CreateGoalArgs,
+  type ExtendGoalArgs,
+  type Options,
+  type UpdateGoalArgs,
+} from "@/goal/shared"
+
+// 0 means unbounded: goals are never capped at a default number of auto-continues.
+// An explicit positive `max_auto_turns` config value still wins (see positiveIntegerOrNull).
+export const DEFAULT_MAX_AUTO_TURNS = 0
+const PLAN_MODE_CREATE_NOTICE =
+  'Goal recorded while the session is in Plan mode, so execution is paused. Do not start implementation work now. Ask the user to switch to Build mode and resume the goal (for example with "/goal resume") to begin execution.'
+
+export interface Deps {
+  client: Client
+  options: Options
+  agent: Agent.Interface
+  truncate: Truncate.Interface
+}
+
+type Execute = (args: any, ctx: Tool.Context) => Promise<string>
+
+/**
+ * Builds a core tool from a Zod-arg plugin-style definition, reproducing the semantics the tool
+ * registry applied to plugin tools: Zod validation for the arguments, the generated JSON Schema
+ * for the model, `truncate.output` on the result, and the same `Tool.execute` span.
+ */
+function defineTool(
+  id: string,
+  description: string,
+  args: Record<string, z.ZodType>,
+  deps: Deps,
+  execute: Execute,
+): Tool.Def<Schema.Decoder<unknown>> {
+  const { parameters, jsonSchema } = zodArgs(args)
+  return {
+    id,
+    description,
+    parameters,
+    jsonSchema,
+    execute: (toolArgs, toolCtx) =>
+      Effect.gen(function* () {
+        const output = yield* Effect.promise(() => execute(toolArgs, toolCtx))
+        const info = yield* deps.agent.get(toolCtx.agent)
+        const truncated = yield* deps.truncate.output(output, {}, info)
+        return {
+          title: "",
+          output: truncated.truncated ? truncated.content : output,
+          metadata: {
+            truncated: truncated.truncated,
+            ...(truncated.truncated && { outputPath: truncated.outputPath }),
+          },
+        }
+      }).pipe(
+        Effect.withSpan("Tool.execute", {
+          attributes: {
+            "tool.name": id,
+            "session.id": toolCtx.sessionID,
+            "message.id": toolCtx.messageID,
+            ...(toolCtx.callID ? { "tool.call_id": toolCtx.callID } : {}),
+          },
+        }),
+      ),
+  }
+}
+
+export function goalTools(deps: Deps): Record<string, Tool.Def<Schema.Decoder<unknown>>> {
+  const options = deps.options
+  const maxAutoTurns = positiveIntegerOrNull(options.max_auto_turns) ?? DEFAULT_MAX_AUTO_TURNS
+  const isPlanAgent = (agent: unknown) => {
+    const names = restrictedAgentSet(options)
+    return typeof agent === "string" && names.has(agent.trim().toLowerCase())
+  }
+
+  async function createGoalFromTool(input: CreateGoalArgs, ctx: { sessionID: string; agent?: string }) {
+    const planningOnly = isPlanAgent(ctx.agent)
+    const sessionTokensAtCreation = await fetchSessionTokens(deps.client, ctx.sessionID).catch(() => null)
+    const goal = await createGoal(ctx.sessionID, input.objective, {
+      ...resolveCreateGoalLimits(input, options),
+      // A per-call value wins over the config default. The defaults are tuned for interactive
+      // use and self-pause an unattended run quickly, so a caller that asks for a tolerant goal
+      // must not be silently downgraded to them.
+      noProgressTokenThreshold: input.no_progress_token_threshold ?? options.no_progress_token_threshold ?? null,
+      maxNoProgressTurns: input.max_no_progress_turns ?? options.max_no_progress_turns ?? null,
+      maxPromptFailures: input.max_prompt_failures ?? null,
+      agent: typeof ctx.agent === "string" ? ctx.agent : null,
+      initialStatus: planningOnly ? "paused" : "active",
+      sessionTokensAtCreation,
+    })
+    return JSON.stringify(planningOnly ? { goal, plan_mode_notice: PLAN_MODE_CREATE_NOTICE } : { goal }, null, 2)
+  }
+
+  async function fetchSessionTokens(client: Client, sessionID: string) {
+    const result = await client.session.messages({ path: { id: sessionID } })
+    const data = Array.isArray(result.data) ? result.data : []
+    return tokensFromMessages(data as { info?: unknown; parts?: unknown[] }[])
+  }
+
+  const limitArgs = {
+    token_budget: z
+      .number()
+      .int()
+      .positive()
+      .nullable()
+      .optional()
+      .describe("Optional positive token budget. Omit or pass null for unlimited."),
+    max_auto_turns: z
+      .number()
+      .int()
+      .positive()
+      .nullable()
+      .optional()
+      .describe("Optional per-goal auto-continue limit. Omit or pass null for unlimited."),
+    max_duration_seconds: z
+      .number()
+      .int()
+      .positive()
+      .nullable()
+      .optional()
+      .describe("Optional per-goal duration limit. Omit or pass null for unlimited."),
+    no_progress_token_threshold: z
+      .number()
+      .int()
+      .positive()
+      .nullable()
+      .optional()
+      .describe(
+        "Optional per-goal minimum output tokens for a continuation turn to count as progress. Raise it only to tolerate genuinely long-running single turns.",
+      ),
+    max_no_progress_turns: z
+      .number()
+      .int()
+      .positive()
+      .nullable()
+      .optional()
+      .describe(
+        "Optional consecutive low-progress turns tolerated before auto-pausing. Raise for unattended/overnight runs; the default (2) pauses quickly.",
+      ),
+    max_prompt_failures: z
+      .number()
+      .int()
+      .positive()
+      .nullable()
+      .optional()
+      .describe(
+        "Optional consecutive failed auto-continue prompts tolerated before auto-pausing. Raise for unattended runs so transient provider/network failures do not stop the goal.",
+      ),
+  }
+
+  return {
+    get_goal: defineTool(
+      "get_goal",
+      "Get the current goal for this OpenCode session, including status, observed token usage, elapsed-time usage, budgets, checkpoints, and history.",
+      {},
+      deps,
+      async (_args, context) => JSON.stringify({ goal: await getGoal(context.sessionID) }, null, 2),
+    ),
+    get_goal_history: defineTool(
+      "get_goal_history",
+      "Get the current goal lifecycle history and recent checkpoints for this OpenCode session.",
+      {},
+      deps,
+      async (_args, context) => {
+        const goal = await getGoal(context.sessionID)
+        return JSON.stringify({ goal, history_report: formatGoalHistory(goal) }, null, 2)
+      },
+    ),
+    create_goal: defineTool(
+      "create_goal",
+      "Create a goal only when explicitly requested by the user or system/developer instructions; do not infer goals from ordinary tasks. Fails if a non-complete goal exists. Limits are unlimited by default: omitting a limit arg (or passing null) means no token budget, no auto-continue cap, and no duration cap, so only pass numbers the user explicitly asked for. While the session is in Plan mode, the goal is recorded as paused and execution requires the user to switch to Build mode.",
+      { objective: z.string().min(1).max(4000).describe("The concrete objective to start pursuing."), ...limitArgs },
+      deps,
+      async (args, context) => createGoalFromTool(args as CreateGoalArgs, context),
+    ),
+    set_goal: defineTool(
+      "set_goal",
+      "Set a new goal when the user explicitly asks the AGENT to formulate and set its own goal (the model writes the objective itself). Prefer create_goal when passing the user's own words. Fails if a non-complete goal exists. Limits are unlimited by default: omitting a limit arg (or passing null) means no token budget, no auto-continue cap, and no duration cap, so only pass numbers the user explicitly asked for. While the session is in Plan mode, the goal is recorded as paused and execution requires the user to switch to Build mode.",
+      {
+        objective: z.string().min(1).max(4000).describe("The model-formulated concrete objective to start pursuing."),
+        ...limitArgs,
+      },
+      deps,
+      async (args, context) => createGoalFromTool(args as CreateGoalArgs, context),
+    ),
+    update_goal_objective: defineTool(
+      "update_goal_objective",
+      "Edit the current OpenCode goal objective when the user explicitly asks to edit or replace it.",
+      {
+        objective: z.string().min(1).max(4000).describe("The updated concrete objective."),
+        status: z.enum(["active", "paused"]).optional().describe("Whether the edited goal should be active or paused."),
+      },
+      deps,
+      async (args, context) => {
+        const input = args as { objective: string; status?: "active" | "paused" }
+        const requested = input.status ?? "active"
+        const planningOnly = requested === "active" && isPlanAgent(context.agent)
+        const goal = await updateGoalObjective(
+          context.sessionID,
+          input.objective,
+          planningOnly ? "paused" : requested,
+          {
+            agent: typeof context.agent === "string" ? context.agent : null,
+            planModePause: planningOnly,
+          },
+        )
+        return JSON.stringify(planningOnly ? { goal, plan_mode_notice: PLAN_MODE_CREATE_NOTICE } : { goal }, null, 2)
+      },
+    ),
+    update_goal: defineTool(
+      "update_goal",
+      "Close the existing goal only after an audit against real evidence. Use status complete only when the objective is achieved and no required work remains, and include evidence. Use status unmet only when the objective cannot be achieved or is blocked, and include the blocker. Do not close a goal merely because work is stopping.",
+      {
+        status: z
+          .enum(["complete", "unmet"])
+          .describe("Required. complete means achieved; unmet means blocked or impossible."),
+        evidence: z
+          .string()
+          .min(1)
+          .max(4000)
+          .optional()
+          .describe("Required when status is complete. Summarize the concrete evidence verified."),
+        blocker: z
+          .string()
+          .min(1)
+          .max(4000)
+          .optional()
+          .describe("Required when status is unmet. Explain the concrete blocker or impossibility."),
+      },
+      deps,
+      async (args, context) => {
+        const input = args as UpdateGoalArgs
+        if (input.status === "complete") {
+          const goal = await completeGoal(context.sessionID, input.evidence ?? "")
+          const budget = goal.tokenBudget == null ? "" : ` Token usage: ${goal.tokensUsed}/${goal.tokenBudget}.`
+          const report = `Goal achieved. Time used: ${goal.timeUsedSeconds} seconds.${budget} Evidence: ${goal.completionEvidence}.`
+          return JSON.stringify({ goal, completion_report: report }, null, 2)
+        }
+        const goal = await markGoalUnmet(context.sessionID, input.blocker ?? "")
+        const report = `Goal unmet. Time used: ${goal.timeUsedSeconds} seconds. Blocker: ${goal.blocker}.`
+        return JSON.stringify({ goal, unmet_report: report }, null, 2)
+      },
+    ),
+    extend_goal: defineTool(
+      "extend_goal",
+      "Explicitly extend the budgets of a goal that stopped at a token, turn, or duration limit. Requires at least one higher limit or a deliberate null for token/duration; preserves usage and history. Closed and ordinary active goals are rejected.",
+      {
+        token_budget: z
+          .number()
+          .int()
+          .positive()
+          .nullable()
+          .optional()
+          .describe("Higher token budget, or null for no token limit."),
+        max_auto_turns: z
+          .number()
+          .int()
+          .positive()
+          .nullable()
+          .optional()
+          .describe("Higher auto-continue limit, or null for no auto-continue limit."),
+        max_duration_seconds: z
+          .number()
+          .int()
+          .positive()
+          .nullable()
+          .optional()
+          .describe("Higher duration limit, or null for no duration limit."),
+      },
+      deps,
+      async (args, context) => {
+        if (isPlanAgent(context.agent)) {
+          throw new Error(
+            "cannot extend or reactivate the goal while the session is in Plan mode; switch to Build mode first",
+          )
+        }
+        const input = args as ExtendGoalArgs
+        // Pass the SAME configured turn default that runtime enforcement uses, so extension
+        // reactivation eligibility can never disagree with enforcement.
+        const goal = await extendGoal(
+          context.sessionID,
+          {
+            tokenBudget: input.token_budget,
+            maxAutoTurns: input.max_auto_turns,
+            maxDurationSeconds: input.max_duration_seconds,
+          },
+          maxAutoTurns,
+        )
+        return JSON.stringify({ goal }, null, 2)
+      },
+    ),
+    update_goal_status: defineTool(
+      "update_goal_status",
+      "Pause or resume the current OpenCode goal when the user explicitly asks to pause or resume it. Resuming is not allowed while the session is in Plan mode; the user must switch to Build mode first.",
+      {
+        status: z.enum(["active", "paused"]).describe("active resumes a goal; paused pauses it without clearing it."),
+      },
+      deps,
+      async (args, context) => {
+        const input = args as { status: "active" | "paused" }
+        if (input.status === "active" && isPlanAgent(context.agent)) {
+          throw new Error(
+            "cannot resume the goal while the session is in Plan mode; ask the user to switch to Build mode and resume the goal from there",
+          )
+        }
+        const goal = await setGoalStatus(
+          context.sessionID,
+          input.status,
+          typeof context.agent === "string" ? context.agent : null,
+        )
+        return JSON.stringify({ goal }, null, 2)
+      },
+    ),
+    clear_goal: defineTool(
+      "clear_goal",
+      "Clear the current OpenCode goal for this session when the user explicitly asks to clear it.",
+      {},
+      deps,
+      async (_args, context) => JSON.stringify({ cleared: await clearGoal(context.sessionID) }, null, 2),
+    ),
+  }
+}

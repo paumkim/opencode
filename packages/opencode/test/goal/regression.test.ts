@@ -17,10 +17,13 @@ import {
   updateGoalObjective,
   statePath,
 } from "@/goal/impl"
-import goalPlugin, { GOAL_PLUGIN_ID } from "@/plugin/goal/server"
-import { internalPluginIds, internalPluginOptions } from "@/plugin/index"
+import { internalPluginIds } from "@/plugin/index"
 import { GOAL_DEFAULT_MAX_AUTO_TURNS } from "@/goal/schema"
-import { GOAL_PROMPT } from "@opencode-ai/core/plugin/command"
+import { GOAL_PROMPT } from "@opencode-ai/core/prompt/command"
+import { CONFIG_KEY, readGoalOptions } from "@/goal/shared"
+import { goalTools } from "@/goal/tools"
+import { createGoalRuntime } from "@/goal/driver"
+import { Effect } from "effect"
 
 let stateDir: string | undefined
 const previous = process.env.OPENCODE_GOAL_STATE_PATH
@@ -77,7 +80,11 @@ describe("C1: extension reactivation must agree with runtime turn enforcement", 
     await accountUsage(sessionID, 500)
     expect((await getGoal(sessionID))?.status).toBe("budgetLimited")
     // tokensUsed is 500, so a 500 budget does not admit it and the goal must stay limited.
-    const refused = await extendGoal(sessionID, { tokenBudget: 500, maxAutoTurns: null }, RUNTIME_DEFAULT_MAX_AUTO_TURNS)
+    const refused = await extendGoal(
+      sessionID,
+      { tokenBudget: 500, maxAutoTurns: null },
+      RUNTIME_DEFAULT_MAX_AUTO_TURNS,
+    )
     expect(refused.status).toBe("budgetLimited")
     expect(refused.lastStatus).toContain("cumulative usage still exceeds")
   })
@@ -255,7 +262,12 @@ describe("M1/M2: resume paths behave identically and refresh progress state", ()
     for (const id of ["a", "b", "c"]) {
       await reserveContinuation(sessionID, 0, 0)
       await recordContinuationResult(sessionID, "success", 3)
-      await recordAssistantProgress(sessionID, { messageID: id, text: "same", outputTokens: 1, evaluateContinuation: true })
+      await recordAssistantProgress(sessionID, {
+        messageID: id,
+        text: "same",
+        outputTokens: 1,
+        evaluateContinuation: true,
+      })
     }
     const stalled = await getGoal(sessionID)
     expect(stalled?.status).toBe("paused")
@@ -275,7 +287,12 @@ describe("M1/M2: resume paths behave identically and refresh progress state", ()
     // Prime the baseline with a real turn, so the next turn is compared against it.
     await reserveContinuation(sessionID, 0, 0)
     await recordContinuationResult(sessionID, "success", 3)
-    await recordAssistantProgress(sessionID, { messageID: "z0", text: "same", outputTokens: 500, evaluateContinuation: true })
+    await recordAssistantProgress(sessionID, {
+      messageID: "z0",
+      text: "same",
+      outputTokens: 500,
+      evaluateContinuation: true,
+    })
     expect((await getGoal(sessionID))?.noProgressTurns).toBe(0)
 
     await reserveContinuation(sessionID, 0, 0)
@@ -301,7 +318,12 @@ describe("M1/M2: resume paths behave identically and refresh progress state", ()
   test("an oscillating checkpoint does not spend the checkpoint budget", async () => {
     const sessionID = "l11"
     await createGoal(sessionID, "oscillating", { maxAutoTurns: 100 })
-    for (const [id, text] of [["1", "alpha"], ["2", "beta"], ["3", "alpha"], ["4", "beta"]] as const) {
+    for (const [id, text] of [
+      ["1", "alpha"],
+      ["2", "beta"],
+      ["3", "alpha"],
+      ["4", "beta"],
+    ] as const) {
       await recordAssistantProgress(sessionID, { messageID: id, text, outputTokens: 500 })
     }
     const goal = await getGoal(sessionID)
@@ -309,30 +331,54 @@ describe("M1/M2: resume paths behave identically and refresh progress state", ()
   })
 })
 
-describe("H10: the goal plugin is registered and its tool set matches the shipped prompt", () => {
-  test("the goal plugin is part of the internal plugin set", () => {
-    const ids = internalPluginIds(flags())
-    expect(ids).toContain(GOAL_PLUGIN_ID)
+describe("H10: goal mode is core and its tool set matches the shipped prompt", () => {
+  test("goal mode is no longer an internal plugin", () => {
+    expect(internalPluginIds(flags())).not.toContain(CONFIG_KEY)
   })
 
-  test("config.plugin_options is forwarded to the matching internal plugin", () => {
-    // H8: internal plugins used to be invoked with no second argument, making every option
-    // (and the turn watchdog built on max_turn_time) unreachable.
-    const configured = { [GOAL_PLUGIN_ID]: { max_auto_turns: 7, auto_continue: false } }
-    expect(internalPluginOptions(configured, GOAL_PLUGIN_ID)).toEqual({
-      max_auto_turns: 7,
-      auto_continue: false,
-    })
-    // Unrelated plugins and an absent config must resolve to undefined, not to a shared object.
-    expect(internalPluginOptions(configured, "local.azure")).toBeUndefined()
-    expect(internalPluginOptions(undefined, GOAL_PLUGIN_ID)).toBeUndefined()
+  test("core still implements every hook the goal feature used to provide as a plugin", async () => {
+    // The relocation moved the hooks out of the plugin loader. If a future refactor drops one
+    // while it looks unused, token accounting, the system reminder, and compaction silently rot.
+    const { hooks } = createGoalRuntime({ client: fakeClient() as never, options: {} })
+    for (const name of [
+      "event",
+      "dispose",
+      "tool.execute.before",
+      "tool.execute.after",
+      "chat.message",
+      "experimental.chat.messages.transform",
+      "experimental.chat.system.transform",
+      "experimental.session.compacting",
+      "experimental.compaction.autocontinue",
+    ]) {
+      expect(typeof hooks[name as keyof typeof hooks]).toBe("function")
+    }
+  })
+
+  test("the legacy config key is still honoured", () => {
+    // H8: goal options used to be forwarded through the plugin id, and opencode.json files in the
+    // wild still set `plugin_options["local.goal-mode.server"]`. Core reads the same key.
+    expect(CONFIG_KEY).toBe("local.goal-mode.server")
+    const configured = { plugin_options: { [CONFIG_KEY]: { max_auto_turns: 7, auto_continue: false } } }
+    expect(readGoalOptions(configured)).toEqual({ max_auto_turns: 7, auto_continue: false })
+    // An unrelated plugin id and an absent config must not leak into goal options.
+    expect(readGoalOptions({ plugin_options: { "local.azure": { max_auto_turns: 1 } } })).toEqual({})
+    expect(readGoalOptions({})).toEqual({})
+  })
+
+  test("the goal tools are registered even when default plugins are disabled", () => {
+    // The whole point of moving goal mode into core: OPENCODE_DISABLE_DEFAULT_PLUGINS must not
+    // remove the goal tools. They are built by the tool registry, not by the internal plugin list.
+    expect(internalPluginIds(flags()).some((id) => id === CONFIG_KEY)).toBe(false)
+    // No internal plugin contributes a goal tool any more, with or without the flag, so the
+    // registry can only be getting them from core.
+    const names = Object.keys(goalToolNames())
+    for (const id of GOAL_TOOL_IDS) expect(names).toContain(id)
   })
 
   test("every tool named by the /goal prompt is actually registered", async () => {
     const registered = await registeredToolNames()
-    const named = new Set(
-      GOAL_PROMPT.match(/\b(?:create|set|get|extend|clear|update)_goal[a-z_]*\b/g) ?? [],
-    )
+    const named = new Set(GOAL_PROMPT.match(/\b(?:create|set|get|extend|clear|update)_goal[a-z_]*\b/g) ?? [])
     expect(named.size).toBeGreaterThan(0)
     for (const tool of named) {
       expect(registered).toContain(tool)
@@ -348,9 +394,29 @@ describe("H10: the goal plugin is registered and its tool set matches the shippe
   })
 })
 
+const GOAL_TOOL_IDS = [
+  "get_goal",
+  "get_goal_history",
+  "create_goal",
+  "set_goal",
+  "update_goal_objective",
+  "update_goal",
+  "extend_goal",
+  "update_goal_status",
+  "clear_goal",
+]
+
+function goalToolNames() {
+  return goalTools({
+    client: fakeClient() as never,
+    options: {},
+    agent: { get: () => Effect.succeed({} as never) } as never,
+    truncate: { output: (text: string) => Effect.succeed({ content: text, truncated: false as const }) } as never,
+  })
+}
+
 async function registeredToolNames() {
-  const hooks = await goalPlugin.server({ client: fakeClient() } as never, {})
-  return Object.keys(hooks.tool ?? {})
+  return Object.keys(goalToolNames())
 }
 
 function fakeClient() {
@@ -413,7 +479,12 @@ describe("overnight tolerance: a goal may opt out of the interactive self-pause 
     for (const id of ["a", "b", "c", "d", "e"]) {
       await reserveContinuation(sessionID, 0, 0)
       await recordContinuationResult(sessionID, "success", 3)
-      await recordAssistantProgress(sessionID, { messageID: id, text: "same", outputTokens: 1, evaluateContinuation: true })
+      await recordAssistantProgress(sessionID, {
+        messageID: id,
+        text: "same",
+        outputTokens: 1,
+        evaluateContinuation: true,
+      })
     }
     const running = await getGoal(sessionID)
     expect(running?.status).toBe("active")
@@ -423,7 +494,12 @@ describe("overnight tolerance: a goal may opt out of the interactive self-pause 
     for (const id of ["f", "g"]) {
       await reserveContinuation(sessionID, 0, 0)
       await recordContinuationResult(sessionID, "success", 3)
-      await recordAssistantProgress(sessionID, { messageID: id, text: "same", outputTokens: 1, evaluateContinuation: true })
+      await recordAssistantProgress(sessionID, {
+        messageID: id,
+        text: "same",
+        outputTokens: 1,
+        evaluateContinuation: true,
+      })
     }
     const stopped = await getGoal(sessionID)
     expect(stopped?.status).toBe("paused")

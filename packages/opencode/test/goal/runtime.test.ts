@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createGoal, getGoal, statePath } from "@/goal/impl"
-import goalPlugin, { staleAllContinuationClaims } from "@/plugin/goal/server"
+import { createGoalRuntime, staleAllContinuationClaims } from "@/goal/driver"
 
 let stateDir: string | undefined
 const previous = process.env.OPENCODE_GOAL_STATE_PATH
@@ -42,7 +42,7 @@ function client(overrides: ClientOverrides = {}) {
 }
 
 async function hooks(overrides: ClientOverrides = {}, options: Record<string, unknown> = {}) {
-  return goalPlugin.server({ client: client(overrides) } as never, options as never)
+  return createGoalRuntime({ client: client(overrides) as never, options: options as never }).hooks
 }
 
 const idleEvent = (sessionID: string) => ({ type: "session.idle", properties: { sessionID } })

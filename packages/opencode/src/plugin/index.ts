@@ -22,7 +22,7 @@ import { DigitalOceanAuthPlugin } from "./digitalocean"
 import { XaiAuthPlugin } from "./xai"
 import { CerebrasPlugin } from "./cerebras"
 import { SnowflakeCortexAuthPlugin } from "./snowflake-cortex"
-import goalPlugin, { GOAL_PLUGIN_ID } from "./goal/server"
+import { GoalDriver } from "@/goal/driver"
 import { Effect, Layer, Context } from "effect"
 import { EffectBridge } from "@/effect/bridge"
 import { InstanceState } from "@/effect/instance-state"
@@ -105,7 +105,6 @@ function internalPlugins(flags: RuntimeFlags.Info): { id: string; plugin: Plugin
     { id: "local.snowflake-cortex", plugin: SnowflakeCortexAuthPlugin },
     { id: "local.xai", plugin: XaiAuthPlugin },
     { id: "local.cerebras", plugin: CerebrasPlugin },
-    { id: GOAL_PLUGIN_ID, plugin: goalPlugin.server },
   ]
 }
 
@@ -154,6 +153,7 @@ const layer = Layer.effect(
     const events = yield* EventV2Bridge.Service
     const config = yield* Config.Service
     const flags = yield* RuntimeFlags.Service
+    const goal = yield* GoalDriver.Service
 
     const state = yield* InstanceState.make<State>(
       Effect.fn("Plugin.state")(function* (ctx) {
@@ -317,6 +317,9 @@ const layer = Layer.effect(
     >(name: Name, input: Input, output: Output) {
       if (!name) return output
       const s = yield* InstanceState.get(state)
+      // Goal mode is core, not a plugin: its hooks run for every instance, independent of
+      // `disableDefaultPlugins`, and before any externally registered plugin hook.
+      yield* goal.trigger(name, input, output)
       for (const hook of s.hooks) {
         const fn = hook[name] as any
         if (!fn) continue
@@ -341,7 +344,7 @@ const layer = Layer.effect(
 export const node = LayerNode.make({
   service: Service,
   layer: layer,
-  deps: [EventV2Bridge.node, Config.node, RuntimeFlags.node],
+  deps: [EventV2Bridge.node, Config.node, RuntimeFlags.node, GoalDriver.node],
 })
 
 export * as Plugin from "."
