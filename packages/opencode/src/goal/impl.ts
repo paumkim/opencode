@@ -1089,6 +1089,18 @@ export function formatGoal(goal: GoalSnapshot | null) {
   if (goal.stopReason) lines.push(`Stop reason: ${safe(goal.stopReason)}`)
   if (goal.completionEvidence) lines.push(`Completion evidence: ${safe(goal.completionEvidence)}`)
   if (goal.blocker) lines.push(`Blocker: ${safe(goal.blocker)}`)
+  // The completed ledger is the goal's only durable record of what it has already finished, and this
+  // report is the state block for the compaction context, the plan-mode reminder and the
+  // current-state reminder. Without it, compaction - the one moment the conversation is rewritten
+  // and only what this text names survives - kept the objective and the budget and dropped the record
+  // of finished work, which is how an unattended goal re-derived its own history and re-fixed the
+  // same defect. Always rendered, so a goal that has recorded nothing still shows the section.
+  lines.push(
+    `Work already completed - do NOT redo any of this:`,
+    ...(goal.completed.length > 0
+      ? goal.completed.map((item) => `- ${safe(item)}`)
+      : ["- (nothing recorded yet)"]),
+  )
   return lines.join("\n")
 }
 
