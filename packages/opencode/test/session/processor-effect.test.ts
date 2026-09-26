@@ -1690,9 +1690,13 @@ function reasoningOnlyTurn(text: string): LLMEvent[] {
   ]
 }
 
-// A provider-executed tool that completes with a real result. Unlike
-// `toolTurn` (which leaves the call pending), this sets `stateChanged` so the
-// cross-turn streak detectors reset on real progress.
+// A provider-executed tool that completes with a real result. Unlike `toolTurn` (which leaves the
+// call pending), the call actually settles, so the turn is not blocked waiting on it.
+//
+// Note it does NOT set `stateChanged`: it produces no file patch, and a completed call is not
+// evidence that anything changed. `stateChanged` now comes from the step-finish snapshot diff, so
+// this turn deliberately leaves the cross-turn streaks alone - which is what the "read-only tool
+// result" test below pins.
 function providerToolTurn(name: string, input: Record<string, unknown>): LLMEvent[] {
   providerCallId++
   const id = `call-${providerCallId}`
@@ -2008,7 +2012,7 @@ itNoEdit.instance(
 )
 
 itNoEdit.instance(
-  "session.processor effect tests reset text/reasoning streaks on state-changing tool result",
+  "session.processor keeps the text streak across a completed tool call that changed nothing",
   () =>
     Effect.gen(function* () {
       const test = yield* TestInstance
@@ -2041,18 +2045,34 @@ itNoEdit.instance(
         tools: {},
       }
 
-      // Two identical text turns, then a state-changing edit. The text streak
-      // should reset, and the edit also clears the no-edit streak.
-      pushLLM(textTurn("reading files"))
+      // This test asserted "a state-changing tool result resets the text streak" using a turn that
+      // changes no state, and it could not tell the difference: `loopDetected === false` after two
+      // identical turns holds both when the reset happened and when the counter simply never
+      // reached TEXT_LOOP_THRESHOLD. Now that the reset is scoped to a genuine file patch, this turn
+      // (a completed tool call with no patch) must NOT reset the streak.
+      //
+      // `create()` runs once per step, so the WITHIN-turn runaway window never sees more than one
+      // text part and stays out of the way; the cross-turn `textLoop` counter is the one under
+      // test here. Three identical turns must still reach TEXT_LOOP_THRESHOLD across the tool call.
       pushLLM(textTurn("reading files"))
       pushLLM(providerToolTurn("write", { path: "a.txt", content: "x" }))
+      pushLLM(textTurn("reading files"))
+      pushLLM(textTurn("reading files"))
 
-      yield* handle.process(input)
-      yield* handle.process(input)
-      const value = yield* handle.process(input)
+      // Turn 1: first occurrence. Turn 2 is the tool call, which emits no text, so it cannot
+      // increment the counter - but it must not clear it either. Turns 3 and 4 are the second and
+      // third occurrences, so the third one trips TEXT_LOOP_THRESHOLD.
+      expect(yield* handle.process(input)).toEqual({ result: "continue", noEditStreak: 1, runaway: false })
+      expect(yield* handle.process(input)).toEqual({ result: "continue", noEditStreak: 2, runaway: false })
+      expect(yield* handle.process(input)).toEqual({ result: "continue", noEditStreak: 3, runaway: false })
+      const third = yield* handle.process(input)
 
-      expect(value.result).toBe("continue")
-      expect(handle.loopDetected).toBe(false)
+      // The streak survived the tool call, so this is the THIRD identical text and the detector
+      // fires. A reset on turn 2 would have left the count at 1, and turns 3 and 4 would have
+      // returned continue.
+      expect(third.result).toBe("stop")
+      expect(handle.loopDetected).toBe(true)
+      expect(handle.loopReason).toBe("text")
     }),
   { config: cfg },
 )
