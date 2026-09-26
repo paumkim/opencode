@@ -1,3 +1,39 @@
+## HARD RULE: Never Exhaust System Memory
+
+**Running the full `bun test` suite has crashed this machine by consuming all available RAM. It is forbidden.**
+
+- **NEVER run the full test suite.** Not `bun test`, not `bun test test/`, not `bun run test`, not `bun run bench:test`, not `bun run script/bench-test-suite.ts`, and never anything that fans out across the whole `test/` tree. This applies to the orchestrator AND to every subagent.
+- **Always scope test runs to specific files.** Pass explicit paths, e.g. `bun test test/tool/edit.test.ts`, or a narrow directory. If unsure which files are relevant, grep for them first and run only those.
+- **Never raise test concurrency.** Do not add `--concurrent`, and do not raise Bun's default worker count. Leave concurrency at its default. A memory spike is the signal to run FEWER tests, not more.
+- **Cap memory with a cgroup, never with `ulimit -v`.** Use:
+  `systemd-run --user --scope -p MemoryMax=6G -p MemorySwapMax=0 -- <command>`
+  This terminates the process cleanly at the cap. **`ulimit -v` is actively harmful for Bun commands** and must not be used here — see "Bun reserves address space" below. Verified: a 4G cgroup SIGTERMs typecheck cleanly, 6G lets it finish.
+- **Watch RSS on long runs.** For stress or soak runs, sample `ps -o rss` periodically and abort if it crosses ~6GB. Prefer short, targeted runs repeated over one huge run.
+- **When delegating**, state the memory rule in the task prompt explicitly. A subagent asked to "run the tests" will otherwise run the full suite and exhaust RAM.
+- If a task appears to require the full suite, STOP and ask the user for permission first. The default answer is no.
+
+### Bun reserves address space — why `ulimit -v` is the wrong tool
+
+Measured on a live opencode process: `VmSize` 74.5 GB and `VmPeak` 135 GB, while `VmRSS` is only 65 MB. Essentially all of that is `VmData` (73.7 GB) of *reserved* address space — the JavaScriptCore GC arena plus per-thread malloc arenas — that is never committed to physical RAM.
+
+Consequences, all learned the hard way on this machine:
+
+- **`ulimit -v` caps address space, not resident memory.** Setting it below what Bun reserves makes the process die outright rather than throttle. `ulimit -v 4194304` (4G) crashed `bun run typecheck` with a goroutine stack trace; the identical command with no cap passes. It is not a memory cap, it is a way to break Bun.
+- **To cap Bun, cap the cgroup** (`MemoryMax`), which bounds RSS regardless of how much address space is reserved.
+- **Never judge capacity by VIRT or VmPeak.** Use `VmRSS` / `ps -o rss` only.
+
+### Heavy tooling: typecheck and formatting
+
+- **`tsgo --noEmit` peaks at ~1.95 GB RSS for a single package.** The root `bun typecheck` script is `bun turbo typecheck`, which fans out across ~33 packages **in parallel**. Unbounded that is many gigabytes at once, and it is the most likely way to stall this machine outside of the test suite.
+- **Always cap turbo concurrency when typechecking the monorepo:**
+  `systemd-run --user --scope -p MemoryMax=6G -p MemorySwapMax=0 -- bun turbo typecheck --concurrency=2`
+  Verified: 33/33 tasks pass in ~17s. Raise the memory cap before raising the concurrency, never the other way round.
+- **Prefer per-package typecheck** when you only touched one package: `cd packages/<pkg> && bun run typecheck`. One `tsgo` at ~2GB instead of a parallel fan-out.
+- **Never use `bunx` for tooling you already have installed.** `bunx prettier` re-resolves the package, spawning an extra runtime and potentially hitting the network. Call the local binary instead:
+  `node node_modules/prettier/bin/prettier.cjs --write <files>` — 0.4s versus seconds, and no extra process.
+- **Do not run `prettier --write` on a whole pre-existing file** just to land a small change. Some files are not prettier-clean, so `--write` reformats hundreds of unrelated lines and buries the real diff. Use `--check` to verify, and only `--write` when you accept a whole-file reformat as part of the change.
+
+
 ## Language
 
 - **Default language: US English.** All agents and subagents must communicate in US English (American English spelling, vocabulary, and phrasing) for all user-facing responses, summaries, documentation, and comments.

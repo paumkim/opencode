@@ -45,6 +45,10 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Instruction") {}
 
+// Generous enough to cover every instruction file reachable from a normal
+// worktree, small enough that the cache cannot grow without bound.
+const INSTRUCTION_CACHE_LIMIT = 512
+
 const layer: Layer.Layer<
   Service,
   never,
@@ -95,6 +99,16 @@ const layer: Layer.Layer<
       const cached = s.cache.get(filepath)
       if (cached !== undefined) return cached
       const content = yield* fs.readFileString(filepath).pipe(Effect.catch(() => Effect.succeed("")))
+      // Bound the cache. Keys are instruction-file paths discovered by walking
+      // up from the working directory, so a long-lived instance that visits many
+      // worktrees, temporary directories, or generated paths would otherwise
+      // retain a file's full contents for every path it has ever seen. Insertion
+      // order makes the oldest key the first eviction candidate, which keeps the
+      // hot ancestor-chain entries that every turn re-reads.
+      if (s.cache.size >= INSTRUCTION_CACHE_LIMIT) {
+        const oldest = s.cache.keys().next()
+        if (!oldest.done) s.cache.delete(oldest.value)
+      }
       s.cache.set(filepath, content)
       return content
     })

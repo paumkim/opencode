@@ -103,4 +103,38 @@ describe("BackgroundJob", () => {
       expect((yield* jobs.get(job.id))?.status).toBe("running")
     }),
   )
+
+  it.live(
+    "bounds retained terminal jobs instead of growing without limit",
+    () =>
+      Effect.gen(function* () {
+        const scope = yield* Scope.make()
+        const jobs = yield* BackgroundJob.make.pipe(Scope.provide(scope))
+
+        // Far more terminal jobs than the retained-history window. Each one used
+        // to be kept for the life of the process along with its output string.
+        const total = 400
+        for (let index = 0; index < total; index++) {
+          yield* jobs.start({ id: `job_prune_${index}`, type: "test", run: Effect.succeed(`output-${index}`) })
+        }
+
+        // Wait on the last job only. Waiting per job would serialize the test
+        // and risk the suite timeout without testing anything extra.
+        const settled = yield* jobs.wait({ id: `job_prune_${total - 1}`, timeout: 10_000 })
+        expect(settled.timedOut).toBe(false)
+        expect(settled.info?.status).toBe("completed")
+
+        const listed = yield* jobs.list()
+        // The window is bounded, so the registry is strictly smaller than the
+        // number of jobs that ran.
+        expect(listed.length).toBeLessThan(total)
+        // Every retained entry is terminal, and the most recent result is still
+        // queryable rather than being dropped outright.
+        expect(listed.every((info) => info.status !== "running")).toBe(true)
+        expect((yield* jobs.get(`job_prune_${total - 1}`))?.status).toBe("completed")
+
+        yield* Scope.close(scope, Exit.void)
+      }),
+    { timeout: 30_000 },
+  )
 })

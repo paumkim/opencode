@@ -155,15 +155,35 @@ export async function create(input: {
     for (const listener of [...registrationListeners]) listener()
   }
 
+  // A client only reports diagnostics for paths it has seen, and over a long
+  // session that set grows with every file touched. `published` is pure
+  // bookkeeping, so bound it and evict the least recently seen path.
+  const PUBLISHED_LIMIT = 4096
+  const rememberPublished = (filePath: string, version?: number) => {
+    if (published.size >= PUBLISHED_LIMIT && !published.has(filePath)) {
+      const oldest = published.keys().next()
+      if (!oldest.done) published.delete(oldest.value)
+    }
+    published.set(filePath, { at: Date.now(), version })
+  }
+
+  // Releasing per-path state on close keeps the diagnostics maps from retaining
+  // every file the server has ever mentioned.
+  connection.onNotification("textDocument/didClose", (params) => {
+    const filePath = getFilePath(params.textDocument.uri)
+    if (!filePath) return
+    pushDiagnostics.delete(filePath)
+    pullDiagnostics.delete(filePath)
+    published.delete(filePath)
+    for (const listener of diagnosticListeners) listener({ path: filePath, serverID: input.serverID })
+  })
+
   // --- LSP connection handlers ---
 
   connection.onNotification("textDocument/publishDiagnostics", (params) => {
     const filePath = getFilePath(params.uri)
     if (!filePath) return
-    published.set(filePath, {
-      at: Date.now(),
-      version: typeof params.version === "number" ? params.version : undefined,
-    })
+    rememberPublished(filePath, typeof params.version === "number" ? params.version : undefined)
     if (shouldSeedDiagnosticsOnFirstPush(input.serverID) && !pushDiagnostics.has(filePath)) {
       pushDiagnostics.set(filePath, params.diagnostics)
       return

@@ -123,6 +123,24 @@ export const make = Effect.gen(function* () {
     scope: yield* Scope.Scope,
   }
 
+  // Terminal jobs are kept only as a bounded window of recent history. Without
+  // this the registry retains every job it has ever run, together with that
+  // job's full output string, for the life of the process. `get` and `wait`
+  // both already treat a missing id as "no such job", so evicting old entries
+  // only narrows how far back callers can query finished work.
+  const TERMINAL_HISTORY_LIMIT = 256
+  const pruneTerminal = (jobs: Map<string, Active>) => {
+    const terminal: [string, number][] = []
+    for (const [id, job] of jobs) {
+      if (job.info.status === "running") continue
+      terminal.push([id, job.info.completed_at ?? job.info.started_at])
+    }
+    if (terminal.length <= TERMINAL_HISTORY_LIMIT) return
+    // Evict oldest-first so the most recent results stay queryable.
+    terminal.sort((a, b) => a[1] - b[1])
+    for (let i = 0; i < terminal.length - TERMINAL_HISTORY_LIMIT; i++) jobs.delete(terminal[i][0])
+  }
+
   const settle = Effect.fn("BackgroundJob.settle")(function* (
     id: string,
     token: object,
@@ -161,7 +179,9 @@ export const make = Effect.gen(function* () {
           ...(Exit.isFailure(exit) ? { error: errorText(Cause.squash(exit.cause)) } : {}),
         },
       }
-      return [{ info: snapshot(next), done: job.done, scope: job.scope }, new Map(jobs).set(id, next)]
+      const pruned = new Map(jobs).set(id, next)
+      pruneTerminal(pruned)
+      return [{ info: snapshot(next), done: job.done, scope: job.scope }, pruned]
     })
     if (result.info && result.done) yield* Deferred.succeed(result.done, result.info).pipe(Effect.ignore)
     if (result.scope) {
@@ -350,7 +370,9 @@ export const make = Effect.gen(function* () {
           completed_at,
         },
       }
-      return [{ info: snapshot(next), done: job.done, scope: job.scope }, new Map(jobs).set(id, next)]
+      const pruned = new Map(jobs).set(id, next)
+      pruneTerminal(pruned)
+      return [{ info: snapshot(next), done: job.done, scope: job.scope }, pruned]
     })
     if (result.info && result.done) yield* Deferred.succeed(result.done, result.info).pipe(Effect.ignore)
     if (result.scope) yield* Scope.close(result.scope, Exit.void)

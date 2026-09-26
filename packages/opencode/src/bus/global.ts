@@ -20,3 +20,9 @@ class GlobalBusEmitter extends EventEmitter<{
 }
 
 export const GlobalBus = new GlobalBusEmitter()
+
+// Every open SSE / WS client, plus the web and TUI frontends, attach a listener
+// here, so the default cap of 10 is routinely exceeded during normal use. The
+// warning it prints is pure noise, and each emit fans out synchronously to every
+// subscriber, so there is no correctness reason to cap the count.
+GlobalBus.setMaxListeners(0)

@@ -3,6 +3,7 @@ import { InstanceState } from "@/effect/instance-state"
 import { GlobalBus } from "@/bus/global"
 import { EventV2 } from "@opencode-ai/core/event"
 import { Effect, Queue } from "effect"
+import type * as Cause from "effect/Cause"
 import * as Stream from "effect/Stream"
 import { HttpServerResponse } from "effect/unstable/http"
 import { HttpApiBuilder } from "effect/unstable/httpapi"
@@ -18,6 +19,15 @@ function eventData(data: unknown): Sse.Event {
   }
 }
 
+// Upper bound on the per-subscriber event backlog. An unbounded queue lets a
+// client that opens the stream and then stops reading (backgrounded tab, laptop
+// lid closed, dead TCP connection) grow the server heap without limit for as
+// long as the socket stays open. Past this depth the subscriber is too far
+// behind to resume incrementally, so we fail the stream instead. The client
+// reconnects and refetches authoritative state, which is the only way to
+// guarantee it ends up consistent.
+const EVENT_QUEUE_LIMIT = 10_000
+
 function eventID() {
   return EventV2.ID.create()
 }
@@ -28,8 +38,19 @@ function eventResponse(events: EventV2.Interface) {
     const workspaceID = yield* InstanceState.workspaceID
     // Listener registration is eager, so events published after this point cannot
     // be lost while the HTTP body fiber is starting or emitting server.connected.
-    const queue = yield* Queue.unbounded<EventV2.Payload>()
-    const unsubscribe = yield* events.listen((event) => Effect.sync(() => Queue.offerUnsafe(queue, event)))
+    // The error channel carries Done so the queue can be ended on overflow,
+    // which completes the stream instead of silently dropping events.
+    const queue = yield* Queue.bounded<EventV2.Payload, Cause.Done>(EVENT_QUEUE_LIMIT)
+    const unsubscribe = yield* events.listen((event) =>
+      Effect.sync(() => {
+        // offerUnsafe reports false when the backlog is full. Rather than drop a
+        // single event and leave the client silently inconsistent, end the
+        // stream: the response completes, the client reconnects, and it refetches
+        // authoritative state instead of resuming from a truncated backlog.
+        if (Queue.offerUnsafe(queue, event)) return
+        Queue.endUnsafe(queue)
+      }),
+    )
     yield* Effect.addFinalizer(() => unsubscribe)
     const stream = Stream.fromQueue(queue).pipe(
       Stream.filter(

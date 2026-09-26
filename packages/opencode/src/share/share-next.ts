@@ -163,18 +163,35 @@ const layer = Layer.effect(
 
         if (disabled) return cache
 
+        // Every watch() below registers a process-level event listener. The
+        // InstanceState is rebuilt per directory, so without releasing them each
+        // rebuild left five more listeners attached for the life of the process,
+        // and notify() walks the listener list on every published event.
+        const unsubscribes: Effect.Effect<void>[] = []
+        yield* Effect.addFinalizer(() =>
+          Effect.forEach(unsubscribes.splice(0), (unsubscribe) => unsubscribe, {
+            discard: true,
+            concurrency: 1,
+          }),
+        )
+
         const watch = <D extends EventV2.Definition>(
           def: D,
           fn: (data: EventV2.Data<D>) => Effect.Effect<void, unknown>,
         ) =>
-          events.listen((event) => {
-            if (event.type !== def.type || event.location?.directory !== _ctx.directory) return Effect.void
-            return fn(event.data as EventV2.Data<D>).pipe(
-              Effect.catchCause((cause) =>
-                Effect.logError("share subscriber failed", { type: def.type, cause: cause }),
-              ),
-            )
-          })
+          Effect.map(
+            events.listen((event) => {
+              if (event.type !== def.type || event.location?.directory !== _ctx.directory) return Effect.void
+              return fn(event.data as EventV2.Data<D>).pipe(
+                Effect.catchCause((cause) =>
+                  Effect.logError("share subscriber failed", { type: def.type, cause: cause }),
+                ),
+              )
+            }),
+            (unsubscribe) => {
+              unsubscribes.push(unsubscribe)
+            },
+          )
 
         yield* watch(Session.Event.Updated, (data) =>
           Effect.gen(function* () {

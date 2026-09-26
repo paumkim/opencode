@@ -33,7 +33,18 @@ export const use = serviceUse(Service)
 
 interface Entry {
   readonly deferred: Deferred.Deferred<InstanceContext>
+  /** Wall-clock ms of the most recent load/reload, for idle reclamation. */
+  lastUsed: number
 }
+
+// An instance is not a light object: it owns LSP child processes, resolved
+// config, plugin hooks and provider bundles. Without reclamation every directory
+// the server ever served stays resident until shutdown, which is invisible on a
+// single project and unbounded once many worktrees are in play. The v2 location
+// services already use the same 60 minute idle window, so this matches the
+// established policy rather than inventing a new one.
+const IDLE_TTL = Duration.minutes(60)
+const SWEEP_INTERVAL = Duration.minutes(5)
 
 const layer: Layer.Layer<Service, never, Project.Service | InstanceBootstrap.Service> = Layer.effect(
   Service,
@@ -112,9 +123,12 @@ const layer: Layer.Layer<Service, never, Project.Service | InstanceBootstrap.Ser
       return Effect.uninterruptibleMask((restore) =>
         Effect.gen(function* () {
           const existing = cache.get(directory)
-          if (existing) return yield* restore(Deferred.await(existing.deferred))
+          if (existing) {
+            existing.lastUsed = Date.now()
+            return yield* restore(Deferred.await(existing.deferred))
+          }
 
-          const entry: Entry = { deferred: Deferred.makeUnsafe<InstanceContext>() }
+          const entry: Entry = { deferred: Deferred.makeUnsafe<InstanceContext>(), lastUsed: Date.now() }
           cache.set(directory, entry)
           yield* Effect.gen(function* () {
             yield* Effect.logInfo("creating instance", { directory: directory })
@@ -130,7 +144,7 @@ const layer: Layer.Layer<Service, never, Project.Service | InstanceBootstrap.Ser
       return Effect.uninterruptibleMask((restore) =>
         Effect.gen(function* () {
           const previous = cache.get(directory)
-          const entry: Entry = { deferred: Deferred.makeUnsafe<InstanceContext>() }
+          const entry: Entry = { deferred: Deferred.makeUnsafe<InstanceContext>(), lastUsed: Date.now() }
           cache.set(directory, entry)
           yield* Effect.gen(function* () {
             yield* Effect.logInfo("reloading instance", { directory: directory })
@@ -193,6 +207,30 @@ const layer: Layer.Layer<Service, never, Project.Service | InstanceBootstrap.Ser
       load(input).pipe(Effect.flatMap((ctx) => effect.pipe(Effect.provideService(InstanceRef, ctx))))
 
     yield* Effect.addFinalizer(() => disposeAll().pipe(Effect.ignore))
+
+    // Reclaim instances that have not been touched within the idle window. A
+    // request only holds an instance for the length of the request, so anything
+    // untouched for an hour is idle by construction. Failures are swallowed so
+    // one bad teardown cannot stop the sweep.
+    const sweep = Effect.gen(function* () {
+      const cutoff = Date.now() - Duration.toMillis(IDLE_TTL)
+      const stale = [...cache.entries()].filter(([, entry]) => entry.lastUsed < cutoff)
+      for (const [directory, entry] of stale) {
+        yield* Effect.gen(function* () {
+          const exit = yield* Deferred.await(entry.deferred).pipe(Effect.exit)
+          if (Exit.isFailure(exit)) return yield* removeEntry(directory, entry).pipe(Effect.asVoid)
+          yield* disposeEntry(directory, entry, exit.value).pipe(Effect.asVoid)
+        }).pipe(Effect.ignore)
+      }
+    })
+
+    const sweepLoop = Effect.gen(function* () {
+      while (true) {
+        yield* Effect.sleep(SWEEP_INTERVAL)
+        yield* sweep.pipe(Effect.ignore)
+      }
+    })
+    yield* sweepLoop.pipe(Effect.forkIn(scope))
 
     return Service.of({
       load,
