@@ -8,7 +8,17 @@ export const GOAL_MAX_EVIDENCE = 4000
 export const GOAL_HISTORY_LIMIT = 50
 export const GOAL_CHECKPOINT_LIMIT = 8
 export const GOAL_CHECKPOINT_CHAR_LIMIT = 280
-export const GOAL_DEFAULT_NO_PROGRESS_TOKEN_THRESHOLD = 50
+/**
+ * A continuation turn is scored as low-progress only when it emits fewer than this many output
+ * tokens AND its text is unchanged from the previous continuation baseline. The text check is the
+ * real stall signal; this is a floor that keeps a near-empty turn from being read as progress.
+ *
+ * The previous value of 50 was low enough to punish a terse but busy turn: an overnight agent that
+ * runs one command and reports in a sentence emits well under 50 output tokens, so it was paused
+ * for being efficient. 500 leaves room for short tool-driven turns while still catching a turn
+ * that genuinely produced almost nothing.
+ */
+export const GOAL_DEFAULT_NO_PROGRESS_TOKEN_THRESHOLD = 500
 export const GOAL_DEFAULT_MAX_NO_PROGRESS_TURNS = 2
 /**
  * Effective auto-continue cap applied when a goal does not carry its own `maxAutoTurns`.
