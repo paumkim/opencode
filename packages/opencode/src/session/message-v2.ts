@@ -412,7 +412,7 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
       console.error("[message-v2] convertToModelMessages failed:", error)
       console.error("[message-v2] failing messages:", JSON.stringify(filtered, null, 2))
       throw error
-    })
+    }),
   )
 })
 
@@ -520,58 +520,138 @@ export const get = Effect.fn("MessageV2.get")(function* (input: { sessionID: Ses
   }
 })
 
-export function filterCompacted(msgs: Iterable<WithParts>) {
+/**
+ * The incremental part of `filterCompacted`, split out so the same decision
+ * logic can drive both a materialized array and a paged database walk.
+ *
+ * Messages arrive newest-first. The walk stops as soon as it has seen enough:
+ * either it reaches the retained tail anchor, or one of the break conditions
+ * fires. A caller that can stop pulling pages when `done` flips avoids reading
+ * history the model will never be shown, which is the whole point on a long
+ * session where the pre-compaction history dominates the row count.
+ */
+function createWalker() {
   const result = [] as WithParts[]
   const completed = new Set<string>()
   let retain: MessageID | undefined
-  for (const msg of msgs) {
-    result.push(msg)
-    if (retain) {
-      if (msg.info.id === retain) break
-      continue
-    }
-    if (msg.info.role === "user" && completed.has(msg.info.id)) {
-      const part = msg.parts.find((item): item is CompactionPart => item.type === "compaction")
-      if (!part) continue
-      if (!part.tail_start_id) break
-      retain = part.tail_start_id
-      if (msg.info.id === retain) break
-      continue
-    }
-    if (msg.info.role === "user" && completed.has(msg.info.id) && msg.parts.some((part) => part.type === "compaction"))
-      break
-    if (msg.info.role === "assistant" && msg.info.summary && msg.info.finish && !msg.info.error)
-      completed.add(msg.info.parentID)
-  }
-  result.reverse()
-  const compactionIndex = result.findLastIndex(
-    (msg) =>
-      msg.info.role === "user" &&
-      msg.parts.some((item): item is CompactionPart => item.type === "compaction" && item.tail_start_id !== undefined),
-  )
-  const compaction = result[compactionIndex]
-  const part = compaction?.parts.find(
-    (item): item is CompactionPart => item.type === "compaction" && item.tail_start_id !== undefined,
-  )
-  const summaryIndex = compaction
-    ? result.findIndex(
-        (msg, index) =>
-          index > compactionIndex &&
-          msg.info.role === "assistant" &&
-          msg.info.summary &&
-          msg.info.parentID === compaction.info.id,
+  let done = false
+
+  return {
+    /** Feed one message, newest-first. Safe to call after `done`. */
+    push(msg: WithParts) {
+      if (done) return
+      result.push(msg)
+      if (retain) {
+        if (msg.info.id === retain) done = true
+        return
+      }
+      if (msg.info.role === "user" && completed.has(msg.info.id)) {
+        const part = msg.parts.find((item): item is CompactionPart => item.type === "compaction")
+        if (!part) return
+        if (!part.tail_start_id) {
+          done = true
+          return
+        }
+        retain = part.tail_start_id
+        if (msg.info.id === retain) done = true
+        return
+      }
+      if (
+        msg.info.role === "user" &&
+        completed.has(msg.info.id) &&
+        msg.parts.some((part) => part.type === "compaction")
+      ) {
+        done = true
+        return
+      }
+      if (msg.info.role === "assistant" && msg.info.summary && msg.info.finish && !msg.info.error) {
+        completed.add(msg.info.parentID)
+      }
+    },
+    get done() {
+      return done
+    },
+    /** Reorder the collected messages into consumption order. */
+    finish(): WithParts[] {
+      result.reverse()
+      const compactionIndex = result.findLastIndex(
+        (msg) =>
+          msg.info.role === "user" &&
+          msg.parts.some(
+            (item): item is CompactionPart => item.type === "compaction" && item.tail_start_id !== undefined,
+          ),
       )
-    : -1
-  const tailIndex = part?.tail_start_id ? result.findIndex((msg) => msg.info.id === part.tail_start_id) : -1
-  if (tailIndex >= 0 && tailIndex < compactionIndex && summaryIndex > compactionIndex) {
-    return [
-      ...result.slice(compactionIndex, summaryIndex + 1),
-      ...result.slice(tailIndex, compactionIndex),
-      ...result.slice(summaryIndex + 1),
-    ]
+      const compaction = result[compactionIndex]
+      const part = compaction?.parts.find(
+        (item): item is CompactionPart => item.type === "compaction" && item.tail_start_id !== undefined,
+      )
+      const summaryIndex = compaction
+        ? result.findIndex(
+            (msg, index) =>
+              index > compactionIndex &&
+              msg.info.role === "assistant" &&
+              msg.info.summary &&
+              msg.info.parentID === compaction.info.id,
+          )
+        : -1
+      const tailIndex = part?.tail_start_id ? result.findIndex((msg) => msg.info.id === part.tail_start_id) : -1
+      if (tailIndex >= 0 && tailIndex < compactionIndex && summaryIndex > compactionIndex) {
+        return [
+          ...result.slice(compactionIndex, summaryIndex + 1),
+          ...result.slice(tailIndex, compactionIndex),
+          ...result.slice(summaryIndex + 1),
+        ]
+      }
+      return result
+    },
   }
-  return result
 }
+
+export function filterCompacted(msgs: Iterable<WithParts>) {
+  const walker = createWalker()
+  for (const msg of msgs) {
+    walker.push(msg)
+    if (walker.done) break
+  }
+  return walker.finish()
+}
+
+/**
+ * Paged equivalent of `filterCompactedEffect`.
+ *
+ * `stream()` materialized every page of the session into one array before the
+ * walk began, so each turn paid for the entire history even though the walk
+ * stops at the compaction anchor. This walks the same pages in the same order
+ * and stops requesting them the moment the walk is satisfied, so a compacted
+ * session only reads back as far as its retained tail.
+ *
+ * The result is identical to `filterCompactedEffect`; `test/session/message-compaction-page.test.ts`
+ * asserts the two agree across session shapes.
+ */
+export const filterCompactedPaged = Effect.fnUntraced(function* (sessionID: SessionID) {
+  const size = 50
+  const walker = createWalker()
+  let before: string | undefined
+  while (!walker.done) {
+    const next = yield* page({ sessionID, limit: size, before }).pipe(
+      Effect.catchIf(NotFoundError.isInstance, () =>
+        Effect.succeed({ items: [] as WithParts[], more: false, cursor: undefined }),
+      ),
+    )
+    if (next.items.length === 0) break
+    // `page` reverses within the page, and `stream` then walked it from the end
+    // backwards, so the overall order is newest-first. Mirror that exactly.
+    for (let i = next.items.length - 1; i >= 0; i--) {
+      const item = next.items[i]
+      if (!item) continue
+      walker.push(item)
+      if (walker.done) break
+    }
+    if (!next.more || !next.cursor) break
+    before = next.cursor
+  }
+  return walker.finish()
+})
 
 export const filterCompactedEffect = Effect.fnUntraced(function* (sessionID: SessionID) {
   return filterCompacted(yield* stream(sessionID))
