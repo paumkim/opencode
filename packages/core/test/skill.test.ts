@@ -122,4 +122,43 @@ describe("SkillV2", () => {
       ),
     ),
   )
+
+  it.live("keeps a skill whose frontmatter has one wrong-typed value", () =>
+    Effect.acquireRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ).pipe(
+      Effect.flatMap((tmp) =>
+        Effect.gen(function* () {
+          yield* Effect.promise(async () => {
+            await fs.mkdir(path.join(tmp.path, "review"), { recursive: true })
+            // `slash` is a boolean, so `slash: "yes"` is a wrong-typed value rather than an
+            // unknown key. The name and description are valid and must survive it.
+            await fs.writeFile(
+              path.join(tmp.path, "review", "SKILL.md"),
+              `---\nname: review\ndescription: Reviews changes\nslash: "yes"\nnotakey: [1]\n---\n# review`,
+            )
+          })
+
+          const skill = yield* SkillV2.Service
+          yield* skill.transform((editor) => {
+            editor.source({ type: "directory", path: AbsolutePath.make(tmp.path) })
+          })
+
+          // Decoding the frontmatter as one block is all-or-nothing, so the quoted boolean used to
+          // make the skill disappear entirely — name, description and body all lost, with no error
+          // and no clue that one stray quote was the reason. Only `slash` may be dropped, and an
+          // unknown key is still ignored rather than treated as a failure.
+          expect(yield* skill.list()).toEqual([
+            {
+              name: "review",
+              description: "Reviews changes",
+              location: AbsolutePath.make(path.join(tmp.path, "review", "SKILL.md")),
+              content: "# review",
+            },
+          ])
+        }),
+      ),
+    ),
+  )
 })
