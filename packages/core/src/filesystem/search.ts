@@ -20,6 +20,36 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/v2/FileSystem/Search") {}
 
+/**
+ * Validate a caller's `path` and return it absolute, or die if it leaves the location.
+ *
+ * `glob` and `grep` hand their root to an index that then *walks* it, so a path outside the
+ * location -- or a symlink inside it pointing out -- would read outside the location. `read`
+ * and `list` in ../filesystem.ts already reject both. These were the only entry points that
+ * did not, and a caller passing any `input.path` reached the filesystem unchecked. Nothing
+ * in-tree does today, so this adds the guard ahead of the first caller rather than closing a
+ * reachable escape.
+ *
+ * Shared by all three implementations below, which is the point: `ripgrepLayer` and `fffLayer`
+ * each carry a ripgrep-backed pair, and `fffLayer` adds a native pair, and an earlier version of
+ * this guard that only covered `ripgrepLayer` was silently inert because `fffLayer` is the
+ * default (`Layer.unwrap` picks fff whenever `Fff.available()`).
+ */
+const searchTarget = Effect.fnUntraced(function* (input: {
+  fs: FSUtil.Interface
+  directory: string
+  root: string
+  path?: RelativePath
+}) {
+  const resolved = path.resolve(input.directory, input.path ?? ".")
+  if (!FSUtil.contains(input.directory, resolved)) return yield* Effect.die(new Error("Path escapes the location"))
+  // The realpath half catches a symlink that is lexically inside the location but resolves out
+  // of it. Resolving first also means a nonexistent path dies here rather than at the index.
+  const real = yield* input.fs.realPath(resolved).pipe(Effect.orDie)
+  if (!FSUtil.contains(input.root, real)) return yield* Effect.die(new Error("Path escapes the location"))
+  return resolved
+})
+
 export const ripgrepLayer = Layer.effect(
   Service,
   Effect.gen(function* () {
@@ -47,10 +77,11 @@ export const ripgrepLayer = Layer.effect(
           }),
       })
       .pipe(Effect.orDie, Effect.asVoid, Effect.forkIn(scope))
+    const root = yield* fs.realPath(location.directory).pipe(Effect.orDie)
     return Service.of({
       glob: (input) =>
         Effect.gen(function* () {
-          const target = path.resolve(location.directory, input.path ?? ".")
+          const target = yield* searchTarget({ fs, directory: location.directory, root, path: input.path })
           const info = yield* fs.stat(target).pipe(Effect.orDie)
           const cwd = info.type === "File" ? path.dirname(target) : target
           return yield* ripgrep
@@ -73,7 +104,7 @@ export const ripgrepLayer = Layer.effect(
         }),
       grep: (input) =>
         Effect.gen(function* () {
-          const target = path.resolve(location.directory, input.path ?? ".")
+          const target = yield* searchTarget({ fs, directory: location.directory, root, path: input.path })
           const info = yield* fs.stat(target).pipe(Effect.orDie)
           const cwd = info.type === "File" ? path.dirname(target) : target
           return yield* ripgrep
@@ -123,9 +154,11 @@ export const ripgrepLayer = Layer.effect(
 export const fffLayer = Layer.effect(
   Service,
   Effect.gen(function* () {
+    const fs = yield* FSUtil.Service
     const location = yield* Location.Service
     const ripgrep = yield* Ripgrep.Service
     const scope = yield* Scope.Scope
+    const root = yield* fs.realPath(location.directory).pipe(Effect.orDie)
     const result = yield* Effect.try({
       try: () =>
         Fff.create({
@@ -190,7 +223,7 @@ export const fffLayer = Layer.effect(
           }),
         glob: (input) =>
           Effect.gen(function* () {
-            const cwd = path.resolve(location.directory, input.path ?? ".")
+            const cwd = yield* searchTarget({ fs, directory: location.directory, root, path: input.path })
             const items = yield* ripgrep
               .glob({ cwd, pattern: input.pattern, limit: input.limit ?? Ripgrep.MAX_RESULTS })
               .pipe(Effect.orDie)
@@ -203,7 +236,7 @@ export const fffLayer = Layer.effect(
           }),
         grep: (input) =>
           Effect.gen(function* () {
-            const cwd = path.resolve(location.directory, input.path ?? ".")
+            const cwd = yield* searchTarget({ fs, directory: location.directory, root, path: input.path })
             const items = yield* ripgrep
               .grep({ cwd, pattern: input.pattern, include: input.include, limit: input.limit ?? Ripgrep.MAX_RESULTS })
               .pipe(Effect.orDie)
@@ -230,7 +263,8 @@ export const fffLayer = Layer.effect(
     yield* Effect.addFinalizer(() => Effect.sync(() => result.value.destroy()).pipe(Effect.ignore))
     return Service.of({
       glob: (input) =>
-        Effect.sync(() => {
+        Effect.gen(function* () {
+          yield* searchTarget({ fs, directory: location.directory, root, path: input.path })
           const prefix = input.path?.replaceAll("\\", "/").replace(/\/$/, "")
           const found = result.value.glob(prefix ? `${prefix}/${input.pattern}` : input.pattern, {
             pageIndex: 0,
@@ -245,7 +279,8 @@ export const fffLayer = Layer.effect(
           )
         }),
       grep: (input) =>
-        Effect.sync(() => {
+        Effect.gen(function* () {
+          yield* searchTarget({ fs, directory: location.directory, root, path: input.path })
           const prefix = input.path?.replaceAll("\\", "/").replace(/\/$/, "")
           const found = result.value.grep(
             [prefix ? `${prefix}/**` : undefined, input.include, input.pattern]
