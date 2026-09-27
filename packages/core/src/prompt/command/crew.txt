@@ -1,0 +1,83 @@
+Launch a crew of unattended, goal-driven agent windows across your projects.
+
+This command is the crew's control surface. It is a thin, honest wrapper: it
+does not start anything itself, it tells you what to run and how to verify it.
+
+## The launcher
+
+The launcher ships with opencode, so it moves with the project and is never a
+stray file in a temp directory:
+
+    script/crew.sh <subcommand> [args]
+
+Subcommands:
+
+| command | effect |
+| --- | --- |
+| `doctor` | preflight only: binary, display, memory, per-project git state. No side effects. |
+| `start [N]` | launch N windows, round-robin over the configured projects. |
+| `start <project> [N]` | launch N windows on one project only. |
+| `status` | every agent window it can see, including ones it did not start. |
+| `stop [name...]` | stop named windows, or every window it can see. |
+| `logs <name> [lines]` | tail a window's launch log. |
+
+Projects are NOT hardcoded. They come from a registry file, checked in this
+order, first match wins:
+
+1. `$CREW_CONFIG` if set
+2. `<opencode-repo>/crew.json`
+3. `~/.config/opencode/crew.json`
+
+The file is a list, so a project can be moved or added without touching code:
+
+```json
+{ "projects": [ { "path": "/home/you/code/app", "label": "app" } ] }
+```
+
+If none exists, the launcher creates `crew.json` next to itself with a commented
+template and tells you to edit it. It never guesses a path.
+
+## What to do when the user asks for a crew
+
+1. Run `script/crew.sh doctor` FIRST and read the output. If the preflight reports
+   a problem, fix or report it before launching anything.
+2. Launch with the count the user asked for: `script/crew.sh start 4`.
+3. Run `script/crew.sh status` and confirm the expected number of windows.
+4. Tell the user what is running, on which projects, and what to run to stop it.
+
+Do not hand-write per-window prompts and do not launch `ghostty` directly. The
+launcher generates each window's bootstrap prompt from that repository's real
+state at launch time, and the window is told to treat `git log` as the contract
+and the prompt's summary as orientation only — which is why it does not go stale
+the moment the agent commits.
+
+## How each window is driven
+
+Each window is an opencode session with a bootstrap prompt that makes it:
+
+- read `git log` and `git status` first, and treat what is committed as done, so
+  it resumes instead of re-deriving the objective from scratch;
+- create a real session goal with raised unattended tolerance
+  (`max_no_progress_turns: 8`, `max_prompt_failures: 5`), because the defaults
+  self-pause an unattended run on the first quiet stretch;
+- record each finished unit with `record_goal_completion` and commit it, so
+  progress is durable and the goal's own ledger tells the next turn what is left;
+- run tests under a memory cap and stay inside its own project directory.
+
+The `/goal` machinery is what keeps those windows moving: the completed-work
+ledger, the stall sweep that re-arms a goal whose turn ended without an idle
+event, and the prompt-failure ladder that eventually self-pauses. This command
+only creates the windows.
+
+## Safety, which is not optional
+
+- This machine is shared and finite. It has run out of memory and lost unattended
+  sessions. Never launch a crew without checking `doctor` first.
+- Every window is told to scope tests to files and to cap memory with
+  `systemd-run --user --scope -p MemoryMax=6G -p MemorySwapMax=0 -- <command>`,
+  never to run a whole suite bare, and never to use `ulimit -v` under Bun.
+- Every window is told to stay inside its own project directory. Two windows
+  editing one working tree will collide, and the registry exists partly to
+  prevent that.
+- `stop` halts windows. It does not revert, reset, or delete anything, and neither
+  should you, without the user asking for it explicitly.
