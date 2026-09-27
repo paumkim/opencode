@@ -336,7 +336,15 @@ const layer = Layer.effect(
         .run(
           ChildProcess.make("git", repositoryArgs(repository, args), {
             cwd: repository.worktree,
-            env: options?.env,
+            // Every pathspec here is a real project-relative path from the store
+            // or the caller, never a pattern. Left off, git reads `[`, `*` and
+            // `?` as wildcards, so once a path is absent from the tree git falls
+            // back to the pattern and answers for a different file: asking for
+            // `notes[1].md` with only `notes1.md` present returned that sibling's
+            // diff. The revert flow passes every touched path, including ones no
+            // longer in the tree, so it published one file's patch under another
+            // file's path. `ls-tree` never globs, so this is a no-op there.
+            env: { GIT_LITERAL_PATHSPECS: "1", ...options?.env },
             extendEnv: true,
           }),
           { stdin: options?.stdin },
