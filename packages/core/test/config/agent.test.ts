@@ -360,6 +360,71 @@ Legacy agent.`,
       ),
     ),
   )
+
+  it.live("keeps an agent whose frontmatter has one wrong-typed value", () =>
+    Effect.acquireRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ).pipe(
+      Effect.flatMap((tmp) =>
+        Effect.gen(function* () {
+          yield* Effect.promise(async () => {
+            await fs.mkdir(path.join(tmp.path, "agents"), { recursive: true })
+            // `hidden` is a v2 boolean, so `hidden: "yes"` is a wrong-typed value rather than an
+            // unknown key. Every other key here is valid v2 and must survive it.
+            await fs.writeFile(
+              path.join(tmp.path, "agents", "reviewer.md"),
+              `---
+description: Review carefully
+hidden: "yes"
+color: "#FF5733"
+permissions:
+  - action: edit
+    resource: "*"
+    effect: deny
+---
+Review carefully.`,
+            )
+            // `temperature` is a v1 finite number, so a string there is a wrong-typed value on the
+            // legacy path, which must recover the same way rather than dropping the agent.
+            await fs.writeFile(
+              path.join(tmp.path, "agents", "legacy.md"),
+              `---
+temperature: "hot"
+description: Legacy agent
+---
+Legacy agent.`,
+            )
+          })
+          const agents = yield* AgentV2.Service
+          const config = Config.Service.of({
+            entries: () => Effect.succeed([new Config.Directory({ type: "directory", path: tmp.path as never })]),
+          })
+
+          yield* ConfigAgentPlugin.Plugin.effect(host({ agent: agentHost(agents) })).pipe(
+            Effect.provideService(Config.Service, config),
+          )
+
+          // Decoding the whole frontmatter at once is all-or-nothing, so the bad value used to make
+          // the agent disappear entirely: `reviewer` came back undefined, silently leaving no
+          // agent and no clue that one stray quote was the reason. Only `hidden` may be dropped.
+          expect(yield* agents.get(AgentV2.ID.make("reviewer"))).toMatchObject({
+            system: "Review carefully.",
+            description: "Review carefully",
+            color: "#FF5733",
+            permissions: [{ action: "edit", resource: "*", effect: "deny" }],
+          })
+          // `hidden` is a required boolean on the agent itself, so dropping the bad frontmatter
+          // value leaves the default rather than `undefined`.
+          expect((yield* agents.get(AgentV2.ID.make("reviewer")))?.hidden).toBe(false)
+          expect(yield* agents.get(AgentV2.ID.make("legacy"))).toMatchObject({
+            system: "Legacy agent.",
+            description: "Legacy agent",
+          })
+        }),
+      ),
+    ),
+  )
 })
 
 function loadHomePermissions(home: string) {

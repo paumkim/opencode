@@ -62,7 +62,19 @@ export const Plugin = define({
             const files = yield* discover(fs, entry.path)
             return yield* Effect.forEach(files, (file) =>
               fs.readFileStringSafe(file.filepath).pipe(
-                Effect.map((content) => content && decode(file, content)),
+                Effect.flatMap((content) => {
+                  if (content === undefined) return Effect.succeed(undefined)
+                  const decoded = decode(file, content)
+                  if (!decoded) return Effect.succeed(undefined)
+                  if (!decoded.rejected.length) return Effect.succeed(decoded.document)
+                  // Report the keys that did not decode, so an agent that behaves differently from
+                  // what the file says is at least traceable to the file.
+                  return Effect.logWarning("ignoring invalid agent frontmatter", {
+                    path: file.filepath,
+                    name: decoded.name,
+                    keys: decoded.rejected.join(", "),
+                  }).pipe(Effect.as(decoded.document))
+                }),
                 Effect.catch(() => Effect.succeed(undefined)),
               ),
             ).pipe(
@@ -166,20 +178,55 @@ function decode(file: { directory: string; filepath: string; primary: boolean },
     .replace(/\.md$/, "")
   const body = markdown.content.trim()
   const legacy = Object.keys(markdown.data).some((key) => legacyAgentKeys.has(key))
-  const agent = Option.getOrUndefined(
-    legacy
-      ? Option.map(
-          decodeLegacyAgent({ name, ...markdown.data, prompt: body }, { errors: "all", propertyOrder: "original" }),
-          ConfigMigrateV1.migrateAgent,
-        )
-      : decodeAgent({ ...markdown.data, system: body }, { errors: "all", propertyOrder: "original" }),
-  )
-  if (!agent) return
+  // Decoding the whole frontmatter at once is all-or-nothing, so one wrong-typed value used to make
+  // the agent vanish with nothing to explain why: `hidden: "yes"` instead of `hidden: true` is an
+  // easy mistake and it cost the user the entire file. Nothing in a V2 agent is required -- the
+  // markdown body is the prompt, and every frontmatter key is a setting on top of it -- so probe the
+  // keys one at a time and keep the ones that decode, dropping only what cannot. A key is kept only
+  // if the object still decodes with it, so a key that is individually valid but invalid in
+  // combination with an earlier one is dropped too. An unknown key is not an error: an agent file
+  // may legitimately carry fields this build does not read.
+  const attempt = (data: Record<string, unknown>) =>
+    Option.getOrUndefined(
+      legacy
+        ? Option.map(
+            decodeLegacyAgent({ name, ...data, prompt: body }, { errors: "all", propertyOrder: "original" }),
+            ConfigMigrateV1.migrateAgent,
+          )
+        : decodeAgent({ ...data, system: body }, { errors: "all", propertyOrder: "original" }),
+    )
+  const agent = attempt(markdown.data)
+  if (agent) return finish(file, agent, name, [])
+  // One or more keys did not decode. Probe them one at a time, keeping each only if the object
+  // still decodes with it, so a key that is individually valid but invalid in combination with an
+  // earlier one is dropped too. A key that cannot be added is rejected by name.
+  const kept: Record<string, unknown> = {}
+  const rejected: string[] = []
+  for (const key of Object.keys(markdown.data)) {
+    const candidate = { ...kept, [key]: markdown.data[key] }
+    if (attempt(candidate)) kept[key] = markdown.data[key]
+    else rejected.push(key)
+  }
+  const recovered = attempt(kept)
+  if (!recovered) return
+  return finish(file, recovered, name, rejected)
+}
+
+// A recovered agent is either a decoded V2 agent or the V1 migration's plain object, depending on
+// which decoder the file's keys selected.
+type AttemptedAgent = ConfigAgent.Info | ReturnType<typeof ConfigMigrateV1.migrateAgent>
+
+function finish(
+  file: { directory: string; filepath: string; primary: boolean },
+  agent: AttemptedAgent,
+  name: string,
+  rejected: string[],
+) {
   const info = Option.getOrUndefined(
     decodeConfig({
       agents: { [name]: file.primary ? { ...agent, mode: "primary" } : agent },
     }),
   )
   if (!info) return
-  return new Config.Document({ type: "document", path: file.filepath, info })
+  return { document: new Config.Document({ type: "document", path: file.filepath, info }), name, rejected }
 }
