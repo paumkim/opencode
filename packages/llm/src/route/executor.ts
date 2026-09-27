@@ -212,11 +212,23 @@ const redactBody = (body: string, request: HttpClientRequest.HttpClientRequest) 
     body.replace(REDACT_JSON_FIELD, `$1"${REDACTED}"`).replace(REDACT_QUERY_FIELD, `$1${REDACTED}`),
   )
 
+// `BODY_LIMIT` is a code-point budget, but `slice` counts UTF-16 code units, so
+// a cut landing between the halves of a pair leaves a LONE SURROGATE at the end.
+// That is not cosmetic: it serializes to a `\udXXX` escape, which a renderer
+// reads back as U+FFFD, so the last character of the reported body became a
+// replacement glyph. Matches `truncateToCodePoints` in `@opencode-ai/core` and
+// `collapseToolOutput` in the TUI, which cut the same way.
+const truncateToCodePoints = (value: string, limit: number) => {
+  const points = Array.from(value)
+  if (points.length <= limit) return value
+  return points.slice(0, limit).join("")
+}
+
 const responseBody = (body: string | void, request: HttpClientRequest.HttpClientRequest) => {
   if (body === undefined) return {}
   const redacted = redactBody(body, request)
-  if (redacted.length <= BODY_LIMIT) return { body: redacted }
-  return { body: redacted.slice(0, BODY_LIMIT), bodyTruncated: true }
+  if ([...redacted].length <= BODY_LIMIT) return { body: redacted }
+  return { body: truncateToCodePoints(redacted, BODY_LIMIT), bodyTruncated: true }
 }
 
 const providerMessage = (status: number, body: { readonly body?: string }) => {

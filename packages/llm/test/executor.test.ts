@@ -75,6 +75,21 @@ const expectLLMError = (error: unknown) => {
 
 const errorHttp = (error: LLMError) => ("http" in error.reason ? error.reason.http : undefined)
 
+const hasLoneSurrogate = (value: string) => {
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i)
+    const isHigh = code >= 0xd800 && code <= 0xdbff
+    const isLow = code >= 0xdc00 && code <= 0xdfff
+    if (!isHigh && !isLow) continue
+    if (isHigh) {
+      const next = value.charCodeAt(i + 1)
+      if (next < 0xdc00 || next > 0xdfff) return true
+    } else return true
+    i++
+  }
+  return false
+}
+
 describe("RequestExecutor", () => {
   it.effect("classifies context overflow responses", () =>
     Effect.gen(function* () {
@@ -394,6 +409,24 @@ describe("RequestExecutor", () => {
       expect(errorHttp(error)?.request.url).not.toContain("50%off")
       expect(errorHttp(error)?.body).not.toContain("50%off")
     }).pipe(Effect.provide(responsesLayer([new Response("provider echoed 50%off for gateway", { status: 400 })]))),
+  )
+
+  // `BODY_LIMIT` is a code-point budget. A cut between the halves of a surrogate
+  // pair leaves a lone surrogate, which round-trips through JSON to U+FFFD.
+  it.effect("cuts a truncated response body on a code-point boundary", () =>
+    Effect.gen(function* () {
+      const executor = yield* RequestExecutor.Service
+      const error = yield* executor.execute(HttpClientRequest.post("https://provider.test/v1/chat")).pipe(Effect.flip)
+
+      expectLLMError(error)
+      const body = errorHttp(error)?.body ?? ""
+      expect(errorHttp(error)?.bodyTruncated).toBe(true)
+      expect([...body].length).toBe(16_384)
+      expect(hasLoneSurrogate(body)).toBe(false)
+      // The JSON round trip is what turned the lone surrogate into U+FFFD.
+      expect(JSON.parse(JSON.stringify(body))).toBe(body)
+      expect(body).not.toContain("�")
+    }).pipe(Effect.provide(responsesLayer([new Response("x".repeat(16_383) + "😀tail", { status: 400 })]))),
   )
 
   it.effect("honors Retry-After delta seconds before retrying", () =>
