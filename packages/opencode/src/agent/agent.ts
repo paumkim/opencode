@@ -149,7 +149,15 @@ const layer = Layer.effect(
 
         const user = Permission.fromConfig(cfg.permission ?? {})
 
-        const agents: Record<string, Info> = {
+        // Null-prototype record, not a bare object literal. Agent names come from
+        // file names (`.opencode/agent/<name>.md`) and config keys, so a project
+        // can name an agent after an Object.prototype member. With a normal object
+        // the config merge read `agents["constructor"]` — the `Object` function —
+        // saw a truthy "existing" agent, and then wrote the config onto it
+        // (`item.name = ...` throws on the non-writable `Object.name` in strict
+        // mode, so the instance never finished initializing; for keys without that
+        // clash the writes landed on the global Object itself).
+        const agents: Record<string, Info> = Object.assign(Object.create(null), {
           build: {
             name: "build",
             description: "The default agent. Executes tools based on configured permissions. When reading multiple files to answer a question, always issue parallel Read calls in a single turn rather than reading files one at a time — parallel reads are much faster and are a hard requirement, not a suggestion. After a Glob or Grep pass, immediately read the top matches in parallel (up to 8–10 at once). Reserve sequential reads only for genuinely dependent cases.",
@@ -274,7 +282,7 @@ const layer = Layer.effect(
             ),
             prompt: PROMPT_SUMMARY,
           },
-        }
+        })
 
         for (const [key, value] of Object.entries(cfg.agent ?? {})) {
           if (value.disable) {
