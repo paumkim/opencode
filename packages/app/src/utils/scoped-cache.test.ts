@@ -66,4 +66,59 @@ describe("createScopedCache", () => {
     expect(second.count).toBe(2)
     expect(disposed).toEqual(["a:1"])
   })
+
+  test("enforces maxEntries when the oldest key is an empty string", () => {
+    // `keys().next().value` is `string | undefined`, and "" is a legal key. The
+    // old guard was a truthiness check, so a cache whose oldest key was "" gave
+    // up evicting: maxEntries stopped being enforced and the cache grew without
+    // bound from then on.
+    const disposed: string[] = []
+    const cache = createScopedCache((key) => ({ key }), {
+      maxEntries: 2,
+      dispose: (value) => disposed.push(value.key),
+    })
+
+    cache.get("")
+    cache.get("b")
+    cache.get("c")
+    cache.get("d")
+
+    // The bound holds, and the empty-string key participates in LRU like any
+    // other: it was inserted first and never re-touched, so it is the first
+    // thing evicted.
+    expect(disposed).toEqual(["", "b"])
+    expect(cache.peek("")).toBeUndefined()
+    expect(cache.peek("b")).toBeUndefined()
+    expect(cache.peek("c")?.key).toBe("c")
+    expect(cache.peek("d")?.key).toBe("d")
+  })
+
+  test("an empty-string key round-trips and is disposed like any other", () => {
+    const disposed: string[] = []
+    const cache = createScopedCache((key) => ({ key }), {
+      maxEntries: 5,
+      dispose: (value) => disposed.push(value.key),
+    })
+
+    const value = cache.get("")
+    expect(value.key).toBe("")
+    // A cached hit, not a rebuild.
+    expect(cache.get("")).toBe(value)
+
+    expect(cache.delete("")?.key).toBe("")
+    expect(disposed).toEqual([""])
+    expect(cache.peek("")).toBeUndefined()
+  })
+
+  test("a cache bounded to zero entries disposes everything it creates", () => {
+    const disposed: string[] = []
+    const cache = createScopedCache((key) => ({ key }), {
+      maxEntries: 0,
+      dispose: (value) => disposed.push(value.key),
+    })
+
+    cache.get("a")
+    expect(disposed).toEqual(["a"])
+    expect(cache.peek("a")).toBeUndefined()
+  })
 })

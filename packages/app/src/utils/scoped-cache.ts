@@ -41,8 +41,13 @@ export function createScopedCache<T>(createValue: (key: string) => T, options: S
   const prune = () => {
     if (options.maxEntries === undefined) return
     while (store.size > options.maxEntries) {
+      // `Map.prototype.keys().next().value` is `string | undefined`, and an
+      // empty string is a legitimate key. Testing the value for truthiness
+      // instead of for undefined meant a cache whose oldest key was "" stopped
+      // evicting entirely, so `maxEntries` was silently unenforced from that
+      // point on and the cache grew without bound.
       const key = store.keys().next().value
-      if (!key) return
+      if (key === undefined) return
       const entry = store.get(key)
       store.delete(key)
       if (!entry) continue
