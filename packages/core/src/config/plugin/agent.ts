@@ -29,19 +29,23 @@ type PathAction =
   | typeof ReadTool.name
   | typeof EditTool.name
 const pathActions = ["external_directory", "read", "edit"] as const satisfies readonly PathAction[]
-const agentKeys = new Set([
-  "model",
-  "variant",
-  "request",
-  "system",
-  "context",
-  "description",
-  "mode",
-  "hidden",
-  "color",
-  "steps",
-  "disabled",
-  "permissions",
+// Keys that only ConfigAgentV1.Info accepts. A markdown agent is migrated from V1 when it uses one
+// of these. This has to be a positive list, not "any key ConfigAgent.Info does not contain": an
+// unknown key is far more often a typo in a V2 agent than evidence of a V1 one, and guessing V1
+// routes the file through ConfigMigrateV1.migrateAgent, which drops every V2 field. A typo'd
+// `permisions` therefore arrived as an agent with no permission rules at all. Note `disable` (V1)
+// and `disabled` (V2) are distinct keys on purpose, so each is detected on its own side.
+const legacyAgentKeys = new Set([
+  "temperature",
+  "top_p",
+  "frequency_penalty",
+  "presence_penalty",
+  "prompt",
+  "tools",
+  "disable",
+  "options",
+  "maxSteps",
+  "permission",
 ])
 
 export const Plugin = define({
@@ -161,7 +165,7 @@ function decode(file: { directory: string; filepath: string; primary: boolean },
     .replace(/^(agent|agents|mode|modes)\//, "")
     .replace(/\.md$/, "")
   const body = markdown.content.trim()
-  const legacy = Object.keys(markdown.data).some((key) => !agentKeys.has(key))
+  const legacy = Object.keys(markdown.data).some((key) => legacyAgentKeys.has(key))
   const agent = Option.getOrUndefined(
     legacy
       ? Option.map(

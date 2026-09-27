@@ -298,6 +298,68 @@ Use native v2 fields.`,
       ),
     ),
   )
+
+  it.live("does not migrate a v2 agent to v1 just because it has an unknown key", () =>
+    Effect.acquireRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ).pipe(
+      Effect.flatMap((tmp) =>
+        Effect.gen(function* () {
+          yield* Effect.promise(async () => {
+            await fs.mkdir(path.join(tmp.path, "agents"), { recursive: true })
+            // `colour` is a typo for the v2 key `color`. Everything else here is valid v2.
+            await fs.writeFile(
+              path.join(tmp.path, "agents", "reviewer.md"),
+              `---
+description: Review carefully
+colour: "#FF5733"
+permissions:
+  - action: edit
+    resource: "*"
+    effect: deny
+---
+Review carefully.`,
+            )
+            // `temperature` and `tools` only exist in v1, so this one must still be migrated.
+            await fs.writeFile(
+              path.join(tmp.path, "agents", "legacy.md"),
+              `---
+temperature: 0.5
+tools:
+  write: false
+---
+Legacy agent.`,
+            )
+          })
+          const agents = yield* AgentV2.Service
+          const config = Config.Service.of({
+            entries: () => Effect.succeed([new Config.Directory({ type: "directory", path: tmp.path as never })]),
+          })
+
+          yield* ConfigAgentPlugin.Plugin.effect(host({ agent: agentHost(agents) })).pipe(
+            Effect.provideService(Config.Service, config),
+          )
+
+          // The unknown key must not cost the agent its v2 fields. Routing it to the v1 migration
+          // path dropped `permissions` entirely — leaving every action to fall back to "ask"
+          // instead of the intended `edit` deny — and copied the typo'd key and the rule itself
+          // into `request.body`, which is assembled from agent request options.
+          expect(yield* agents.get(AgentV2.ID.make("reviewer"))).toMatchObject({
+            system: "Review carefully.",
+            description: "Review carefully",
+            request: { headers: {}, body: {} },
+            permissions: [{ action: "edit", resource: "*", effect: "deny" }],
+          })
+          // A key that only v1 accepts still selects the v1 migration.
+          expect(yield* agents.get(AgentV2.ID.make("legacy"))).toMatchObject({
+            system: "Legacy agent.",
+            request: { body: { temperature: 0.5 } },
+          })
+        }),
+      ),
+    ),
+  )
 })
 
 function loadHomePermissions(home: string) {
