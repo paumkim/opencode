@@ -144,6 +144,28 @@ describe("the stall sweep re-arms a goal whose turn ended without an idle event"
     await rt.dispose()
   })
 
+  test("a sub-second threshold is a real threshold, not zero", async () => {
+    const fresh = "stall-9"
+    await createGoal(fresh, "keep going", { maxAutoTurns: 100 })
+
+    const stale = "stall-10"
+    await createGoal(stale, "keep going", { maxAutoTurns: 100 })
+    await backdate(stale, 1)
+
+    // `timeoutMillisecondsFromSeconds` accepts `ms`, so "500ms" is a value a user can actually
+    // write. The sweep then compared it in seconds with `Math.floor(500 / 1000)`, which is 0 - so
+    // the staleness guard became `age < 0`, never fired, and EVERY active goal looked stale. A
+    // threshold nobody chose, silently meaning "always".
+    const rt = runtime({ max_stall_before_continue: "500ms" })
+    await rt.sweepStalledGoals()
+
+    // The goal that has not aged a single second is inside a half-second threshold.
+    expect((await getGoal(fresh))?.autoTurns).toBe(0)
+    // And the threshold is not inert: one second is past half a second.
+    expect((await getGoal(stale))?.autoTurns).toBe(1)
+    await rt.dispose()
+  })
+
   test("a session the sweep cannot confirm is left alone, not retired", async () => {
     const sessionID = "stall-6"
     await createGoal(sessionID, "keep going", { maxAutoTurns: 100 })

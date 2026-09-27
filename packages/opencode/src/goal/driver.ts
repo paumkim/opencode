@@ -832,7 +832,11 @@ export function createGoalRuntime(input: { client: Client; options?: Options }):
       if (busySessions.has(sessionID)) continue
       if (activeContinuations.has(sessionID)) continue
       if (scheduledContinuations.has(sessionID)) continue
-      if (now - goal.updatedAt < Math.floor(stallSweepMs / 1000)) continue
+      // Compared as a FRACTION of a second, not floored to whole seconds. Flooring turned every
+      // sub-second threshold into zero - `Math.floor(500 / 1000)` is 0 - so the guard became
+      // `age < 0`, never fired, and every active goal looked stale. `timeoutMillisecondsFromSeconds`
+      // accepts `ms`, so "500ms" is a value a user can write and it was silently meaning "always".
+      if (now - goal.updatedAt < stallSweepMs / 1000) continue
 
       // Whether the session is still alive matters: re-arming a goal whose session is gone is how a
       // long-lived state file fills with live-looking goals that quietly burn an auto-turn every
