@@ -773,6 +773,16 @@ export function createGoalRuntime(input: { client: Client; options?: Options }):
     positiveIntegerOrNull(options.min_continue_interval_seconds) ?? GOAL_DEFAULT_CONTINUE_INTERVAL_SECONDS
   const maxTurnTimeMs = timeoutMillisecondsFromSeconds(options.max_turn_time)
   const maxStallMs = timeoutMillisecondsFromSeconds(options.max_stall_before_continue)
+  // The threshold the stall sweep will actually enforce, or null when it must not run at all.
+  // Resolved ONCE and used for the guard, the threshold comparison and the timer, so the three
+  // cannot disagree. The sweep dispatches through the same `runAutoContinue` as the idle path, so it
+  // is an auto-continuation like any other and `auto_continue: false` has to bind it too. It did
+  // not: the idle path checked the opt-out and the sweep only checked for a threshold, so setting
+  // both options kept producing continuations while the setting read as "auto-continuation is off".
+  // Folding the opt-out in here also stops a deployment that opted out paying for a timer that can
+  // only ever do nothing - each tick otherwise reads and decodes the whole global state file just
+  // to discover it is not allowed to act.
+  const stallSweepMs = autoContinue ? maxStallMs : undefined
   const maxPromptFailures = positiveIntegerOrNull(options.max_prompt_failures) ?? GOAL_DEFAULT_MAX_PROMPT_FAILURES
   const taskTracker = new TaskTracker()
   const taskDeferredSessions = new Set<string>()
@@ -812,7 +822,7 @@ export function createGoalRuntime(input: { client: Client; options?: Options }):
    * failure and the goal eventually self-pauses.
    */
   async function sweepStalledGoals() {
-    if (maxStallMs == null) return
+    if (stallSweepMs == null) return
     const now = Math.floor(Date.now() / 1000)
     const state = await goalBookkeeping("readState", () => readState())
     if (!state) return
@@ -822,7 +832,7 @@ export function createGoalRuntime(input: { client: Client; options?: Options }):
       if (busySessions.has(sessionID)) continue
       if (activeContinuations.has(sessionID)) continue
       if (scheduledContinuations.has(sessionID)) continue
-      if (now - goal.updatedAt < Math.floor(maxStallMs / 1000)) continue
+      if (now - goal.updatedAt < Math.floor(stallSweepMs / 1000)) continue
 
       // Whether the session is still alive matters: re-arming a goal whose session is gone is how a
       // long-lived state file fills with live-looking goals that quietly burn an auto-turn every
@@ -867,8 +877,8 @@ export function createGoalRuntime(input: { client: Client; options?: Options }):
    * busy-polling, and never drops below 15s so a small threshold cannot turn into a hot loop.
    */
   const stallTimer = (() => {
-    if (maxStallMs == null) return undefined
-    const cadence = Math.max(15_000, Math.min(120_000, Math.floor(maxStallMs / 4)))
+    if (stallSweepMs == null) return undefined
+    const cadence = Math.max(15_000, Math.min(120_000, Math.floor(stallSweepMs / 4)))
     const timer = setInterval(() => void sweepStalledGoals(), cadence)
     const maybeUnref = timer as { unref?: () => void }
     if (typeof maybeUnref.unref === "function") maybeUnref.unref()
