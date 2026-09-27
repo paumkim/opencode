@@ -28,7 +28,12 @@ function tone(name: string) {
 
 export function agentColor(name: string, custom?: string) {
   if (custom) return custom
-  return defaults[name] ?? defaults[name.toLowerCase()] ?? tone(name.toLowerCase())
+  // Own-property lookups. `defaults` is an object literal, so an agent named
+  // after an Object.prototype member resolved to the inherited function, and
+  // the `??` chain stopped there — the function was then used as a CSS color
+  // and silently dropped by the browser, leaving the agent unstyled.
+  const known = (key: string) => (Object.hasOwn(defaults, key) ? defaults[key] : undefined)
+  return known(name) ?? known(name.toLowerCase()) ?? tone(name.toLowerCase())
 }
 
 export function messageAgentColor(
