@@ -3,10 +3,30 @@ export * as ConfigMarkdown from "./markdown"
 import matter from "gray-matter"
 export function parse(content: string) {
   try {
-    return matter(content)
-  } catch {
-    return matter(sanitize(content))
+    return read(content)
+  } catch (error) {
+    const sanitized = sanitize(content)
+    // Only retry when `sanitize` actually changed something. When it changed nothing there is
+    // nothing to repair, so let the real YAML error out instead of feeding the same string back in.
+    if (sanitized === content) throw error
+    return read(sanitized)
   }
+}
+
+// Pass an empty options object on every call, which opts out of gray-matter's cache entirely (it
+// reads and writes `matter.cache` only when `options` is undefined). That cache is keyed by content
+// and is populated BEFORE parsing -- gray-matter assigns `matter.cache[file.content] = file` and
+// only then calls `parseMatter` -- so a call that throws still leaves the UNPARSED file sitting in
+// the cache under that exact string, and the next read of it "succeeds" with `data: {}` and the
+// whole original file, delimiters and all, as `content`.
+//
+// Every caller feeds `content` to the model as the prompt (`prompt: md.content.trim()`), so a
+// malformed frontmatter used to cross from the configuration channel into the instruction channel
+// with its settings silently discarded -- and it did so inconsistently, depending on whether
+// something else in the process had already parsed that same string and poisoned its entry. Opting
+// out makes `parse` a pure function of its input: nothing to replay, nothing to poison.
+function read(content: string) {
+  return matter(content, {})
 }
 
 export function parseOption(content: string) {
