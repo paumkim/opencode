@@ -58,9 +58,9 @@ const openApiDriftRoutes = [
 ] satisfies Array<{ method: Method; path: string; query: QuerySchema }>
 
 const numericSdkQueryParams = [
-  { method: "get", path: ExperimentalPaths.session, name: "start", schema: { type: "number" } },
-  { method: "get", path: ExperimentalPaths.session, name: "cursor", schema: { type: "number" } },
-  { method: "get", path: ExperimentalPaths.session, name: "limit", schema: { type: "number" } },
+  { method: "get", path: ExperimentalPaths.session, name: "start", schema: { type: "integer", minimum: 0 } },
+  { method: "get", path: ExperimentalPaths.session, name: "cursor", schema: { type: "integer", minimum: 0 } },
+  { method: "get", path: ExperimentalPaths.session, name: "limit", schema: { type: "integer", minimum: 0 } },
   { method: "get", path: FilePaths.findFile, name: "limit", schema: { type: "integer", minimum: 1, maximum: 200 } },
   { method: "get", path: SessionPaths.list, name: "start", schema: { type: "number" } },
   { method: "get", path: SessionPaths.list, name: "limit", schema: { type: "number" } },
