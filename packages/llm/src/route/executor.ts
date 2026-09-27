@@ -65,9 +65,14 @@ const redactHeaders = (headers: Headers.Headers, redactedNames: ReadonlyArray<st
     ]),
   )
 
+// A baseURL may carry HTTP basic auth (`https://user:token@host`), so the
+// userinfo password is a secret the query-key rules above never see. Keep the
+// username — it identifies the failing account and is not itself a secret —
+// and drop only the password.
 const redactUrl = (value: string) => {
   if (!URL.canParse(value)) return REDACTED
   const url = new URL(value)
+  if (url.password !== "") url.password = REDACTED
   url.searchParams.forEach((_, key) => {
     if (isSensitiveQueryName(key)) url.searchParams.set(key, REDACTED)
   })
@@ -179,7 +184,20 @@ const secretValues = (request: HttpClientRequest.HttpClientRequest) => {
   })
 
   if (!URL.canParse(request.url)) return values
-  new URL(request.url).searchParams.forEach((value, key) => {
+  const url = new URL(request.url)
+  // A userinfo password is a request credential too: the provider can echo it
+  // back in an error body, and the literal pass is what scrubs that. `password`
+  // is the percent-encoded form, so recover the original too — a literal `%`
+  // that is not a valid escape makes the decode throw, hence the guard.
+  if (url.password !== "") {
+    add(url.password)
+    try {
+      add(decodeURIComponent(url.password))
+    } catch {
+      // not a valid escape sequence; the encoded form above is all we have
+    }
+  }
+  url.searchParams.forEach((value, key) => {
     if (isSensitiveQueryName(key)) add(value)
   })
   return values

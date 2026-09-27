@@ -18,6 +18,9 @@ const secretRequest = HttpClientRequest.post("https://provider.test/v1/chat?api_
   HttpClientRequest.setHeaders(Headers.fromInput({ authorization: "Bearer header-secret-456" })),
 )
 
+// A baseURL may carry HTTP basic auth; the userinfo password is a secret.
+const userinfoRequest = HttpClientRequest.post("https://gateway:userinfo-secret-789@provider.test/v1/chat?debug=1")
+
 const responsesLayer = (responses: ReadonlyArray<Response>) =>
   RequestExecutor.layer.pipe(
     Layer.provide(
@@ -353,6 +356,44 @@ describe("RequestExecutor", () => {
         ]),
       ),
     ),
+  )
+
+  it.effect("redacts a basic-auth userinfo password out of the reported url", () =>
+    Effect.gen(function* () {
+      const executor = yield* RequestExecutor.Service
+      const error = yield* executor.execute(userinfoRequest).pipe(Effect.flip)
+
+      expectLLMError(error)
+      // The username stays: it identifies the failing account and is not a secret.
+      expect(errorHttp(error)?.request.url).toBe("https://gateway:%3Credacted%3E@provider.test/v1/chat?debug=1")
+      expect(errorHttp(error)?.request.url).not.toContain("userinfo-secret-789")
+    }).pipe(Effect.provide(responsesLayer([new Response("bad gateway", { status: 400 })]))),
+  )
+
+  it.effect("redacts an echoed userinfo password out of the response body", () =>
+    Effect.gen(function* () {
+      const executor = yield* RequestExecutor.Service
+      const error = yield* executor.execute(userinfoRequest).pipe(Effect.flip)
+
+      expectLLMError(error)
+      expect(errorHttp(error)?.body).toBe("provider echoed <redacted>")
+      expect(errorHttp(error)?.body).not.toContain("userinfo-secret-789")
+    }).pipe(Effect.provide(responsesLayer([new Response("provider echoed userinfo-secret-789", { status: 400 })]))),
+  )
+
+  // A password containing a bare `%` is not a valid percent-escape, so decoding
+  // the userinfo throws. Redaction must still succeed rather than blow up.
+  it.effect("redacts a userinfo password that is not a valid percent escape", () =>
+    Effect.gen(function* () {
+      const executor = yield* RequestExecutor.Service
+      const error = yield* executor
+        .execute(HttpClientRequest.post("https://gateway:50%off@provider.test/v1/chat"))
+        .pipe(Effect.flip)
+
+      expectLLMError(error)
+      expect(errorHttp(error)?.request.url).not.toContain("50%off")
+      expect(errorHttp(error)?.body).not.toContain("50%off")
+    }).pipe(Effect.provide(responsesLayer([new Response("provider echoed 50%off for gateway", { status: 400 })]))),
   )
 
   it.effect("honors Retry-After delta seconds before retrying", () =>
