@@ -74,13 +74,18 @@ pid_of() { [ -f "$STATE/run/$1.pid" ] && cat "$STATE/run/$1.pid" 2>/dev/null; }
 # Every opencode agent window on the machine, whoever started it. `comm` is the
 # discriminator: the ghostty wrapper and the shell launcher carry the same argv as
 # the real binary, so matching on arguments double-counts every window.
+#
+# Scoped to CONFIGURED PROJECTS on purpose. The user's own interactive session is
+# also an `opencode` process, and a bare `stop` must never reach it.
 adopted() {
-  local pid cwd comm
+  local pid cwd comm want
   for pid in $(pgrep -x opencode 2>/dev/null); do
     comm="$(cat "/proc/$pid/comm" 2>/dev/null)" || continue
     [ "$comm" = "opencode" ] || continue
     cwd="$(readlink -f "/proc/$pid/cwd" 2>/dev/null)" || continue
-    printf '%s\t%s\n' "$pid" "$cwd"
+    while IFS=$'\t' read -r want _; do
+      [ "$want" = "$cwd" ] && { printf '%s\t%s\n' "$pid" "$cwd"; break; }
+    done < <(read_projects)
   done | sort -u -k1,1
 }
 
