@@ -79,7 +79,12 @@ const layer = Layer.effect(
 
             for (const { item, cmd } of formatters) {
               yield* Effect.logInfo("running", { command: cmd })
-              const replaced = cmd.map((x) => x.replace("$FILE", filepath))
+              // The replacement is a FUNCTION, not a string, so the path is inserted literally.
+              // A string replacement makes `String.prototype.replace` expand the `$` patterns
+              // (`$&`, `` $` ``, `$'`, `$$`) that a legal filename can contain, so a file called
+              // `a$&b.ts` was passed to the formatter as `a$FILEb.ts`: the formatter rewrote a
+              // DIFFERENT file and the one the user edited was silently left unformatted.
+              const replaced = cmd.map((x) => x.replace("$FILE", () => filepath))
               const dir = yield* InstanceState.directory
               const result = yield* appProcess
                 .run(
