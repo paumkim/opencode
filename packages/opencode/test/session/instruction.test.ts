@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import path from "path"
-import { Effect, FileSystem, Layer } from "effect"
+import { Effect, FileSystem, Layer, Stream } from "effect"
+import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 
 import { Instruction } from "../../src/session/instruction"
@@ -16,33 +17,56 @@ import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
-import { LayerNodePlatform } from "@opencode-ai/core/effect/app-node-platform"
+import { LayerNodePlatform, httpClient } from "@opencode-ai/core/effect/app-node-platform"
 import { InstanceStore } from "@/project/instance-store"
 import { InstanceBootstrap } from "@/project/bootstrap"
 import { Config } from "@/config/config"
 
 const it = testEffect(
-  AppNodeBuilder.build(LayerNode.group([CrossSpawnSpawner.node, LayerNodePlatform.filesystem, InstanceStore.node]), [
+  AppNodeBuilder.build(
+    LayerNode.group([CrossSpawnSpawner.node, LayerNodePlatform.filesystem, InstanceStore.node, httpClient]),
     [
-      InstanceBootstrap.node,
-      Layer.succeed(InstanceBootstrap.Service, InstanceBootstrap.Service.of({ run: Effect.void })),
+      [
+        InstanceBootstrap.node,
+        Layer.succeed(InstanceBootstrap.Service, InstanceBootstrap.Service.of({ run: Effect.void })),
+      ],
     ],
-  ]),
+  ),
 )
 
 const configLayer = Layer.succeed(Config.Service, TestConfig.make())
 
-const instructionLayer = (global: Partial<Global.Interface>, flags: Partial<RuntimeFlags.Info> = {}) =>
+const instructionLayer = (
+  global: Partial<Global.Interface>,
+  flags: Partial<RuntimeFlags.Info> = {},
+  client?: HttpClient.HttpClient,
+) =>
   AppNodeBuilder.build(Instruction.node, [
     [Config.node, configLayer],
+    ...(client ? ([[httpClient, Layer.succeed(HttpClient.HttpClient, client)]] as const) : []),
     [Global.node, Global.layerWith(global)],
     [RuntimeFlags.node, RuntimeFlags.layer(flags)],
   ])
 
 const provideInstruction =
-  (global: Partial<Global.Interface>, flags?: Partial<RuntimeFlags.Info>) =>
+  (global: Partial<Global.Interface>, flags?: Partial<RuntimeFlags.Info>, client?: HttpClient.HttpClient) =>
   <A, E, R>(self: Effect.Effect<A, E, R>) =>
-    self.pipe(Effect.provide(instructionLayer(global, flags)))
+    self.pipe(Effect.provide(instructionLayer(global, flags, client)))
+
+// A response whose body arrives as a stream, so the cap in `fetch` is exercised on real chunks
+// rather than a single pre-sized `Response` body.
+const streaming = (request: HttpClientRequest.HttpClientRequest, chunks: readonly Uint8Array[]) =>
+  HttpClientResponse.fromWeb(
+    request,
+    new Response(
+      new ReadableStream({
+        start(controller) {
+          for (const chunk of chunks) controller.enqueue(chunk)
+          controller.close()
+        },
+      }),
+    ),
+  )
 
 const write = (filepath: string, content: string) =>
   Effect.gen(function* () {
@@ -206,21 +230,111 @@ describe("Instruction.resolve", () => {
     ),
   )
 
-  // NOT COVERED: `Instruction.system` fetches every http(s) entry in `config.instructions` through
-  // HttpClient and attributes it by URL, and a failure drops just that entry. This was a
-  // `test.todo` with an empty body, which reported "todo" on every run while checking nothing -
-  // a permanent reminder that does not interrupt anyone.
-  //
-  // It is recorded here as a comment instead, because the behaviour fails SILENTLY (no throw, the
-  // instruction just stops being contributed) and a comment is still more visible than a skipped
-  // test. Writing the test means registering an HttpClient node in this suite's layer group, which
-  // the `it` harness above does not currently carry - a structural change, deliberately not
-  // smuggled in beside an unrelated fix.
-  //
-  // To cover it: add the HttpClient node to the `LayerNode.group([...])` in the `it` harness, then
-  // build the service with `TestConfig.layer({ get: () => Effect.succeed({ instructions: [url] }) })`
-  // and an `HttpClient.make` stub, and assert the result contains
-  // `Instructions from: ${url}\n<remote body>`.
+  // The gap this block used to describe is now closed: the HttpClient node is in the harness and
+  // the remote branch is asserted below, including the cap that bounds what a config-named URL can
+  // contribute to the system prompt.
+  const remoteSystem = (instructions: string[], client: HttpClient.HttpClient) =>
+    provideTmpdirInstance((dir) =>
+      Effect.gen(function* () {
+        return yield* (yield* Instruction.Service).system()
+      }).pipe(
+        Effect.provide(
+          AppNodeBuilder.build(Instruction.node, [
+            [Config.node, TestConfig.layer({ get: () => Effect.succeed({ instructions }) })],
+            [Global.node, Global.layerWith({ home: dir, config: dir })],
+            [RuntimeFlags.node, RuntimeFlags.layer({})],
+            [httpClient, Layer.succeed(HttpClient.HttpClient, client)],
+          ]),
+        ),
+      ),
+    )
+
+  const text = (value: string) => new TextEncoder().encode(value)
+
+  it.live("attributes a fetched instruction to its URL", () =>
+    Effect.gen(function* () {
+      const url = "https://example.test/instructions.md"
+      const client = HttpClient.make((request) => Effect.succeed(streaming(request, [text("# Remote")])))
+      expect(yield* remoteSystem([url], client)).toEqual([`Instructions from: ${url}\n# Remote`])
+    }),
+  )
+
+  it.live("drops only the entry whose fetch fails", () =>
+    Effect.gen(function* () {
+      const good = "https://example.test/good.md"
+      const bad = "https://example.test/bad.md"
+      // A 500, not a defect: `Effect.die` is a defect and `Effect.catch` in `fetch` only sees
+      // typed failures, so a defect would take the whole call down instead of dropping one entry.
+      const client = HttpClient.make((request) =>
+        Effect.succeed(
+          request.url.includes("bad")
+            ? HttpClientResponse.fromWeb(request, new Response("nope", { status: 500 }))
+            : streaming(request, [text("# ok")]),
+        ),
+      )
+      // A failing entry contributes nothing and takes nothing else with it: `systemPaths` still
+      // runs, and the surviving URL is still attributed.
+      expect(yield* remoteSystem([good, bad], client)).toEqual([`Instructions from: ${good}\n# ok`])
+    }),
+  )
+
+  it.live("stops reading a remote body at the cap and says so", () =>
+    Effect.gen(function* () {
+      const url = "https://example.test/huge.md"
+      // 40 x 16KiB is well past the 256KiB cap, delivered as a pull-driven stream so the test
+      // fails against an implementation that drains the whole body and truncates afterwards.
+      const chunks = Array.from({ length: 40 }, () => new Uint8Array(16 * 1024).fill(97))
+      let pulled = 0
+      const client = HttpClient.make((request) =>
+        Effect.succeed(
+          HttpClientResponse.fromWeb(
+            request,
+            new Response(
+              new ReadableStream({
+                pull(controller) {
+                  const chunk = chunks[pulled++]
+                  if (!chunk) return controller.close()
+                  controller.enqueue(chunk)
+                },
+              }),
+            ),
+          ),
+        ),
+      )
+      const [rule] = yield* remoteSystem([url], client)
+      // Assert the read stopped BEFORE the text: an implementation that drains the body and
+      // truncates afterwards would still satisfy every assertion below, and the unbounded read is
+      // the part that costs memory.
+      expect(pulled).toBeLessThan(40)
+      expect(rule).toStartWith(`Instructions from: ${url}\n`)
+      expect(rule).toEndWith("[opencode: instruction truncated]")
+      // 256KiB of "a" plus the header, not the full 640KiB body.
+      expect(rule.length).toBeLessThan(300 * 1024)
+    }),
+  )
+
+  it.live("truncates a local instruction file on a character boundary", () =>
+    provideTmpdirInstance((dir) =>
+      Effect.gen(function* () {
+        // A 3-byte character placed so it straddles the cap: a byte cut there would decode to
+        // U+FFFD, which is the whole reason `decodeInstruction` steps back instead of slicing.
+        const filler = "a".repeat(256 * 1024 - 1)
+        yield* write(path.join(dir, "big.md"), filler + "\u20ac tail")
+        const [rule] = yield* (yield* Instruction.Service).system()
+        expect(rule).toEndWith("[opencode: instruction truncated]")
+        expect(rule).not.toContain("\uFFFD")
+        expect(rule).toContain(filler)
+      }).pipe(
+        Effect.provide(
+          AppNodeBuilder.build(Instruction.node, [
+            [Config.node, TestConfig.layer({ get: () => Effect.succeed({ instructions: ["big.md"] }) })],
+            [Global.node, Global.layerWith({ home: dir, config: dir })],
+            [RuntimeFlags.node, RuntimeFlags.layer({})],
+          ]),
+        ),
+      ),
+    ),
+  )
 })
 
 describe("Instruction.system", () => {
