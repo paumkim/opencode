@@ -9,7 +9,7 @@ import { MCP } from "../mcp"
 import { Skill } from "../skill"
 // Single source of truth for the /goal prompt. It ships as a plain command prompt asset (not a
 // plugin asset) so both command registries read the same text.
-import { GOAL_PROMPT as PROMPT_GOAL } from "@opencode-ai/core/prompt/command"
+import { CREW_PROMPT as PROMPT_CREW, GOAL_PROMPT as PROMPT_GOAL } from "@opencode-ai/core/prompt/command"
 import PROMPT_INITIALIZE from "./template/initialize.txt"
 import PROMPT_REVIEW from "./template/review.txt"
 import { LegacyEvent } from "@opencode-ai/schema/legacy-event"
@@ -48,6 +48,7 @@ export function hints(template: string) {
 
 export const Default = {
   GOAL: "goal",
+  CREW: "crew",
   INIT: "init",
   REVIEW: "review",
 } as const
@@ -79,6 +80,15 @@ const layer = Layer.effect(
           return PROMPT_GOAL
         },
         hints: hints(PROMPT_GOAL),
+      }
+      commands[Default.CREW] = {
+        name: Default.CREW,
+        description: "Launch a crew of unattended, goal-driven agent windows across your projects",
+        source: "command",
+        get template() {
+          return PROMPT_CREW
+        },
+        hints: hints(PROMPT_CREW),
       }
       commands[Default.INIT] = {
         name: Default.INIT,

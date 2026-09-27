@@ -1,0 +1,9 @@
+{
+  // Projects the crew drives. Each project gets its own windows, and every window is told to stay
+  // inside it — two windows editing one working tree is the collision this file exists to prevent.
+  // Repoint or add entries freely; nothing in script/crew.sh hardcodes a path.
+  "projects": [
+    { "path": "/home/pauk/Projects/opencode", "label": "opencode" },
+    { "path": "/home/pauk/Projects/term", "label": "term" }
+  ]
+}
