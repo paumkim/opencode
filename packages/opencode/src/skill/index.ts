@@ -272,7 +272,14 @@ const layer = Layer.effect(
     )
     const state = yield* InstanceState.make(
       Effect.fn("Skill.state")(function* () {
-        const s: State = { skills: {}, dirs: new Set() }
+        // Null-prototype record, not a bare object literal. Skill names come from
+        // SKILL.md frontmatter, so a skill can be named after an Object.prototype
+        // member. With a normal object, `s.skills["constructor"]` returned the
+        // `Object` function, which is truthy, so `Skill.require` skipped its
+        // not-found error and the skill tool then died on
+        // `path.dirname(Object.location)`. It also made the duplicate check above
+        // warn with an `undefined` location for a first-time skill.
+        const s: State = { skills: Object.create(null), dirs: new Set() }
         // Register the built-in skill BEFORE disk discovery so a user-disk
         // skill with the same name can override it.
         s.skills[CUSTOMIZE_OPENCODE_SKILL_NAME] = {
