@@ -580,10 +580,16 @@ const layer = Layer.effect(
         const bridge = yield* EffectBridge.make()
         const cfg = yield* config.get()
         const modelsDev = yield* modelsDevSvc.get()
-        const catalog = mapValues(modelsDev, fromModelsDevProvider)
+        // Null-prototype registries. Provider ids come from config keys and from
+        // the models.dev payload, so a prototype-key id ("constructor",
+        // "toString", …) resolved to an inherited value: `providers[providerID]`
+        // was truthy, which skipped getModel's not-found branch and then threw
+        // on `provider.models`, and `catalog[providerID]` did the same to the
+        // suggestion fallback.
+        const catalog = Object.assign(Object.create(null), mapValues(modelsDev, fromModelsDevProvider))
         const database = mapValues(catalog, toPublicInfo)
 
-        const providers: Record<ProviderV2.ID, Info> = {} as Record<ProviderV2.ID, Info>
+        const providers: Record<ProviderV2.ID, Info> = Object.create(null)
         const languages = new Map<string, LanguageModelV3>()
         const modelLoaders: {
           [providerID: string]: CustomModelLoader

@@ -3,7 +3,7 @@ import { mkdir, unlink } from "fs/promises"
 import path from "path"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
-import { Effect, Layer } from "effect"
+import { Cause, Effect, Layer } from "effect"
 import { ModelsDev } from "@opencode-ai/core/models-dev"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
@@ -332,6 +332,25 @@ it.instance("getModel throws ModelNotFoundError for invalid provider", () =>
     expect(exit._tag).toBe("Failure")
   }),
 )
+
+// The provider registry was a plain object literal and the catalog is built from
+// the models.dev payload, so a prototype-key provider id resolved to an
+// inherited value. `providers[id]` was then truthy, which skipped the
+// not-found branch and threw on `provider.models` — a defect instead of the
+// ModelNotFoundError callers handle.
+for (const key of ["constructor", "toString", "valueOf", "hasOwnProperty", "isPrototypeOf", "__defineGetter__"]) {
+  it.instance(`getModel reports ${key} as an unknown provider, not a crash`, () =>
+    Effect.gen(function* () {
+      const exit = yield* Provider.use
+        .getModel(ProviderV2.ID.make(key), ModelV2.ID.make("some-model"))
+        .pipe(Effect.exit)
+      expect(exit._tag).toBe("Failure")
+      // A typed failure, not a defect: a crash here is what callers see as an
+      // unexplained session error instead of "model not found".
+      if (exit._tag === "Failure") expect(Cause.hasDies(exit.cause)).toBe(false)
+    }),
+  )
+}
 
 // Pure synchronous unit tests — no Effect runtime needed.
 
