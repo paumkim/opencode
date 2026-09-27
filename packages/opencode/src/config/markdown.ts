@@ -33,4 +33,19 @@ export async function parse(filePath: string) {
   }
 }
 
+// `parse` reports a frontmatter that does not parse as a typed `FrontmatterError` carrying the
+// file and the YAML problem, and the CLI, the TUI, the web app, and the httpapi 400 mapping all
+// render it. The agent/command loaders used to `.catch(() => undefined)` it away, so a malformed
+// entry vanished with no diagnostic at all. A file we cannot read is a different problem -- it
+// vanished between the glob and the read, or we may not open it -- and is not the user's mistake to
+// fix, so that case stays skippable and only it returns undefined.
+export async function parseEntry(filePath: string) {
+  try {
+    return await parse(filePath)
+  } catch (err) {
+    if (FrontmatterError.isInstance(err)) throw err
+    return undefined
+  }
+}
+
 export * as ConfigMarkdown from "./markdown"

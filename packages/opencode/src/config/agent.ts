@@ -16,7 +16,9 @@ export async function load(dir: string) {
     dot: true,
     symlink: true,
   })) {
-    const md = await ConfigMarkdown.parse(item).catch(() => undefined)
+    // `parseEntry` only returns undefined for a file we could not read at all; a frontmatter that
+    // does not parse is re-thrown so the user is told which file and why.
+    const md = await ConfigMarkdown.parseEntry(item)
     if (!md) continue
 
     const name = configEntryNameFromPath(path.relative(dir, item), ["agent/", "agents/"])
@@ -39,7 +41,9 @@ export async function loadMode(dir: string) {
     dot: true,
     symlink: true,
   })) {
-    const md = await ConfigMarkdown.parse(item).catch(() => undefined)
+    // `parseEntry` only returns undefined for a file we could not read at all; a frontmatter that
+    // does not parse is re-thrown so the user is told which file and why.
+    const md = await ConfigMarkdown.parseEntry(item)
     if (!md) continue
 
     const config = {
