@@ -2,6 +2,7 @@ import fs from "fs/promises"
 import path from "path"
 import { describe, expect } from "bun:test"
 import { Effect, Layer } from "effect"
+import * as TestConsole from "effect/testing/TestConsole"
 import { AgentV2 } from "@opencode-ai/core/agent"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
@@ -157,6 +158,53 @@ describe("SkillV2", () => {
               content: "# review",
             },
           ])
+        }),
+      ),
+    ),
+  )
+
+  // A frontmatter that does not parse leaves nothing to recover, so the skill is dropped -- and it
+  // used to be dropped in total silence, even though a file with a merely wrong-typed key reports
+  // itself in the same loop. The more broken a file was, the quieter the loader got.
+  it.live("reports a skill whose frontmatter does not parse, and still loads its siblings", () =>
+    Effect.acquireRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ).pipe(
+      Effect.flatMap((tmp) =>
+        Effect.gen(function* () {
+          yield* Effect.promise(async () => {
+            await fs.mkdir(path.join(tmp.path, "broken"), { recursive: true })
+            // An unterminated double quote is the shape `sanitize` cannot rescue, so it reaches the
+            // parser as a genuine YAML failure.
+            await fs.writeFile(path.join(tmp.path, "broken", "SKILL.md"), `---\nname: "unterminated\n---\n# broken`)
+            await fs.mkdir(path.join(tmp.path, "good"), { recursive: true })
+            await write(tmp.path, "good", "Still here")
+          })
+
+          const skill = yield* SkillV2.Service
+          yield* skill.transform((editor) => {
+            editor.source({ type: "directory", path: AbsolutePath.make(tmp.path) })
+          })
+
+          // One broken file must not cost the user the working ones.
+          expect(yield* skill.list()).toEqual([
+            {
+              name: "good",
+              description: "Still here",
+              location: AbsolutePath.make(path.join(tmp.path, "good", "SKILL.md")),
+              content: "# good",
+            },
+          ])
+
+          // The warning must name the file. A skill's name comes from its frontmatter, which is
+          // exactly what failed to parse, so the path is the only way to identify what was lost.
+          // Read after `list()` on purpose: unlike the agent and command plugins, a skill directory
+          // is only walked when a skill is actually listed, so the warning does not exist before then.
+          const lines = yield* TestConsole.logLines
+          const at = lines.indexOf("ignoring unparseable skill frontmatter")
+          expect(at).toBeGreaterThan(0)
+          expect(lines[at + 1]).toEqual({ path: path.join(tmp.path, "broken", "SKILL.md") })
         }),
       ),
     ),

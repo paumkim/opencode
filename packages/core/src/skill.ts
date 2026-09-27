@@ -111,7 +111,13 @@ const layer = Layer.effect(
           const content = yield* fs.readFileStringSafe(filepath).pipe(Effect.catch(() => Effect.succeed(undefined)))
           if (!content) continue
           const markdown = ConfigMarkdown.parseOption(content)
-          if (!markdown) continue
+          // A frontmatter that does not parse is a mistake the user can fix, and it used to skip in
+          // total silence even though a file with a merely wrong-typed KEY reports itself below -- the
+          // more broken a file was, the quieter the loader got.
+          if (!markdown) {
+            yield* Effect.logWarning("ignoring unparseable skill frontmatter", { path: filepath })
+            continue
+          }
           const { info: frontmatter, rejected } = decodeSkillFrontmatter(markdown.data)
           if (rejected.length > 0) {
             // No `name` here: the skill's name is derived from the frontmatter below, so reporting
