@@ -3,6 +3,8 @@ import { Database } from "@opencode-ai/core/database/database"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { expect } from "bun:test"
+import { mkdtemp, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
 import { APICallError, jsonSchema, tool, type ModelMessage } from "ai"
 import { Config } from "@/config/config"
 import { Cause, Effect, Exit, Fiber, Layer, Stream } from "effect"
@@ -2520,4 +2522,62 @@ it.live("a checkpoint written after a file change records the step's accomplishm
       config: (url) => ({ ...providerCfg(url), experimental: { checkpoint: { enabled: true } } }),
     },
   ),
+)
+
+// The tool-learning log is the record of how each tool call behaved, and the one field that makes a
+// learning usable later is `args` - the arguments the tool was called with. It is written from two
+// call sites, and they disagreed: the `tool-error` path read the tool call's own input, while the
+// SUCCESS path read a bare `input` that, in that block, is not the tool's input at all. The
+// neighbouring `tool-call` case has a local named `input` holding exactly that value, so the wrong
+// one type-checks and reads correctly in isolation - the defect only exists across the two blocks.
+itNoEdit.instance(
+  "session.processor a successful tool learning records the tool's own arguments",
+  () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const { processors, session, provider } = yield* boot()
+
+      // `saveToolLearning` resolves its target from `OPENCODE_TEST_HOME`, so a fresh one gives this
+      // test its own log file rather than appending to the shared one.
+      const home = yield* Effect.promise(() => mkdtemp(path.join(tmpdir(), "opencode-learnings-")))
+      const previousHome = process.env.OPENCODE_TEST_HOME
+      process.env.OPENCODE_TEST_HOME = home
+      try {
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "read the file")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(test.directory))
+        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: mdl })
+
+        const args = { filePath: "a.txt", offset: 12 }
+        pushLLM(providerToolTurn("read", args))
+        yield* handle.process({
+          user: parent, sessionID: chat.id, model: mdl, agent: agent(), system: [],
+          messages: [{ role: "user", content: "read the file" }], tools: {},
+        })
+
+        const log = path.join(home, ".term", ".agents", "data", "term-memory", "tool-learnings.jsonl")
+        const lines = yield* pollWithTimeout(
+          Effect.promise(async () => {
+            const text = await Bun.file(log).text().catch(() => "")
+            const found = text.split("\n").filter(Boolean)
+            return found.length > 0 ? found : undefined
+          }),
+          "no tool learning was written",
+        )
+        const entry = JSON.parse(lines[lines.length - 1])
+
+        // The arguments, and only the arguments.
+        expect(entry.args).toEqual(args)
+        // What the wrong binding put there instead: the `create()` Input - the assistant-message
+        // record and the model descriptor. Named explicitly so a regression names itself.
+        expect(entry.args).not.toHaveProperty("assistantMessage")
+        expect(entry.args).not.toHaveProperty("model")
+      } finally {
+        if (previousHome === undefined) delete process.env.OPENCODE_TEST_HOME
+        else process.env.OPENCODE_TEST_HOME = previousHome
+        yield* Effect.promise(() => rm(home, { recursive: true, force: true }))
+      }
+    }),
+  { config: cfg },
 )
