@@ -48,6 +48,21 @@ function data(validate: (value: any) => void) {
   }
 }
 
+// The news catalog is a global list. Its contents depend on the models.dev
+// snapshot, which the harness does not stub, so assert the declared item shape
+// only when the request actually returned releases (the service degrades to an
+// empty list when that catalog is unavailable).
+function newsItems(value: unknown) {
+  array(value)
+  for (const item of value) {
+    object(item)
+    check(typeof item.id === "string", "news item should expose a string id")
+    check(typeof item.title === "string", "news item should expose a string title")
+    check(typeof item.releaseDate === "string", "news item should expose a string releaseDate")
+    check(item.type === "model_release", "news item should be a model release")
+  }
+}
+
 function locationData(validate: (value: any) => void) {
   return (body: any) => {
     object(body)
@@ -144,6 +159,7 @@ const scenarios: Scenario[] = [
   http.protected.get("/skill", "app.skills").json(200, array, "status"),
   http.protected.get("/lsp", "lsp.status").json(200, array),
   http.protected.get("/formatter", "formatter.status").json(200, array),
+  http.protected.get("/news", "news.list").global().json(200, newsItems, "status"),
   http.protected.get("/config", "config.get").json(200, undefined, "status"),
   http.protected
     .patch("/config", "config.update")
