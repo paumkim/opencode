@@ -202,6 +202,15 @@ start() {
     mapfile -t arr < <(read_projects | cut -f1)
     [ "${#arr[@]}" -gt 0 ] || die "no projects configured in $CONFIG"
   fi
+  # Two windows on ONE working tree will clobber each other's edits and each other's test runs.
+  # Observed directly: three agents on one repo left half-finished work everywhere and burned
+  # quota going nowhere. So more windows than projects is refused unless the caller insists,
+  # because the round-robin would otherwise quietly create that collision.
+  if [ "$want" -gt "${#arr[@]}" ] && [ "${CREW_ALLOW_COLLISION:-0}" != "1" ]; then
+    die "$want windows over ${#arr[@]} project(s) means two windows editing one working tree.
+     That reliably clobbers work. Add more projects to $CONFIG, start fewer windows, or set
+     CREW_ALLOW_COLLISION=1 if you really mean it."
+  fi
   for (( n=0; n<want; n++ )); do
     dir="${arr[$(( n % ${#arr[@]} ))]}"
     label="$(label_for "$dir")"
