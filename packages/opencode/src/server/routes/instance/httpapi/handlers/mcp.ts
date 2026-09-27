@@ -14,10 +14,14 @@ export const mcpHandlers = HttpApiBuilder.group(InstanceHttpApi, "mcp", (handler
     })
 
     const add = Effect.fn("McpHttpApi.add")(function* (ctx: { payload: typeof AddPayload.Type }) {
+      // `status` is already the whole map keyed by server name, so it must not be
+      // probed for a `status` key: a server literally named "status" makes that
+      // probe fire, nest the map one level too deep, and fail the decode with a
+      // 400 for a server that was added successfully.
       const result = (yield* mcp.add(ctx.payload.name, ctx.payload.config)).status
-      return yield* Schema.decodeUnknownEffect(StatusMap)(
-        "status" in result ? { [ctx.payload.name]: result } : result,
-      ).pipe(Effect.mapError(() => new HttpApiError.BadRequest({})))
+      return yield* Schema.decodeUnknownEffect(StatusMap)(result).pipe(
+        Effect.mapError(() => new HttpApiError.BadRequest({})),
+      )
     })
 
     const authStart = Effect.fn("McpHttpApi.authStart")(function* (ctx: { params: { name: string } }) {

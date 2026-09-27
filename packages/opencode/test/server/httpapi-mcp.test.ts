@@ -126,6 +126,37 @@ describe("mcp HttpApi", () => {
     },
   )
 
+  // A server literally named "status" used to trip the handler's `"status" in result`
+  // shape probe, which nested the whole status map under the added name and made the
+  // StatusMap decode fail — a 400 for a server that was added and stored fine.
+  it.instance(
+    "adds a server named status without mangling the response",
+    () =>
+      Effect.gen(function* () {
+        const tmp = yield* TestInstance
+        const handler = HttpApiApp.webHandler()
+        const added = yield* request(handler, McpPaths.status, tmp.directory, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            name: "status",
+            config: {
+              type: "local",
+              command: ["echo", "status"],
+              enabled: false,
+            },
+          }),
+        })
+        expect(added.status).toBe(200)
+        expect(yield* json(added)).toEqual({ status: { status: "disabled" } })
+
+        const listed = yield* request(handler, McpPaths.status, tmp.directory)
+        expect(listed.status).toBe(200)
+        expect(yield* json<Record<string, { status: string }>>(listed)).toEqual({ status: { status: "disabled" } })
+      }),
+    { config: { mcp: {} } },
+  )
+
   it.instance(
     "serves deterministic OAuth endpoints",
     () =>
