@@ -1,8 +1,15 @@
 export function prefix(tokens: string[]) {
   for (let len = tokens.length; len > 0; len--) {
     const prefix = tokens.slice(0, len).join(" ")
-    const arity = ARITY[prefix]
-    if (arity !== undefined) return tokens.slice(0, arity)
+    // Own-property lookup, not a bare index: `ARITY` is an object literal, so
+    // `ARITY["constructor"]` (or `toString`, `valueOf`, `__proto__`, …) returned an
+    // inherited function/object rather than undefined. That passed the arity
+    // check, and `tokens.slice(0, Object)` coerced to `slice(0, NaN)`, collapsing
+    // the prefix to `[]`. The shell tool then built its "always approve" pattern
+    // as the empty string plus " *", so approving such a command once
+    // permanently allowed EVERY command.
+    if (!Object.hasOwn(ARITY, prefix)) continue
+    return tokens.slice(0, ARITY[prefix])
   }
   if (tokens.length === 0) return []
   return tokens.slice(0, 1)
