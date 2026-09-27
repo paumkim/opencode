@@ -402,7 +402,11 @@ const saveToolLearning = Effect.fn("SessionProcessor.saveToolLearning")(function
         success: boolean
         error?: string
         output?: string
-        args?: any
+        // `unknown`, not `any`: every `saveToolLearning` call site passes a value out of scope, and
+        // `any` means a wrong one is accepted silently. That is exactly how `args: input` in the
+        // `tool-result` case shipped the assistant message where the tool's arguments belonged - the
+        // wrong value typechecks against `any`, and `unknown` is what makes the next one an error.
+        args?: unknown
       }) {
         try {
           const home = globalThis.process.env.OPENCODE_TEST_HOME ?? globalThis.process.env.HOME ?? "/root"
@@ -764,7 +768,15 @@ const reasoning = ctx.reasoningMap[value.id]
               sessionID: ctx.sessionID,
               success: true,
               output: rawOutput.output,
-              args: input,
+              // The TOOL's input, matching the `tool-error` case below. This used to be `input`,
+              // which looks right - the neighbouring `tool-call` case has a local of that name
+              // holding exactly this - but there is no such local in the `tool-result` block, so it
+              // silently resolved to the `create()` closure's `input: Input` parameter instead.
+              // Every successful tool result therefore recorded the whole assistant-message record
+              // and the full model descriptor (options/headers included) under the `args` key, and
+              // never the arguments the tool was called with - which is the only field the learning
+              // log exists to capture.
+              args: toolCall?.part.state.input,
             }).pipe(Effect.ignore)
             return
           }
