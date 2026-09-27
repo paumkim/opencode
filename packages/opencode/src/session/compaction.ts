@@ -49,8 +49,21 @@ type CompletedCompaction = {
   summary: string | undefined
 }
 
-const truncate = (value: string) =>
-  value.length <= TOOL_OUTPUT_MAX_CHARS ? value : `${value.slice(0, TOOL_OUTPUT_MAX_CHARS)}\n[truncated]`
+/**
+ * `TOOL_OUTPUT_MAX_CHARS` is a CHARACTER budget, so it is counted and cut in code points.
+ * `String.prototype.slice` counts UTF-16 code units, and an emoji is two of them, so a unit-indexed
+ * cut keeps about half the characters the bound allows and can land between the halves of a pair -
+ * leaving a LONE SURROGATE at the end of the text handed to the compaction model to summarize. That
+ * is not cosmetic: a lone surrogate serializes to a `\udXXX` escape the model reads as U+FFFD, and
+ * it does not survive a UTF-8 round trip. See `truncateToCodePoints` in `@/goal/schema.ts` for the
+ * same correction applied to goal text, and `truncateToolOutput` in `@/session/message-v2` for the
+ * one applied to the tool result sent to a normal turn.
+ */
+const truncate = (value: string) => {
+  const chars = [...value]
+  if (chars.length <= TOOL_OUTPUT_MAX_CHARS) return value
+  return `${chars.slice(0, TOOL_OUTPUT_MAX_CHARS).join("")}\n[truncated]`
+}
 
 const serialize = (message: SessionV1.WithParts) => {
   if (message.info.role === "user") {
