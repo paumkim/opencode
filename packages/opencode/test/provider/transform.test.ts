@@ -3553,6 +3553,29 @@ describe("ProviderTransform.variants", () => {
       })
     })
 
+    // A dated pre-5 Sonnet puts the release date directly after "sonnet-". The
+    // version regex read that date as the major version, so 3.5/3.7/4.5 were
+    // rated 5+ and offered adaptive thinking with effort tiers the API rejects.
+    for (const apiId of ["claude-3-5-sonnet-20241022", "claude-3-7-sonnet-20250219", "claude-4-5-sonnet-20250929"]) {
+      test(`anthropic ${apiId} keeps budget_tokens instead of adaptive thinking`, () => {
+        const model = createMockModel({
+          id: `anthropic/${apiId}`,
+          providerID: "anthropic",
+          api: { id: apiId, url: "https://api.anthropic.com", npm: "@ai-sdk/anthropic" },
+        })
+        const result = ProviderTransform.variants(model)
+        // Not the 5-tier adaptive shape, and never an "effort" key.
+        expect(Object.keys(result)).toEqual(["high", "max"])
+        expect(result.high).toEqual({
+          thinking: { type: "enabled", budgetTokens: Math.min(16_000, Math.floor(64_000 / 2 - 1)) },
+        })
+        for (const value of Object.values(result)) {
+          expect(value.thinking.type).toBe("enabled")
+          expect(value).not.toHaveProperty("effort")
+        }
+      })
+    }
+
     test("anthropic opus 4.6 omits display so it keeps the summarized default", () => {
       const model = createMockModel({
         id: "anthropic/claude-opus-4-6",
