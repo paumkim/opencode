@@ -70,7 +70,14 @@ const layer = Layer.effect(
     const init = Effect.fn("Command.state")(function* (ctx: InstanceContext) {
       const cfg = yield* config.get()
       const bridge = yield* EffectBridge.make()
-      const commands: Record<string, Info> = {}
+      // Null-prototype record, not a bare object literal. Command names come from
+      // config keys, MCP prompt names, and SKILL.md frontmatter, and the HTTP
+      // `POST /session/:id/command` endpoint takes an arbitrary string. With a
+      // normal object, `commands.get("constructor")` returned the `Object`
+      // function, which is truthy, so the caller's "Command not found" guard was
+      // skipped and it then crashed on `cmd.template.match(...)`. The same lookup
+      // also silently dropped a skill whose name matched a prototype member.
+      const commands: Record<string, Info> = Object.create(null)
 
       commands[Default.GOAL] = {
         name: Default.GOAL,
