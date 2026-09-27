@@ -131,4 +131,56 @@ Use this skill.
       }
     }),
   )
+
+  // The skill table used to be a bare object literal, so a name colliding with
+  // an Object.prototype member resolved to the inherited value. `Skill.require`
+  // guards on truthiness, so it returned that function instead of raising
+  // NotFoundError, and this tool then died on `path.dirname(Object.location)`
+  // inside `Effect.orDie` — a crash rather than the typed message below. The
+  // `name` argument is a free-form string the model supplies, so
+  // `skill({name: "constructor"})` was reachable from a prompt injection.
+  for (const name of ["constructor", "toString", "valueOf", "hasOwnProperty", "isPrototypeOf", "__defineGetter__"]) {
+    it.instance(`execute reports ${name} as a missing skill instead of crashing`, () =>
+      Effect.gen(function* () {
+        const dir = (yield* TestInstance).directory
+        const home = process.env.OPENCODE_TEST_HOME
+        process.env.OPENCODE_TEST_HOME = dir
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => {
+            process.env.OPENCODE_TEST_HOME = home
+          }),
+        )
+
+        const registry = yield* ToolRegistry.Service
+        const agent = { name: "build", mode: "primary" as const, permission: [], options: {} }
+        const tool = (yield* registry.tools({
+          providerID: "opencode" as any,
+          modelID: "gpt-5" as any,
+          agent,
+        })).find((tool) => tool.id === SkillTool.id)
+        if (!tool) throw new Error("Skill tool not found")
+
+        const exit = yield* tool
+          .execute(
+            { name },
+            {
+              ...baseCtx,
+              ask: () => Effect.void,
+            },
+          )
+          .pipe(Effect.exit)
+
+        // A defect is a crash, not the intended "not found" report: the tool
+        // turns NotFoundError into a die carrying the message, so the message
+        // itself is the contract. Before the fix this died with a TypeError from
+        // `path.dirname(Object.location)` instead of naming the skill.
+        expect(Exit.isFailure(exit)).toBe(true)
+        if (Exit.isFailure(exit)) {
+          const error = Cause.squash(exit.cause)
+          expect(error).toBeInstanceOf(Error)
+          if (error instanceof Error) expect(error.message).toContain(`Skill "${name}" not found.`)
+        }
+      }),
+    )
+  }
 })
