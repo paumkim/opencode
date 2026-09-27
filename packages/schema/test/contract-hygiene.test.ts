@@ -18,13 +18,30 @@ describe("contract hygiene", () => {
     expect(Schema.encodeSync(Value)({ value: undefined })).toEqual({})
   })
 
-  test("todo status and priority preserve arbitrary strings", () => {
+  test("todo status and priority are the closed sets the consumers compare against", () => {
     const decode = Schema.decodeUnknownSync(SessionTodo.Info)
-    expect(decode({ content: "ship", status: "waiting", priority: "urgent" })).toEqual({
+    expect(decode({ content: "ship", status: "in_progress", priority: "high" })).toEqual({
       content: "ship",
-      status: "waiting",
-      priority: "urgent",
+      status: "in_progress",
+      priority: "high",
     })
+    // The descriptions named these exact four and three values, and every consumer compares against
+    // them literally: the TUI sidebar shows itself while any todo is not "completed", the desktop
+    // dock counts "completed" exactly and picks the active row by "in_progress" then "pending", and
+    // the tool title counts anything not "completed" as outstanding. Accepting an arbitrary string
+    // therefore pinned the progress indicator below its total and the sidebar open, permanently and
+    // with no error anywhere - so the sets are closed in the schema, not just in the prose.
+    expect(() => decode({ content: "ship", status: "waiting", priority: "urgent" })).toThrow()
+    expect(() => decode({ content: "ship", status: "done", priority: "high" })).toThrow()
+    expect(() => decode({ content: "ship", status: "pending", priority: "urgent" })).toThrow()
+  })
+
+  test("isInfo accepts only rows inside the todo contract", () => {
+    expect(SessionTodo.isInfo({ status: "completed", priority: "low" })).toBe(true)
+    expect(SessionTodo.isInfo({ status: "waiting", priority: "urgent" })).toBe(false)
+    expect(SessionTodo.isInfo({ status: "completed", priority: "urgent" })).toBe(false)
+    expect(SessionTodo.isInfo({ status: undefined, priority: "low" })).toBe(false)
+    expect(SessionTodo.isInfo({ status: "pending", priority: 3 })).toBe(false)
   })
 
   test("current ID constructors expose create", () => {

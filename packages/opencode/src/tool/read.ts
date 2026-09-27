@@ -294,6 +294,18 @@ export const ReadTool = Tool.define<
         const limit = Math.max(1, params.limit ?? DEFAULT_READ_LIMIT)
         const offset = params.offset || 1
         const start = offset - 1
+        // An offset past the end used to fall through to an empty listing beside a
+        // "(5 entries)" count: `sliced` was `[]`, so `truncated` was false and the
+        // "use offset to continue" hint was suppressed. The model then had an entry list it could
+        // not reconcile with the stated total, and nothing to tell it the page was out of range. The
+        // file branch below has rejected this exact mistake with a clear error for some time.
+        // An EMPTY directory is still a legitimate read at any offset, so it is exempt, matching the
+        // file branch's `count === 0` exemption.
+        if (items.length > 0 && items.length < offset) {
+          return yield* Effect.fail(
+            new Error(`Offset ${offset} is out of range for this directory (${items.length} entries)`),
+          )
+        }
         const sliced = items.slice(start, start + limit)
         const truncated = start + sliced.length < items.length
 

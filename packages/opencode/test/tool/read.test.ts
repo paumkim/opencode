@@ -411,6 +411,38 @@ describe("tool.read truncation", () => {
     }),
   )
 
+  it.instance("rejects an out-of-range directory offset instead of returning an empty listing", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const filepath = path.join(test.directory, "folder")
+      yield* put(path.join(filepath, "a.txt"), "a")
+      yield* put(path.join(filepath, "b.txt"), "b")
+      yield* put(path.join(filepath, "c.txt"), "c")
+
+      // The last valid page is offset 3, which must keep working.
+      const last = yield* run({ filePath: filepath, limit: 0, offset: 3 })
+      expect(last.metadata.preview).toBe("c.txt")
+      expect(last.metadata.truncated).toBe(false)
+
+      // Offset 4 is one past the end. Before the fix this returned an empty entry list next to a
+      // "(3 entries)" count with no hint at all: `sliced` was empty, so `truncated` was false and the
+      // "use offset to continue" line was suppressed. The model got two contradictory facts about
+      // the same directory and no way to learn it had over-paged - and the file branch has always
+      // answered this mistake with a clear error.
+      const err = yield* fail(test.directory, { filePath: filepath, limit: 0, offset: 4 })
+      expect(err.message).toContain("Offset 4 is out of range for this directory (3 entries)")
+
+      // An empty directory is still readable at any offset - the exemption the file branch makes
+      // for a 0-line file. Pinned separately above; asserted here so the two cannot drift apart.
+      const empty = path.join(test.directory, "empty")
+      const fs = yield* FSUtil.Service
+      yield* fs.makeDirectory(empty)
+      const emptyResult = yield* run({ filePath: empty, limit: 0, offset: 4 })
+      expect(emptyResult.metadata.display).toMatchObject({ entries: [], offset: 4, totalEntries: 0 })
+      expect(emptyResult.output).toContain("(0 entries)")
+    }),
+  )
+
   it.instance("truncates large file by bytes and sets truncated metadata", () =>
     Effect.gen(function* () {
       const test = yield* TestInstance

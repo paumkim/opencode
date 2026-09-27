@@ -29,6 +29,18 @@ describe("util.lazy", () => {
     expect(calls).toBe(1)
   })
 
+  test("caches an undefined result without recomputing it", () => {
+    let calls = 0
+    const value = lazy(() => {
+      calls += 1
+      return undefined
+    })
+
+    expect(value()).toBeUndefined()
+    expect(value()).toBeUndefined()
+    expect(calls).toBe(1)
+  })
+
   test("propagates the initializer error on every call", () => {
     // Marking the value as loaded before the initializer returns would cache the
     // failure as a successful `undefined`, so the first caller sees the real
