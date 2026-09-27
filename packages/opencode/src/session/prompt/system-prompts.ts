@@ -1,4 +1,5 @@
 import {
+  CONTEXT_HYGIENE,
   FUNDAMENTAL_LIMITS,
   LOOP_AWARENESS,
   LOOP_WORD_GUARD,
@@ -16,6 +17,7 @@ export function buildSystemPrompt(base: string): string {
     wrapSystemDirective(LOOP_WORD_GUARD),
     wrapSystemDirective(PARALLEL_READING),
     wrapSystemDirective(SILENT_EXECUTION),
+    wrapSystemDirective(CONTEXT_HYGIENE),
     wrapSystemDirective(NATIVE_TOOLCALL_GUARD),
     wrapSystemDirective(SUBAGENT_DELEGATION_GUARD),
     wrapSystemDirective(ORCHESTRATOR_BEHAVIOR),
