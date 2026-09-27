@@ -637,9 +637,17 @@ function anthropicOpus47OrLater(apiId: string) {
 }
 
 function anthropicSonnet5OrLater(apiId: string) {
-  const version = /sonnet-(\d+)(?:[.@-]|$)|claude-(\d+)-sonnet(?:[.@-]|$)/i.exec(apiId)
-  if (!version) return false
-  return Number(version[1] ?? version[2]) >= 5
+  // "claude-<major>[-.<minor>]-sonnet" carries the real version, so try it
+  // first. A single alternation let the regex fall through to the *second*
+  // "sonnet-" in "claude-3-7-sonnet-20250219" and capture the 8-digit release
+  // DATE as the major, which rated every dated Sonnet 3.5/3.7/4.5 as 5 or
+  // later and handed them adaptive thinking with effort tiers the API rejects.
+  const inverted = /claude-(\d+)(?:[.-]\d+)?-sonnet(?:[.@-]|$)/i.exec(apiId)
+  if (inverted) return Number(inverted[1]) >= 5
+  // Otherwise the version follows "sonnet-" directly, e.g. "sonnet-4.6".
+  const direct = /sonnet-(\d+)(?:[.@-]|$)/i.exec(apiId)
+  if (!direct) return false
+  return Number(direct[1]) >= 5
 }
 
 function anthropicOpus45(apiId: string) {
