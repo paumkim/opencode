@@ -3,7 +3,7 @@ export * from "./session/schema"
 
 import { DateTime, Effect, Layer, Schema, Context, Stream } from "effect"
 import { ListAnchor } from "@opencode-ai/schema/session"
-import { and, asc, desc, eq, gt, like, lt, or, type SQL } from "drizzle-orm"
+import { and, asc, desc, eq, gt, like, lt, or, sql, type SQL } from "drizzle-orm"
 import { ProjectV2 } from "./project"
 import { WorkspaceV2 } from "./workspace"
 import { ModelV2 } from "./model"
@@ -51,6 +51,21 @@ export type RevertState = Revert.State
 // - by workspace (home is special)
 
 export { ListAnchor }
+
+/**
+ * A LIKE pattern matching everything strictly below `subpath`.
+ *
+ * `RelativePath` is an unvalidated string, so `_` and `%` are legal characters
+ * in a directory name and mean "any one character" and "any run" to LIKE. Left
+ * alone, a request for `pct%dir` also answers with `pctXdir`. The escape
+ * character has to be declared to the SQL for the backslashes to mean anything
+ * — drizzle's `like()` drops its third argument, hence the raw fragment.
+ */
+function subpathPrefix(subpath: string) {
+  return `${subpath.replaceAll(/[\\%_]/g, (char) => `\\${char}`)}/%`
+}
+
+const likeSubpath = (subpath: string) => sql`${SessionTable.path} like ${subpathPrefix(subpath)} escape '\\'`
 
 const ListInputBase = {
   workspaceID: WorkspaceV2.ID.pipe(Schema.optional),
@@ -274,6 +289,12 @@ const layer = Layer.effect(
         if ("directory" in input) conditions.push(eq(SessionTable.directory, input.directory))
         if (input.workspaceID) conditions.push(eq(SessionTable.workspace_id, input.workspaceID))
         if ("project" in input) conditions.push(eq(SessionTable.project_id, input.project))
+        // A project holds sessions from every directory under it, so a subpath
+        // filter has to select the subpath itself and anything nested below it.
+        // Without this the query answered with every session in the project.
+        if ("subpath" in input && input.subpath) {
+          conditions.push(or(eq(SessionTable.path, input.subpath), likeSubpath(input.subpath))!)
+        }
         if (input.search) conditions.push(like(SessionTable.title, `%${input.search}%`))
         if (input.anchor) {
           conditions.push(
