@@ -47,3 +47,48 @@ describe("the /crew command", () => {
     expect(CREW_PROMPT).not.toBe(GOAL_PROMPT)
   })
 })
+
+describe("the launcher scopes itself to configured projects", () => {
+  // A bare `crew.sh stop` must never reach the user's own interactive session. That session is
+  // also an `opencode` process, so process discovery has to be narrowed to the registry or the
+  // stop path is a foot-gun pointed at the operator.
+  test("claims a window in a configured project and ignores one outside it", async () => {
+    const fs = await import("node:fs/promises")
+    const { mkdtemp } = await import("node:fs/promises")
+    const { tmpdir } = await import("node:os")
+    const { join } = await import("node:path")
+    const dir = await mkdtemp(join(tmpdir(), "crew-test-"))
+    const repo = join(dir, "repo")
+    const cfg = join(dir, "crew.json")
+    const project = join(dir, "project")
+    const outside = join(dir, "not-a-project")
+    await fs.mkdir(join(repo, "script"), { recursive: true })
+    await fs.mkdir(project, { recursive: true })
+    await fs.mkdir(outside, { recursive: true })
+    await fs.copyFile(join(process.cwd(), "../../script/crew.sh"), join(repo, "script", "crew.sh"))
+    await fs.chmod(join(repo, "script", "crew.sh"), 0o755)
+    await fs.writeFile(cfg, JSON.stringify({ projects: [{ path: project, label: "p" }] }))
+
+    // Real processes named `opencode` — `pgrep -x` matches the process NAME, so a copy of a
+    // long-running binary is the honest way to exercise discovery and the registry filter.
+    const fake = join(dir, "opencode")
+    await fs.copyFile("/bin/sleep", fake)
+    const inProject = Bun.spawn([fake, "60"], { cwd: project, stdout: "ignore", stderr: "ignore" })
+    const outside_ = Bun.spawn([fake, "60"], { cwd: outside, stdout: "ignore", stderr: "ignore" })
+    try {
+      const out = await new Promise<string>((resolve) => {
+        const p = Bun.spawn(["bash", join(repo, "script", "crew.sh"), "status"], {
+          env: { ...process.env, CREW_CONFIG: cfg },
+          stdout: "pipe",
+          stderr: "pipe",
+        })
+        p.exited.then(() => p.stdout.text().then(resolve))
+      })
+      expect(out).toContain(project)
+      expect(out).not.toContain(outside)
+    } finally {
+      inProject.kill()
+      outside_.kill()
+    }
+  })
+})
