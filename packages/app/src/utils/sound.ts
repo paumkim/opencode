@@ -75,13 +75,27 @@ function getLoads() {
 
 const cache = new Map<SoundID, Promise<string | undefined>>()
 
+// Exported so the lookup can be tested without a Vite build: the asset table
+// comes from `import.meta.glob`, which is undefined under Bun. The interesting
+// behaviour is the guard, not the bundler.
+export function soundLoader(id: string | undefined, table: Record<string, () => Promise<string>> = getLoads()) {
+  // Own-property check, not `in`: the `in` operator walks the prototype chain,
+  // so an id named after an Object.prototype member ("constructor", "toString",
+  // "__defineGetter__", …) passed the guard and then `loads[key]()` was called on
+  // the inherited function, throwing synchronously. The id is a persisted
+  // settings string with no validation, so a hand-edited or migrated value
+  // reached this and took down the caller rather than playing no sound.
+  if (!id || !Object.hasOwn(table, id)) return
+  return table[id as SoundID]
+}
+
 export function soundSrc(id: string | undefined) {
-  const loads = getLoads()
-  if (!id || !(id in loads)) return Promise.resolve(undefined)
+  const load = soundLoader(id)
+  if (!load) return Promise.resolve(undefined)
   const key = id as SoundID
   const hit = cache.get(key)
   if (hit) return hit
-  const next = loads[key]().catch(() => undefined)
+  const next = load().catch(() => undefined)
   cache.set(key, next)
   return next
 }
