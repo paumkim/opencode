@@ -666,6 +666,68 @@ describe("Config", () => {
     ),
   )
 
+  it.live("keeps the valid keys of a document when one of them does not decode", () =>
+    Effect.acquireRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ).pipe(
+      Effect.flatMap((tmp) =>
+        Effect.gen(function* () {
+          // `command` is a `string[]`, so a bare string fails `ConfigMCP.Local`. A whole-document
+          // decode has no way to keep the rest, so this used to discard the file outright and the
+          // deny rule below with it, leaving the directory unprotected with nothing reported.
+          yield* Effect.promise(() =>
+            fs.writeFile(
+              path.join(tmp.path, "opencode.json"),
+              JSON.stringify({
+                model: "openrouter/openai/gpt-5",
+                permissions: [{ action: "edit", resource: "*", effect: "deny" }],
+                mcp: { servers: { x: { type: "local", command: "npx foo" } } },
+              }),
+            ),
+          )
+          return yield* Effect.gen(function* () {
+            const config = yield* Config.Service
+            const documents = (yield* config.entries()).filter((entry) => entry.type === "document")
+
+            expect(documents).toHaveLength(1)
+            expect(documents[0]?.info.model).toBe("openrouter/openai/gpt-5")
+            expect(documents[0]?.info.permissions).toEqual([{ action: "edit", resource: "*", effect: "deny" }])
+            // The rejected key is dropped rather than carried through half-decoded.
+            expect(documents[0]?.info.mcp).toBeUndefined()
+          }).pipe(Effect.provide(testLayer(tmp.path)))
+        }),
+      ),
+    ),
+  )
+
+  it.live("still discards a document when every key is invalid", () =>
+    Effect.acquireRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ).pipe(
+      Effect.flatMap((tmp) =>
+        Effect.gen(function* () {
+          yield* Effect.promise(() =>
+            fs.writeFile(
+              path.join(tmp.path, "opencode.json"),
+              JSON.stringify({
+                permissions: "deny everything",
+                snapshots: "yes please",
+              }),
+            ),
+          )
+          return yield* Effect.gen(function* () {
+            const config = yield* Config.Service
+            const documents = (yield* config.entries()).filter((entry) => entry.type === "document")
+
+            expect(documents).toEqual([])
+          }).pipe(Effect.provide(testLayer(tmp.path)))
+        }),
+      ),
+    ),
+  )
+
   it.live("ignores an invalid file while loading valid config values", () =>
     Effect.acquireRelease(
       Effect.promise(() => tmpdir()),

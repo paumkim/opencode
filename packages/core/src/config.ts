@@ -144,6 +144,33 @@ const layer = Layer.effect(
     const decodeInfo = Schema.decodeUnknownOption(Info, decodeOptions)
     const decodeV1Info = Schema.decodeUnknownOption(ConfigV1.Info, decodeOptions)
 
+    // A whole-document decode is all-or-nothing, so one bad leaf used to cost the user every
+    // other setting in the file. `{"mcp":{"servers":{"x":{"type":"local","command":"npx foo"}}}}`
+    // fails because `command` is a `string[]`, and that silently threw away the `model`, the
+    // `permissions` deny rules and the rest — silently opening a directory the user had locked
+    // down. Decode the offending keys one at a time instead, keep what validates, and name the
+    // keys that did not so the mistake is visible.
+    const decodeFields = new Map(
+      Object.entries(Info.fields).map(([key, field]) => [key, Schema.decodeUnknownOption(field, decodeOptions)]),
+    )
+    const decodeIndividually = (input: unknown) => {
+      if (typeof input !== "object" || input === null || Array.isArray(input)) return
+      const record = input as Record<string, unknown>
+      const kept: Record<string, unknown> = {}
+      const rejected: string[] = []
+      for (const [key, value] of Object.entries(record)) {
+        const decodeField = decodeFields.get(key)
+        // An unknown key is not an error: `decodeOptions` ignores excess properties, and a
+        // forward-compatible file may legitimately carry settings this build does not know.
+        if (!decodeField) continue
+        const decoded = decodeField(value)
+        if (Option.isSome(decoded)) kept[key] = decoded.value
+        else rejected.push(key)
+      }
+      if (!rejected.length) return
+      return { info: new Info(kept), rejected }
+    }
+
     const loadFile = Effect.fnUntraced(function* (filepath: string) {
       const text = yield* fs.readFileStringSafe(filepath)
       if (!text) return
@@ -152,13 +179,27 @@ const layer = Layer.effect(
       const input: unknown = parse(text, errors, { allowTrailingComma: true })
       if (errors.length) return
 
-      const info = Option.getOrUndefined(
-        ConfigMigrateV1.isV1(input)
-          ? decodeV1Info(input).pipe(Option.map(ConfigMigrateV1.migrate), Option.flatMap(decodeInfo))
-          : decodeInfo(input),
-      )
-      if (!info) return
-      return new Document({ type: "document", path: filepath, info })
+      const decoded = ConfigMigrateV1.isV1(input)
+        ? decodeV1Info(input).pipe(Option.map(ConfigMigrateV1.migrate), Option.flatMap(decodeInfo))
+        : decodeInfo(input)
+
+      if (Option.isSome(decoded)) return new Document({ type: "document", path: filepath, info: decoded.value })
+
+      // Retry key by key, against the same object the whole-document decode was given, so a v1
+      // document is recovered from its migrated form rather than its original shape.
+      const migrated = ConfigMigrateV1.isV1(input)
+        ? Option.getOrUndefined(decodeV1Info(input).pipe(Option.map(ConfigMigrateV1.migrate)))
+        : input
+      const recovered = decodeIndividually(migrated)
+      if (!recovered) return
+      // A key that failed here may have failed only because a sibling key did; either way the
+      // user needs to know their file is not being read in full.
+      yield* Effect.logWarning("ignoring invalid config keys", {
+        path: filepath,
+        keys: recovered.rejected.join(", "),
+      })
+      if (!Object.keys(recovered.info).length) return
+      return new Document({ type: "document", path: filepath, info: recovered.info })
     })
 
     const loadDirectory = Effect.fnUntraced(function* (directory: AbsolutePath) {
