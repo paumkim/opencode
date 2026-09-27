@@ -46,10 +46,21 @@ interface FetchDecompressionError extends Error {
 export const SYNTHETIC_ATTACHMENT_PROMPT = "Attached media from tool result:"
 export { isMedia }
 
+/**
+ * `maxChars` is a CHARACTER budget, so it is counted and cut in code points. `String.prototype.slice`
+ * counts UTF-16 code units, and an emoji is two of them, so a unit-indexed cut keeps about half the
+ * characters the limit allows and can land between the halves of a pair - leaving a LONE SURROGATE
+ * at the end of the tool result. That is not cosmetic: this text is serialized into the provider
+ * request, where a lone surrogate becomes a `\udXXX` escape that the model renders as U+FFFD, and it
+ * does not survive a UTF-8 round trip through storage. `omitted` is counted in the same unit as the
+ * cut so the number in the message describes the characters actually left out.
+ */
 function truncateToolOutput(text: string, maxChars?: number) {
-  if (!maxChars || text.length <= maxChars) return text
-  const omitted = text.length - maxChars
-  return `${text.slice(0, maxChars)}\n[Tool output truncated for compaction: omitted ${omitted} chars]`
+  if (!maxChars) return text
+  const chars = [...text]
+  if (chars.length <= maxChars) return text
+  const omitted = chars.length - maxChars
+  return `${chars.slice(0, maxChars).join("")}\n[Tool output truncated for compaction: omitted ${omitted} chars]`
 }
 
 export const Event = {

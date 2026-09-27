@@ -111,6 +111,43 @@ function basePart(messageID: string, id: string) {
   }
 }
 
+/** A user turn followed by one completed tool call, the shape every tool-result test starts from. */
+function toolCallInput(output: string): SessionV1.WithParts[] {
+  const userID = "m-user"
+  const assistantID = "m-assistant"
+  return [
+    {
+      info: userInfo(userID),
+      parts: [
+        {
+          ...basePart(userID, "u1"),
+          type: "text",
+          text: "run tool",
+        },
+      ] as SessionV1.Part[],
+    },
+    {
+      info: assistantInfo(assistantID, userID),
+      parts: [
+        {
+          ...basePart(assistantID, "a1"),
+          type: "tool",
+          callID: "call-1",
+          tool: "bash",
+          state: {
+            status: "completed",
+            input: { cmd: "ls" },
+            output,
+            title: "Shell",
+            metadata: {},
+            time: { start: 0, end: 1 },
+          },
+        },
+      ] as SessionV1.Part[],
+    },
+  ]
+}
+
 describe("session.message-v2.toModelMessage", () => {
   test("filters out messages with no parts", async () => {
     const input: SessionV1.WithParts[] = [
@@ -752,40 +789,7 @@ describe("session.message-v2.toModelMessage", () => {
   })
 
   test("truncates tool output when requested", async () => {
-    const userID = "m-user"
-    const assistantID = "m-assistant"
-
-    const input: SessionV1.WithParts[] = [
-      {
-        info: userInfo(userID),
-        parts: [
-          {
-            ...basePart(userID, "u1"),
-            type: "text",
-            text: "run tool",
-          },
-        ] as SessionV1.Part[],
-      },
-      {
-        info: assistantInfo(assistantID, userID),
-        parts: [
-          {
-            ...basePart(assistantID, "a1"),
-            type: "tool",
-            callID: "call-1",
-            tool: "bash",
-            state: {
-              status: "completed",
-              input: { cmd: "ls" },
-              output: "abcdefghij",
-              title: "Shell",
-              metadata: {},
-              time: { start: 0, end: 1 },
-            },
-          },
-        ] as SessionV1.Part[],
-      },
-    ]
+    const input = toolCallInput("abcdefghij")
 
     expect(await MessageV2.toModelMessages(input, model, { toolOutputMaxChars: 4 })).toStrictEqual([
       {
@@ -819,6 +823,37 @@ describe("session.message-v2.toModelMessage", () => {
         ],
       },
     ])
+  })
+
+  test("truncates tool output on code-point boundaries, not UTF-16 code units", async () => {
+    // `truncateToolOutput` cuts tool output with `String.slice(0, maxChars)`, which indexes UTF-16
+    // code units. An emoji is TWO of them, so a unit-indexed cut does two wrong things at once: it
+    // keeps about half the characters the limit allows, and - when the cut lands between a pair's
+    // halves - it leaves a LONE SURROGATE at the end of the tool result.
+    //
+    // The lone surrogate is the part that matters. `toModelMessages` output is serialized into the
+    // provider request, and a lone surrogate serializes to a `\udXXX` escape, which the provider
+    // renders as U+FFFD. So the model is shown a replacement character standing in for real content,
+    // and the retained text no longer round-trips through UTF-8 - which is what every storage and
+    // diff path does to it. The goal module already learned this lesson and cut on code points
+    // (see `truncateToCodePoints` in src/goal/schema.ts); the session compaction path did not.
+    //
+    // `toolOutputMaxChars` is a CHARACTER budget, so it has to be counted and cut in the same unit.
+    const ASTRAL = "\u{1f600}"
+    const output = "a" + ASTRAL.repeat(8) // 9 code points, 17 code units
+    const maxChars = 5
+
+    const messages = await MessageV2.toModelMessages(toolCallInput(output), model, { toolOutputMaxChars: maxChars })
+    const toolMessage = messages[2] as { content: { output: { value: string } }[] }
+    const value = toolMessage.content[0].output.value
+    const retained = value.slice(0, value.indexOf("\n[Tool output truncated"))
+
+    // Keeps the whole character budget, not half of it.
+    expect([...retained].length).toBe(maxChars)
+    // A lone surrogate is not a character, it is half of one.
+    expect(retained.isWellFormed()).toBe(true)
+    // And the retained text is a real prefix of the output, byte for byte.
+    expect(output.startsWith(retained)).toBe(true)
   })
 
   test("converts assistant tool error into error-text tool result", async () => {
