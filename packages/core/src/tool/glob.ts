@@ -76,12 +76,10 @@ const layer = Layer.effectDiscard(
               })
               const root = yield* fs.realPath(location.directory).pipe(Effect.orDie)
               const lexical = path.resolve(root, input.path ?? ".")
-              if (!FSUtil.contains(root, lexical)) return yield* Effect.fail(new Error("Path escapes the active Location"))
-              const cwd = yield* fs
-                .realPath(lexical)
-                .pipe(Effect.catch(() => Effect.succeed(lexical)))
-              if (!FSUtil.contains(root, cwd))
+              if (!FSUtil.contains(root, lexical))
                 return yield* Effect.fail(new Error("Path escapes the active Location"))
+              const cwd = yield* fs.realPath(lexical).pipe(Effect.catch(() => Effect.succeed(lexical)))
+              if (!FSUtil.contains(root, cwd)) return yield* Effect.fail(new Error("Path escapes the active Location"))
               return yield* ripgrep
                 .glob({
                   cwd,
@@ -93,7 +91,13 @@ const layer = Layer.effectDiscard(
                     result.map((entry) =>
                       FileSystem.Entry.make({
                         ...entry,
-                        path: RelativePath.make(path.relative(location.directory, path.resolve(cwd, entry.path))),
+                        path: RelativePath.make(
+                          // Relative to `root`, not `location.directory`: see the same note in
+                          // `tool/grep.ts`. ripgrep walked the realpath `cwd`, so the reported path
+                          // has to be relativized against the realpath root or it escapes the
+                          // location with `../` segments whenever the location is a symlink.
+                          path.relative(root, path.resolve(cwd, entry.path)),
+                        ),
                       }),
                     ),
                   ),

@@ -94,10 +94,9 @@ const layer = Layer.effectDiscard(
               })
               const root = yield* fs.realPath(location.directory).pipe(Effect.orDie)
               const lexicalTarget = path.resolve(root, input.path ?? ".")
-              if (!FSUtil.contains(root, lexicalTarget)) return yield* Effect.fail(new Error("Path escapes the active Location"))
-              const target = yield* fs
-                .realPath(lexicalTarget)
-                .pipe(Effect.catch(() => Effect.succeed(lexicalTarget)))
+              if (!FSUtil.contains(root, lexicalTarget))
+                return yield* Effect.fail(new Error("Path escapes the active Location"))
+              const target = yield* fs.realPath(lexicalTarget).pipe(Effect.catch(() => Effect.succeed(lexicalTarget)))
               if (!FSUtil.contains(root, target))
                 return yield* Effect.fail(new Error("Path escapes the active Location"))
               const info = yield* fs.stat(target).pipe(Effect.catch(() => Effect.succeed(undefined)))
@@ -117,8 +116,13 @@ const layer = Layer.effectDiscard(
                         entry: FileSystem.Entry.make({
                           ...match.entry,
                           path: RelativePath.make(
+                            // Relative to `root`, not `location.directory`: ripgrep walked the
+                            // realpath, and a location reached through a symlink has a
+                            // realpath-rooted cwd but a symlink-rooted `location.directory`.
+                            // Relativizing against the latter emitted paths that climbed out of
+                            // the location with `../` segments for every single result.
                             path.relative(
-                              location.directory,
+                              root,
                               path.resolve(
                                 info?.type === "Directory" ? target : path.dirname(target),
                                 match.entry.path,
