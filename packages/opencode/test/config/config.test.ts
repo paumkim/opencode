@@ -26,6 +26,7 @@ import {
   tmpdirScoped,
   withTestInstance,
   provideInstanceEffect,
+  reloadInstance,
   testInstanceStoreLayer,
 } from "../fixture/fixture"
 import { InstanceRuntime } from "@/project/instance-runtime"
@@ -360,15 +361,11 @@ it.instance(
 it.instance("updates config and preserves empty shell sentinel", () =>
   Effect.gen(function* () {
     const test = yield* TestInstance
-    yield* writeConfigEffect(
-      test.directory,
-      { $schema: "https://opencode.ai/config.json", shell: "bash" },
-      "config.json",
-    )
+    yield* writeConfigEffect(test.directory, { $schema: "https://opencode.ai/config.json", shell: "bash" })
 
     yield* Config.Service.use((svc) => svc.update(ConfigParse.schema(ConfigV1.Info, { shell: "" }, "test:config")))
 
-    const writtenConfig = yield* FSUtil.use.readJson(path.join(test.directory, "config.json"))
+    const writtenConfig = yield* FSUtil.use.readJson(path.join(test.directory, "opencode.json"))
     expect(writtenConfig).toMatchObject({ shell: "" })
   }),
 )
@@ -565,7 +562,7 @@ for (const input of projectInputs) {
     Effect.gen(function* () {
       const instance = yield* TestInstance
       const fs = yield* FSUtil.Service
-      const file = path.join(instance.directory, "config.json")
+      const file = path.join(instance.directory, "opencode.json")
       yield* fs.writeFileString(file, yield* fs.readFileString(path.join(updateFixtures, input)))
       const patch = ConfigParse.schema(ConfigV1.Info, yield* fs.readJson(`${prefix}-patch.json`), input)
       yield* Config.use.update(patch)
@@ -608,7 +605,7 @@ it.instance("rejects a project update with native agent permissions without writ
   Effect.gen(function* () {
     const instance = yield* TestInstance
     const fs = yield* FSUtil.Service
-    const file = path.join(instance.directory, "config.json")
+    const file = path.join(instance.directory, "opencode.json")
     const before = JSON.stringify({ agents: { reviewer: { permissions: [] } } })
     yield* fs.writeFileString(file, before)
     const exit = yield* Effect.exit(Config.use.update({ username: "changed" }))
@@ -1318,8 +1315,39 @@ it.instance("updates config and writes to file", () =>
       svc.update(ConfigParse.schema(ConfigV1.Info, { model: "updated/model" }, "test:config")),
     )
 
-    const writtenConfig = yield* FSUtil.use.readJson(path.join(test.directory, "config.json"))
+    const writtenConfig = yield* FSUtil.use.readJson(path.join(test.directory, "opencode.json"))
     expect(writtenConfig).toMatchObject({ model: "updated/model" })
+  }),
+)
+
+// The loader only ever reads opencode.json / opencode.jsonc. An update written to
+// any other filename persists a file the next load ignores, so every setting the
+// settings UI saves silently reverts.
+it.instance("a project config update is read back by the next instance load", () =>
+  Effect.gen(function* () {
+    const test = yield* TestInstance
+    yield* Config.use.update(ConfigParse.schema(ConfigV1.Info, { username: "reloaded-by-config-update" }, "t"))
+    expect(yield* FSUtil.use.existsSafe(path.join(test.directory, "config.json"))).toBe(false)
+    yield* reloadInstance({ directory: test.directory })
+    expect((yield* Config.use.get()).username).toBe("reloaded-by-config-update")
+  }),
+)
+
+// opencode.jsonc is merged after opencode.json in the same directory, so a project
+// that keeps a commented .jsonc must have its update land there or it is shadowed.
+it.instance("a project config update patches an existing opencode.jsonc in place", () =>
+  Effect.gen(function* () {
+    const test = yield* TestInstance
+    const file = path.join(test.directory, "opencode.jsonc")
+    yield* FSUtil.use.writeWithDirs(file, `{\n  // keep me\n  "username": "before"\n}\n`)
+
+    yield* Config.use.update(ConfigParse.schema(ConfigV1.Info, { username: "after" }, "test:config"))
+    yield* reloadInstance({ directory: test.directory })
+
+    expect((yield* Config.use.get()).username).toBe("after")
+    const written = yield* FSUtil.use.readFileString(file)
+    expect(written).toContain("// keep me")
+    expect(written).toContain('"after"')
   }),
 )
 

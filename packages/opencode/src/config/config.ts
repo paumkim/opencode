@@ -732,18 +732,31 @@ const layer = Layer.effect(
       )
     })
 
+    // The project loader only reads opencode.json / opencode.jsonc (ConfigPaths.files
+    // plus the .opencode directory loop), and opencode.jsonc is merged after
+    // opencode.json in the same directory, so it wins. Writing "config.json" here
+    // persisted a patch to a file nothing reads, and every setting saved through
+    // the API reverted on the next instance load.
+    const projectConfigFile = Effect.fnUntraced(function* (dir: string) {
+      return (yield* fs.existsSafe(path.join(dir, "opencode.jsonc")))
+        ? path.join(dir, "opencode.jsonc")
+        : path.join(dir, "opencode.json")
+    })
+
     const update = Effect.fn("Config.update")(function* (config: Info) {
       const dir = yield* InstanceState.directory
-      const file = path.join(dir, "config.json")
+      const file = yield* projectConfigFile(dir)
       const existing = yield* loadFile(file)
       const text = yield* readConfigFile(file)
+      const patch = writable(config)
       const original = text ? ConfigParse.jsonc(text, file) : writable(existing)
-      yield* fs
-        .writeFileString(
-          file,
-          JSON.stringify(mergeDeep(isRecord(original) ? original : writable(existing), writable(config)), null, 2),
-        )
-        .pipe(Effect.orDie)
+      // A commented opencode.jsonc must be edited in place: rewriting it whole with
+      // JSON.stringify would drop the user's comments and formatting.
+      const next =
+        text && file.endsWith(".jsonc")
+          ? patchJsonc(text, patch)
+          : JSON.stringify(mergeDeep(isRecord(original) ? original : writable(existing), patch), null, 2)
+      yield* fs.writeFileString(file, next).pipe(Effect.orDie)
     })
 
     const invalidate = Effect.fn("Config.invalidate")(function* () {
