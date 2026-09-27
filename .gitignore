@@ -51,3 +51,6 @@ BUG-tool-invalid-write.md
 BUG-tui-long-thinking-lag.md
 HANDOFF-tui-display-lag.md
 HANDOFF-watcher.md
+
+# scratch dir for test/lint scratch output
+.tmp/

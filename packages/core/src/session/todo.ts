@@ -64,11 +64,23 @@ const layer = Layer.effect(
         .orderBy(asc(TodoTable.position))
         .all()
         .pipe(Effect.orDie)
-      return rows.map((row) => ({
-        content: row.content,
-        status: row.status,
-        priority: row.priority,
-      }))
+      // `Info` is a closed set, so a row stored before the literals were enforced cannot be encoded
+      // as one. Both readers of this table apply the same repair from the same predicate; see
+      // `SessionTodo.isInfo` for why it is shared rather than written per reader.
+      return rows
+        .filter((row) => {
+          if (SessionTodo.isInfo(row)) return true
+          console.warn(
+            `[todo] session ${sessionID} has a todo with status=${JSON.stringify(row.status)} ` +
+              `priority=${JSON.stringify(row.priority)}, which is not in the todo contract; dropping it`,
+          )
+          return false
+        })
+        .map((row) => ({
+          content: row.content,
+          status: row.status as Info["status"],
+          priority: row.priority as Info["priority"],
+        }))
     })
 
     return Service.of({ update, get })

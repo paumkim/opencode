@@ -22,6 +22,27 @@ import { SessionID } from "./session-id"
 export const Status = Schema.Literals(["pending", "in_progress", "completed", "cancelled"])
 export const Priority = Schema.Literals(["high", "medium", "low"])
 
+const STATUSES: ReadonlySet<string> = new Set(Status.literals)
+const PRIORITIES: ReadonlySet<string> = new Set(Priority.literals)
+
+/**
+ * Whether a stored row's status and priority are both inside the contract.
+ *
+ * Two services read this table and both serve it as `Info` - the Location-scoped one in `core` and
+ * the instance-scoped one in `opencode` - so the read-side repair has to be ONE predicate they both
+ * call. A guard written beside only one of two readers is a guard the other will eventually fail to
+ * apply, which is how a row written before the literals were enforced turns into a failed response
+ * encode on one surface and a silently wrong list on the other.
+ */
+export function isInfo(value: { readonly status: unknown; readonly priority: unknown }) {
+  return (
+    typeof value.status === "string" &&
+    STATUSES.has(value.status) &&
+    typeof value.priority === "string" &&
+    PRIORITIES.has(value.priority)
+  )
+}
+
 export const Info = Schema.Struct({
   content: Schema.String.annotate({ description: "Brief description of the task" }),
   status: Status.annotate({
