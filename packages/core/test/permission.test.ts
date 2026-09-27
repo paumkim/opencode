@@ -103,6 +103,16 @@ function waitForRequest() {
 }
 
 describe("PermissionV2", () => {
+  it.effect("runs without the ambient permission bypass", () =>
+    Effect.sync(() => {
+      // `preload.ts` deletes both. If that ever comes out, a developer who exports them from
+      // their shell gets `allow` from every rule below, so the whole file fails for reasons that
+      // have nothing to do with the code under test.
+      expect(process.env.OPENCODE_UNRESTRICTED).toBeUndefined()
+      expect(process.env.OPENCODE_API_KEY).toBeUndefined()
+    }),
+  )
+
   it.effect("returns the evaluated effect and only queues prompts", () =>
     Effect.gen(function* () {
       yield* setup([{ action: "read", resource: "*", effect: "allow" }])
