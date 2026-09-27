@@ -1,5 +1,21 @@
 const editableSelector = "input, textarea, select, [contenteditable=''], [contenteditable='true']"
 
+const isHighSurrogate = (code: number) => code >= 0xd800 && code <= 0xdbff
+const isLowSurrogate = (code: number) => code >= 0xdc00 && code <= 0xdfff
+
+// Caret positions and string lengths are UTF-16 code units, but a code point
+// outside the BMP is two of them. Moving or deleting a single unit would leave
+// the caret inside a pair, and deleting one half would strand a lone surrogate
+// in the value, which renders as U+FFFD and can never match anything again.
+function step(value: string, index: number, delta: -1 | 1) {
+  if (delta < 0) {
+    const width = isLowSurrogate(value.charCodeAt(index - 1)) && isHighSurrogate(value.charCodeAt(index - 2)) ? 2 : 1
+    return Math.max(0, index - width)
+  }
+  const width = isHighSurrogate(value.charCodeAt(index)) && isLowSurrogate(value.charCodeAt(index + 1)) ? 2 : 1
+  return Math.min(value.length, index + width)
+}
+
 export function handleDocumentSearchKeydown(
   input: HTMLInputElement | undefined,
   event: KeyboardEvent,
@@ -45,14 +61,16 @@ export function handleDocumentSearchKeydown(
     if (start !== end)
       return updateValue(input, inputValue.slice(0, start) + inputValue.slice(end), start, setInputValue)
     if (start === 0) return true
-    return updateValue(input, inputValue.slice(0, start - 1) + inputValue.slice(end), start - 1, setInputValue)
+    const from = step(inputValue, start, -1)
+    return updateValue(input, inputValue.slice(0, from) + inputValue.slice(end), from, setInputValue)
   }
 
   if (action.type === "deleteForward") {
     if (start !== end)
       return updateValue(input, inputValue.slice(0, start) + inputValue.slice(end), start, setInputValue)
     if (end === inputValue.length) return true
-    return updateValue(input, inputValue.slice(0, start) + inputValue.slice(end + 1), start, setInputValue)
+    const to = step(inputValue, end, 1)
+    return updateValue(input, inputValue.slice(0, start) + inputValue.slice(to), start, setInputValue)
   }
 
   return updateValue(
@@ -75,6 +93,10 @@ function searchKeyAction(event: KeyboardEvent) {
   if (event.key === "ArrowRight") return { type: "move", delta: 1 } as const
   if (event.key === "Home") return { type: "home" } as const
   if (event.key === "End") return { type: "end" } as const
+  // A code point outside the BMP is two code units, so a length check dropped
+  // every emoji and other astral character instead of inserting it.
+  if (event.key.length === 1 || (event.key.length === 2 && isHighSurrogate(event.key.charCodeAt(0))))
+    return { type: "insert", value: event.key } as const
   return undefined
 }
 
@@ -88,7 +110,7 @@ function moveSelection(input: HTMLInputElement, inputValue: string, delta: -1 | 
   }
 
   if (!extend) {
-    const caret = Math.max(0, Math.min(inputValue.length, start + delta))
+    const caret = step(inputValue, start, delta)
     input.setSelectionRange(caret, caret)
     return
   }
@@ -96,7 +118,7 @@ function moveSelection(input: HTMLInputElement, inputValue: string, delta: -1 | 
   const backward = input.selectionDirection === "backward"
   const anchor = backward ? end : start
   const focus = backward ? start : end
-  const next = Math.max(0, Math.min(inputValue.length, focus + delta))
+  const next = step(inputValue, focus, delta)
   input.setSelectionRange(Math.min(anchor, next), Math.max(anchor, next), next < anchor ? "backward" : "forward")
 }
 
