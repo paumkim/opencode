@@ -2,7 +2,7 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { httpClient } from "@opencode-ai/core/effect/app-node-platform"
 import path from "path"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
-import { Effect, Layer, Context } from "effect"
+import { Effect, Layer, Context, Stream } from "effect"
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/http"
 import { Config } from "@/config/config"
 import { InstanceState } from "@/effect/instance-state"
@@ -48,6 +48,36 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/In
 // Generous enough to cover every instruction file reachable from a normal
 // worktree, small enough that the cache cannot grow without bound.
 const INSTRUCTION_CACHE_LIMIT = 512
+
+// `config.instructions` is merged from the project's own `opencode.json`, so its size is chosen
+// by whoever wrote that file, not by the user running opencode. Both halves of that config can
+// name an arbitrarily large source, and each contributes verbatim to the system prompt on every
+// turn, so both are bounded here. The cache limit above bounds how many are retained, not how
+// large any one of them is.
+const MAX_INSTRUCTION_BYTES = 256 * 1024
+const TRUNCATION_MARKER = "\n\n[opencode: instruction truncated]"
+
+/**
+ * Decode at most `MAX_INSTRUCTION_BYTES`, cutting on a UTF-8 sequence boundary.
+ *
+ * A byte slice can land inside a multi-byte character, and a non-fatal `TextDecoder` answers that
+ * with U+FFFD, so a hard cut would corrupt the last character of every oversized file. Stepping
+ * back at most a few bytes is bounded by the longest UTF-8 sequence.
+ */
+const decodeInstruction = (bytes: Uint8Array, truncated = false) => {
+  const limit = Math.min(bytes.byteLength, MAX_INSTRUCTION_BYTES)
+  const decoder = new TextDecoder("utf-8", { fatal: true })
+  for (let end = limit; end > 0; end--) {
+    try {
+      const text = decoder.decode(bytes.subarray(0, end))
+      // A cut can also land on a multi-byte boundary, so `end < limit` alone under-reports it.
+      return truncated || end < bytes.byteLength ? text + TRUNCATION_MARKER : text
+    } catch {
+      // `end` fell inside a multi-byte sequence.
+    }
+  }
+  return ""
+}
 
 const layer: Layer.Layer<
   Service,
@@ -98,7 +128,10 @@ const layer: Layer.Layer<
       const s = yield* InstanceState.get(state)
       const cached = s.cache.get(filepath)
       if (cached !== undefined) return cached
-      const content = yield* fs.readFileString(filepath).pipe(Effect.catch(() => Effect.succeed("")))
+      const content = yield* fs.readFile(filepath).pipe(
+        Effect.map((bytes) => decodeInstruction(bytes)),
+        Effect.catch(() => Effect.succeed("")),
+      )
       // Bound the cache. Keys are instruction-file paths discovered by walking
       // up from the working directory, so a long-lived instance that visits many
       // worktrees, temporary directories, or generated paths would otherwise
@@ -119,8 +152,36 @@ const layer: Layer.Layer<
         Effect.catch(() => Effect.succeed(null)),
       )
       if (!res) return ""
-      const body = yield* res.arrayBuffer.pipe(Effect.catch(() => Effect.succeed(new ArrayBuffer(0))))
-      return new TextDecoder().decode(body)
+      // `res.arrayBuffer` would pull the whole body, so the cap below is on the bytes read and
+      // not merely on the text kept: `Stream.takeWhile` ends the subscription as soon as the
+      // chunk that crossed the cap has been seen, so an oversized or endless response is not
+      // drained into memory just to be thrown away.
+      const chunks: Uint8Array[] = []
+      let size = 0
+      let crossed = false
+      yield* res.stream.pipe(
+        Stream.map((chunk: Uint8Array) => {
+          const room = MAX_INSTRUCTION_BYTES - size
+          const piece = chunk.byteLength >= room ? chunk.subarray(0, Math.max(room, 0)) : chunk
+          size += piece.byteLength
+          if (piece.byteLength < chunk.byteLength) crossed = true
+          return piece
+        }),
+        Stream.takeWhile(() => !crossed),
+        Stream.runForEach((chunk) => Effect.sync(() => chunks.push(chunk))),
+        Effect.catch(() => Effect.void),
+      )
+      if (chunks.length === 0) return ""
+      const total = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0)
+      const bytes = new Uint8Array(total)
+      let at = 0
+      for (const chunk of chunks) {
+        bytes.set(chunk, at)
+        at += chunk.byteLength
+      }
+      // `crossed` means the response held more than the cap, so the cut has to be announced even
+      // though the buffer handed to the decode is exactly the cap.
+      return decodeInstruction(bytes, crossed)
     })
 
     const clear = Effect.fn("Instruction.clear")(function* (messageID: MessageID) {
