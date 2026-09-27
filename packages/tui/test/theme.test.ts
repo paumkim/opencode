@@ -44,6 +44,37 @@ test("resolveTheme rejects circular color refs", () => {
   expect(() => resolveTheme(item, "dark")).toThrow("Circular color reference")
 })
 
+// A theme is a JSON file on disk and a ref name is any string, so it can be
+// named after an Object.prototype member. `defs` and `theme.theme` were read by
+// bare indexing, so `defs["constructor"]` returned the inherited `Object`
+// function, passed the `undefined` check, and then resolution read `.dark` off a
+// function and died with an opaque TypeError instead of reporting the missing
+// reference.
+const PROTOTYPE_KEYS = ["constructor", "toString", "valueOf", "hasOwnProperty", "isPrototypeOf", "__defineGetter__"]
+
+for (const key of PROTOTYPE_KEYS) {
+  test(`resolveTheme reports ${key} as a missing ref instead of crashing`, () => {
+    const item = structuredClone(DEFAULT_THEMES.opencode)
+    item.theme.primary = key
+    expect(() => resolveTheme(item, "dark")).toThrow(`Color reference "${key}" not found in defs or theme`)
+  })
+}
+
+for (const key of PROTOTYPE_KEYS) {
+  test(`hasTheme(${key}) is false before registration`, () => {
+    expect(hasTheme(key)).toBe(false)
+  })
+
+  test(`addTheme accepts a plugin theme named ${key}`, () => {
+    expect(addTheme(key, DEFAULT_THEMES.opencode)).toBe(true)
+    expect(hasTheme(key)).toBe(true)
+    expect(allThemes()[key]).toBeDefined()
+    // It must be a real theme, not the inherited function.
+    expect(typeof allThemes()[key]).toBe("object")
+    expect(() => resolveTheme(allThemes()[key], "dark")).not.toThrow()
+  })
+}
+
 function terminalColors(defaultBackground: string | null, palette: Array<string | null> = []): TerminalColors {
   return {
     palette,
