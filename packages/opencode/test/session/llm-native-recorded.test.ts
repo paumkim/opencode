@@ -404,6 +404,9 @@ describe("session.llm native recorded", () => {
         })
         continue
       }
+      // No recorded fixture for this scenario, so the scenario is selected but not runnable. It is
+      // reported as a pass either way; `test.skipIf`-style conditions do not apply because `canRun`
+      // is per-scenario. Re-record with the `--record` flag to exercise it.
       test.skip(`${scenario.name}: drives a tool loop to a final text answer`, () => {})
       continue
     }

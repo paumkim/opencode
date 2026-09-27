@@ -9,7 +9,7 @@ import { SessionEvent } from "@opencode-ai/core/session/event"
 import { SessionMessageUpdater } from "@opencode-ai/core/session/message-updater"
 import { SessionMessage } from "@opencode-ai/core/session/message"
 
-test.skip("step snapshots carry over to assistant messages", () => {
+test("step snapshots carry over to assistant messages", () => {
   const state: SessionMessageUpdater.MemoryState = { messages: [] }
   const sessionID = SessionID.make("session")
   const assistantMessageID = SessionMessage.ID.create()
@@ -33,7 +33,17 @@ test.skip("step snapshots carry over to assistant messages", () => {
     } satisfies SessionEvent.Event),
   )
 
-  expect(state.messages).toEqual([])
+  // The assistant message is appended when the step STARTS, not when it ends: `text.started` and
+  // `tool.input.started` both look the message up by id, so nothing may be written to one that does
+  // not exist yet. This assertion was `toEqual([])` until that moved, and the whole test was skipped
+  // rather than updated, so it had been checking nothing since May.
+  expect(state.messages).toHaveLength(1)
+  expect(state.messages[0]?.type).toBe("assistant")
+  if (state.messages[0]?.type !== "assistant") return
+  expect(state.messages[0].snapshot).toEqual({ start: "before" })
+  expect(state.messages[0].content).toEqual([])
+  // `finish` is set by `step.ended` and must not be claimed while the step is still running.
+  expect(state.messages[0].finish).toBeUndefined()
 
   Effect.runSync(
     SessionMessageUpdater.update(SessionMessageUpdater.memory(state), {
@@ -62,7 +72,7 @@ test.skip("step snapshots carry over to assistant messages", () => {
   expect(state.messages[0].finish).toBe("stop")
 })
 
-test.skip("text ended populates assistant text content", () => {
+test("text ended populates assistant text content", () => {
   const state: SessionMessageUpdater.MemoryState = { messages: [] }
   const sessionID = SessionID.make("session")
   const assistantMessageID = SessionMessage.ID.create()
@@ -117,7 +127,7 @@ test.skip("text ended populates assistant text content", () => {
   expect(state.messages[0].content).toEqual([{ type: "text", id: "text-1", text: "hello assistant" }])
 })
 
-test.skip("tool completion stores completed timestamp", () => {
+test("tool completion stores completed timestamp", () => {
   const state: SessionMessageUpdater.MemoryState = { messages: [] }
   const sessionID = SessionID.make("session")
   const callID = "call"
@@ -192,7 +202,17 @@ test.skip("tool completion stores completed timestamp", () => {
   expect(state.messages[0].content[0]?.type).toBe("tool")
   if (state.messages[0].content[0]?.type !== "tool") return
   expect(state.messages[0].content[0].time.completed).toEqual(DateTime.makeUnsafe(4))
-  expect(state.messages[0].content[0].provider).toEqual({ executed: true, metadata: { fake: { status: "done" } } })
+  // A tool call carries TWO provider metadata blobs and they are not interchangeable: `metadata` is
+  // what the provider attached when it produced the CALL, and `resultMetadata` is what came back with
+  // the RESULT. `to-llm-message.ts` reads them separately when lowering history (the call part gets
+  // `metadata`, the tool-result part gets `resultMetadata`), so collapsing them here would hide a
+  // regression that changes what the provider sees. This test asserted a single merged `metadata`,
+  // which is what the upditer produced before the split.
+  expect(state.messages[0].content[0].provider).toEqual({
+    executed: true,
+    metadata: { fake: { source: "provider" } },
+    resultMetadata: { fake: { status: "done" } },
+  })
 })
 
 test("compaction events reduce to compaction message only when completed", () => {
