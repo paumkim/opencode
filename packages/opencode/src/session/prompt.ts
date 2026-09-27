@@ -21,6 +21,7 @@ import { MAX_STEPS_PROMPT } from "@opencode-ai/core/session/runner/max-steps"
 import { ToolRegistry } from "@/tool/registry"
 import { MCP } from "../mcp"
 import { LSP } from "@/lsp/lsp"
+import { expandToSymbol } from "@/session/prompt-symbol-range"
 import { ulid } from "ulid"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
@@ -960,15 +961,10 @@ const layer = Layer.effect(
                   let end = range.end ? parseInt(range.end) : undefined
                   if (start === end) {
                     const symbols = yield* lsp.documentSymbol(filePathURI).pipe(Effect.catch(() => Effect.succeed([])))
-                    for (const symbol of symbols) {
-                      let r: LSP.Range | undefined
-                      if ("range" in symbol) r = symbol.range
-                      else if ("location" in symbol) r = symbol.location.range
-                      if (r?.start?.line && r?.start?.line === start) {
-                        start = r.start.line
-                        end = r?.end?.line ?? start
-                        break
-                      }
+                    const span = expandToSymbol(symbols, start)
+                    if (span) {
+                      start = span.start
+                      end = span.end
                     }
                   }
                   offset = Math.max(start, 1)
