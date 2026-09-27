@@ -82,7 +82,7 @@ describe("the launcher scopes itself to configured projects", () => {
           stdout: "pipe",
           stderr: "pipe",
         })
-        p.exited.then(() => p.stdout.text().then(resolve))
+        p.exited.then(() => new Response(p.stdout).text().then(resolve))
       })
       expect(out).toContain(project)
       expect(out).not.toContain(outside)
