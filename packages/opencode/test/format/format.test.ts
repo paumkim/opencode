@@ -232,4 +232,43 @@ describe("Format", () => {
       },
     },
   )
+
+  it.instance(
+    "passes the real path to the formatter when it contains a `$` pattern",
+    () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        // `$&` is a replacement PATTERN: `String.prototype.replace` expands it to the text it
+        // matched, so interpolating this path with `replace("$FILE", filepath)` turned it into
+        // `<dir>/a$FILEb.mangle` - a DIFFERENT file. The formatter then appended to that other
+        // file and left the one the user edited unformatted, with no error: a silent wrong-file
+        // write from a filename that is perfectly legal on disk.
+        const file = `${test.directory}/a$&b.mangle`
+        yield* Effect.promise(() => Bun.write(file, "x"))
+
+        yield* Format.Service.use((fmt) =>
+          Effect.gen(function* () {
+            yield* fmt.init()
+            expect(yield* fmt.file(file)).toBe(true)
+          }),
+        )
+
+        expect(yield* Effect.promise(() => Bun.file(file).text())).toBe("xA")
+      }),
+    {
+      config: {
+        formatter: {
+          marker: {
+            command: [
+              "node",
+              "-e",
+              "const fs = require('fs'); const file = process.argv[1]; fs.writeFileSync(file, fs.readFileSync(file, 'utf8') + 'A')",
+              "$FILE",
+            ],
+            extensions: [".mangle"],
+          },
+        },
+      },
+    },
+  )
 })
