@@ -299,18 +299,20 @@ const scenarios: Scenario[] = [
   http.protected
     .post("/permission/{requestID}/reply", "permission.reply.invalid")
     .at((ctx) => ({
-      path: route("/permission/{requestID}/reply", { requestID: "per_httpapi" }),
+      path: route(`/permission/{requestID}/reply?${new URLSearchParams({ sessionID: "ses_httpapi" })}`, {
+        requestID: "per_httpapi",
+      }),
       headers: ctx.headers(),
-      query: { sessionID: "ses_httpapi" },
       body: { reply: "bad" },
     }))
     .status(400),
   http.protected
     .post("/permission/{requestID}/reply", "permission.reply")
     .at((ctx) => ({
-      path: route("/permission/{requestID}/reply", { requestID: "per_httpapi" }),
+      path: route(`/permission/{requestID}/reply?${new URLSearchParams({ sessionID: "ses_httpapi" })}`, {
+        requestID: "per_httpapi",
+      }),
       headers: ctx.headers(),
-      query: { sessionID: "ses_httpapi" },
       body: { reply: "once" },
     }))
     .json(404, object, "status"),
