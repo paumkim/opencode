@@ -219,4 +219,57 @@ describe("Git trees", () => {
       expect(intermediate.map((item) => item.path)).toEqual(paths)
     }),
   )
+
+  // Git reads `[`, `*` and `?` in a pathspec as wildcards, but only after
+  // ruling out an exact match, so the misfire needs the requested path to be
+  // absent while a sibling matches the pattern.
+  it.live("treats a file name with glob characters as a literal path", () =>
+    Effect.gen(function* () {
+      const root = yield* Effect.acquireRelease(
+        Effect.promise(() => tmpdir()),
+        (dir) => Effect.promise(() => dir[Symbol.asyncDispose]()),
+      )
+      const scope = RelativePath.make("work")
+      yield* Effect.promise(async () => {
+        await initRepo(root.path)
+        await fs.mkdir(path.join(root.path, "work"))
+        // `notes1.md` is what the pattern `notes[1].md` matches. The literal
+        // `notes[1].md` never exists in this tree.
+        await fs.writeFile(path.join(root.path, "work", "notes1.md"), "globbed\n")
+        await $`git add .`.cwd(root.path).quiet()
+        await $`git commit -m initial`.cwd(root.path).quiet()
+      })
+      const git = yield* Git.Service
+      const source = yield* git.repo.discover(AbsolutePath.make(root.path))
+      if (!source) throw new Error("Repository not found")
+      const repository = yield* git.repo.create({
+        worktree: source.worktree,
+        gitDirectory: AbsolutePath.make(path.join(root.path, ".snapshot")),
+        seed: source,
+      })
+      yield* git.index.refresh({ repository, scope })
+      const before = yield* git.tree.write(repository)
+
+      yield* Effect.promise(() => fs.writeFile(path.join(root.path, "work", "notes1.md"), "changed\n"))
+      yield* git.index.refresh({ repository, scope })
+      const after = yield* git.tree.write(repository)
+
+      // The real change is still reported for its own path.
+      expect(yield* git.tree.files({ repository, from: before, to: after })).toEqual([
+        RelativePath.make("work/notes1.md"),
+      ])
+
+      // The revert flow passes every touched path, including ones no longer in
+      // the tree. Asking for a literal name that is absent must not answer with
+      // the sibling the pattern happens to match.
+      const diffs = yield* git.tree.diff({
+        repository,
+        from: before,
+        to: after,
+        paths: [RelativePath.make("work/notes[1].md")],
+        context: 1,
+      })
+      expect(diffs).toEqual([])
+    }),
+  )
 })
