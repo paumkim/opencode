@@ -26,17 +26,28 @@ export interface Transformable<DraftApi> {
   readonly reload: Reload
 }
 
-const CurrentBatch = Context.Reference<Set<Reload> | undefined>("@opencode/State/CurrentBatch", {
+type Batch = {
+  readonly reloads: Set<Reload>
+  active: boolean
+}
+
+const CurrentBatch = Context.Reference<Batch | undefined>("@opencode/State/CurrentBatch", {
   defaultValue: () => undefined,
 })
 
 export function batch<A, E, R>(effect: Effect.Effect<A, E, R>) {
   return Effect.gen(function* () {
     const current = yield* CurrentBatch
-    if (current) return yield* effect
-    const reloads = new Set<Reload>()
-    const result = yield* effect.pipe(Effect.provideService(CurrentBatch, reloads))
-    yield* Effect.forEach(reloads, (reload) => reload(), { discard: true })
+    // A batch that has already drained is not a batch any more. A fiber forked inside the region
+    // outlives it and still inherits the reference, so it must not be treated as a nested batch —
+    // it has to open a fresh one whose reloads are actually run.
+    if (current?.active) return yield* effect
+    const batch: Batch = { reloads: new Set(), active: true }
+    const result = yield* effect.pipe(Effect.provideService(CurrentBatch, batch))
+    // Mark the batch finished before draining. Anything that registers a reload after this point
+    // (an outliving fork) then runs it immediately instead of queueing it on a set nobody reads.
+    batch.active = false
+    yield* Effect.forEach(batch.reloads, (reload) => reload(), { discard: true })
     return result
   })
 }
@@ -100,8 +111,8 @@ export function create<State, DraftApi>(options: Options<State, DraftApi>): Inte
                 transforms = transforms.filter((item) => item !== transform)
                 return Effect.gen(function* () {
                   const batch = yield* CurrentBatch
-                  if (batch) {
-                    batch.add(reload)
+                  if (batch?.active) {
+                    batch.reloads.add(reload)
                     return
                   }
                   yield* materialize()
@@ -116,7 +127,7 @@ export function create<State, DraftApi>(options: Options<State, DraftApi>): Inte
           )
           yield* Scope.addFinalizer(scope, dispose)
           const batch = yield* CurrentBatch
-          if (batch) batch.add(reload)
+          if (batch?.active) batch.reloads.add(reload)
           else yield* reload()
           return { dispose }
         }),
