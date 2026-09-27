@@ -68,15 +68,6 @@ export class UnknownError extends Schema.TaggedErrorClass<UnknownError>()(
   { httpApiStatus: 500 },
 ) {}
 
-export class ProviderNotFoundError extends Schema.TaggedErrorClass<ProviderNotFoundError>()(
-  "ProviderNotFoundError",
-  {
-    providerID: Schema.String,
-    message: Schema.String,
-  },
-  { httpApiStatus: 404 },
-) {}
-
 export class ModelNotFoundError extends Schema.TaggedErrorClass<ModelNotFoundError>()(
   "ModelNotFoundError",
   {
