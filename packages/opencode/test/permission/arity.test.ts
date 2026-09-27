@@ -31,3 +31,18 @@ test("edge cases", () => {
   expect(BashArity.prefix(["single"])).toEqual(["single"])
   expect(BashArity.prefix(["git"])).toEqual(["git"])
 })
+
+test("Object.prototype keys are not read as arities", () => {
+  // ARITY is an object literal, so an inherited key used to look up a "function"
+  // arity. `slice(0, function)` coerces to `slice(0, NaN)` and yields [], which
+  // made the shell tool offer "always approve" as the bare pattern " *" — a
+  // wildcard that permanently allows every command.
+  for (const key of ["constructor", "toString", "valueOf", "hasOwnProperty", "__proto__", "isPrototypeOf"]) {
+    expect(BashArity.prefix([key, "--rm", "-rf"])).toEqual([key])
+    expect(BashArity.prefix([key, "sub", "command"])).toEqual([key])
+  }
+})
+
+test("a real prefix still wins over an inherited key further left", () => {
+  expect(BashArity.prefix(["git", "toString", "extra"])).toEqual(["git", "toString"])
+})
