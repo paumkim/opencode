@@ -1104,6 +1104,77 @@ describe("session.compaction.process", () => {
   )
 
   itCompaction.instance(
+    "truncates a summarized tool result on a code-point boundary, not a UTF-16 code unit",
+    () => {
+      // `serialize` bounds each tool result with `String.prototype.slice(0, TOOL_OUTPUT_MAX_CHARS)`,
+      // which indexes UTF-16 code units. An emoji is TWO of them, so the cut keeps about half the
+      // characters the bound allows and can land between the halves of a pair, ending the retained
+      // text on a LONE SURROGATE. That text is the conversation the compaction model is asked to
+      // summarize, so a trailing half-character is literally handed to the model as content, and
+      // `JSON.stringify` encodes it as a `\udXXX` escape it reads as U+FFFD.
+      //
+      // The bound is a character bound, so it has to be counted and cut in code points - the same
+      // correction already made for goal text (`truncateToCodePoints` in src/goal/schema.ts) and for
+      // the model-message tool result (`truncateToolOutput` in src/session/message-v2.ts).
+      const ASTRAL = "\u{1f600}"
+      // Over the 2_000 character bound, and the bound falls mid-pair because a leading ASCII
+      // character puts the first high surrogate at an ODD unit index.
+      const output = "a" + ASTRAL.repeat(2_000)
+      const stub = llm()
+      let captured = ""
+      stub.push(reply("summary", (input) => (captured = JSON.stringify(input.messages))))
+      return Effect.gen(function* () {
+        const test = yield* TestInstance
+        const ssn = yield* SessionNs.Service
+        const session = yield* ssn.create({})
+        const user = yield* createUserMessage(session.id, "run it")
+        const assistant = yield* createAssistantMessage(session.id, user.id, test.directory)
+        yield* ssn.updatePart({
+          id: PartID.ascending(),
+          messageID: assistant.id,
+          sessionID: session.id,
+          type: "tool",
+          callID: crypto.randomUUID(),
+          tool: "bash",
+          state: {
+            status: "completed",
+            input: {},
+            output,
+            title: "done",
+            metadata: {},
+            time: { start: 0, end: 1 },
+          },
+        })
+        yield* createSummaryCompaction(session.id)
+
+        const msgs = yield* ssn.messages({ sessionID: session.id })
+        const parent = msgs.at(-1)?.info.id
+        expect(parent).toBeTruthy()
+        yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
+
+        // Recover the retained tool result out of the serialized conversation, so the assertion is
+        // on the text the compaction model actually receives rather than on a re-implementation.
+        const prompt = JSON.parse(captured) as { content?: { text: string }[] }[]
+        const conversation = prompt
+          .flatMap((message) => message.content ?? [])
+          .map((part) => part.text)
+          .join("\n")
+        const start = conversation.indexOf("[Tool result]: ")
+        expect(start).toBeGreaterThan(-1)
+        const retained = conversation.slice(start + "[Tool result]: ".length).split("\n[truncated]")[0]
+
+        expect(retained).not.toContain("[truncated]")
+        // A lone surrogate is not a character, it is half of one.
+        expect(retained.isWellFormed()).toBe(true)
+        // Keeps the whole character budget rather than half of it.
+        expect([...retained].length).toBe(2_000)
+        expect(output.startsWith(retained)).toBe(true)
+      }).pipe(withCompaction({ llm: stub.llmLayer }))
+    },
+    { git: true },
+  )
+
+  itCompaction.instance(
     "allows plugins to disable synthetic continue prompt",
     Effect.gen(function* () {
       const ssn = yield* SessionNs.Service
