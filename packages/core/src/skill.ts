@@ -2,7 +2,7 @@ export * as SkillV2 from "./skill"
 
 import { makeLocationNode } from "./effect/app-node"
 import path from "path"
-import { Context, Effect, Layer, Schema, Types } from "effect"
+import { Context, Effect, Layer, Option, Schema, Types } from "effect"
 import { Skill } from "@opencode-ai/schema/skill"
 import { AgentV2 } from "./agent"
 import { ConfigMarkdown } from "./config/markdown"
@@ -36,6 +36,35 @@ const Frontmatter = Schema.Struct({
   slash: Schema.Boolean.pipe(Schema.optional),
 })
 const decodeFrontmatter = Schema.decodeUnknownOption(Frontmatter)
+// Decoding the whole frontmatter block is all-or-nothing, so one wrong-typed value used to drop
+// the skill entirely: `slash: "yes"` instead of `slash: true` cost the user the skill's name, its
+// description and its body, with nothing to explain why. Decode the keys individually so a bad one
+// is dropped and the skill still loads, and name what was dropped so the typo is visible.
+const decodeFields = new Map(
+  Object.entries(Frontmatter.fields).map(([key, field]) => [key, Schema.decodeUnknownOption(field, { errors: "all" })]),
+)
+
+function decodeSkillFrontmatter(data: Record<string, unknown>) {
+  const decoded = decodeFrontmatter(data)
+  if (Option.isSome(decoded)) return { info: decoded.value, rejected: [] as string[] }
+  const kept: Record<string, unknown> = {}
+  const rejected: string[] = []
+  for (const [key, value] of Object.entries(data)) {
+    const decodeField = decodeFields.get(key)
+    // An unknown key is not an error: frontmatter is a Struct, so excess keys are ignored and a
+    // skill file may legitimately carry fields this build does not read.
+    if (!decodeField) continue
+    const field = decodeField(value)
+    if (Option.isSome(field)) kept[key] = field.value
+    else rejected.push(key)
+  }
+  return {
+    // Every value in `kept` came out of that key's own decoder, so the record is already valid;
+    // the cast only recovers the constructor's static type, which a per-key loop cannot express.
+    info: Frontmatter.make(kept as { name?: string; description?: string; slash?: boolean }),
+    rejected,
+  }
+}
 
 export type Data = {
   sources: Types.DeepMutable<Source>[]
@@ -83,8 +112,15 @@ const layer = Layer.effect(
           if (!content) continue
           const markdown = ConfigMarkdown.parseOption(content)
           if (!markdown) continue
-          const frontmatter = decodeFrontmatter(markdown.data).valueOrUndefined
-          if (!frontmatter) continue
+          const { info: frontmatter, rejected } = decodeSkillFrontmatter(markdown.data)
+          if (rejected.length > 0) {
+            // No `name` here: the skill's name is derived from the frontmatter below, so reporting
+            // the filename would be misleading noise. The path identifies the skill unambiguously.
+            yield* Effect.logWarning("ignoring invalid skill frontmatter", {
+              path: filepath,
+              keys: rejected.join(", "),
+            })
+          }
           const name =
             frontmatter.name !== undefined
               ? frontmatter.name
