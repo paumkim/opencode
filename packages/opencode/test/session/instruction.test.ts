@@ -206,7 +206,21 @@ describe("Instruction.resolve", () => {
     ),
   )
 
-  test.todo("fetches remote instructions from config URLs via HttpClient", () => {})
+  // NOT COVERED: `Instruction.system` fetches every http(s) entry in `config.instructions` through
+  // HttpClient and attributes it by URL, and a failure drops just that entry. This was a
+  // `test.todo` with an empty body, which reported "todo" on every run while checking nothing -
+  // a permanent reminder that does not interrupt anyone.
+  //
+  // It is recorded here as a comment instead, because the behaviour fails SILENTLY (no throw, the
+  // instruction just stops being contributed) and a comment is still more visible than a skipped
+  // test. Writing the test means registering an HttpClient node in this suite's layer group, which
+  // the `it` harness above does not currently carry - a structural change, deliberately not
+  // smuggled in beside an unrelated fix.
+  //
+  // To cover it: add the HttpClient node to the `LayerNode.group([...])` in the `it` harness, then
+  // build the service with `TestConfig.layer({ get: () => Effect.succeed({ instructions: [url] }) })`
+  // and an `HttpClient.make` stub, and assert the result contains
+  // `Instructions from: ${url}\n<remote body>`.
 })
 
 describe("Instruction.system", () => {
