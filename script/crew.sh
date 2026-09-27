@@ -15,8 +15,8 @@
 #
 # USAGE
 #   crew.sh doctor              preflight checks, no side effects
-#   crew.sh start [N]           launch N windows round-robin over the registry
-#   crew.sh start <project> [N] launch N windows on one project
+#   crew.sh start [N]              launch N windows round-robin over the registry
+#   crew.sh start [N] <project>    launch N windows on one project PATH (not a label)
 #   crew.sh status              every agent window it can see
 #   crew.sh stop [name...]      stop named windows, or all of them
 #   crew.sh logs <name> [lines] tail a window's launch log
@@ -28,12 +28,53 @@ SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SELF_DIR/.." && pwd)"
 STATE="${AGENT_CREW_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/opencode-crew}"
 OPENCODE_BIN="${CREW_OPENCODE_BIN:-$HOME/.opencode/bin/opencode}"
+# The source tree, when it is right here. A crew started from a checkout runs the
+# same code the operator is editing, which is the whole point of a per-project crew.
+DEV_PKG="$REPO_ROOT/packages/opencode"
 
 mkdir -p "$STATE/run" "$STATE/logs" "$STATE/prompts"
 
 log()  { printf '%s\n' "$*"; }
 warn() { printf 'warning: %s\n' "$*" >&2; }
 die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
+
+# Resolve the argv that actually starts an agent TUI, once, for every caller.
+#
+# A compiled opencode can exist, answer `--version`, and still be unable to open a
+# window: the single-file build embeds the OpenTUI native library, and a build
+# missing it dies at startup with a `/$bunfs/root/libopentui-*.so` loader error
+# that `--version` never reaches. So "the file is there" is not a working
+# opencode, and doctor reporting one while every window dies is the trap.
+#
+# Preference order: an explicit override, then the source tree, then the compiled
+# binary. The source tree is preferred because it is the thing that is known to
+# work and to match the checkout the operator is running.
+resolve_opencode() {
+  if [ -n "${CREW_OPENCODE_CMD:-}" ]; then
+    # shellcheck disable=SC2206 # deliberate word-splitting: this is argv
+    OPENCODE_CMD=($CREW_OPENCODE_CMD)
+  elif [ -f "$DEV_PKG/src/index.ts" ]; then
+    OPENCODE_CMD=(bun run --cwd "$DEV_PKG" --conditions=browser src/index.ts)
+  elif [ -x "$OPENCODE_BIN" ]; then
+    OPENCODE_CMD=("$OPENCODE_BIN")
+  else
+    die "no usable opencode: set CREW_OPENCODE_CMD, or have $DEV_PKG/src/index.ts, or $OPENCODE_BIN"
+  fi
+}
+
+# The single place a window is put on screen.
+#
+# The display is inherited rather than pinned. Hardcoding DISPLAY/WAYLAND_DISPLAY
+# here is what could put a window on a display the operator was not looking at,
+# and a window they cannot see is indistinguishable from a crew that never started.
+# Every caller goes through here so the env and the argv cannot drift apart again.
+launch_window() {
+  local name="$1" dir="$2" prompt="$3" logf="$4"
+  setsid nohup ghostty --title="agent-$name" \
+    -e "${OPENCODE_CMD[@]}" "$dir" --auto --prompt "$prompt" \
+    > "$logf" 2>&1 < /dev/null &
+  echo $!
+}
 
 # Registry, in precedence order. Creates a commented template rather than guessing.
 resolve_config() {
@@ -170,8 +211,14 @@ EOF
 doctor() {
   local ok=0 found=0 path label dirty branch
   log "crew doctor  (config: $CONFIG)"
-  [ -x "$OPENCODE_BIN" ] && log "  opencode: $OPENCODE_BIN ($("$OPENCODE_BIN" --version 2>&1 | tail -1))" \
-                        || { warn "opencode not executable: $OPENCODE_BIN"; ok=1; }
+  # Report the command that will really be launched. Checking that some opencode
+  # file exists and answering --version is not the same question as "will a window
+  # open", and conflating the two is what let a broken build pass preflight.
+  if resolve_opencode 2>/dev/null; then
+    log "  opencode: ${OPENCODE_CMD[*]}"
+  else
+    warn "no usable opencode (set CREW_OPENCODE_CMD)"; ok=1
+  fi
   command -v ghostty >/dev/null 2>&1 && log "  ghostty: $(command -v ghostty)" \
                                    || { warn "ghostty not on PATH"; ok=1; }
   log "  display: DISPLAY=${DISPLAY:-unset} WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-unset}"
@@ -193,7 +240,8 @@ doctor() {
 }
 
 start() {
-  local want="${1:-1}" only="${2:-}" n name dir label arr=()
+  local want="${1:-1}" only="${2:-}" n name dir label pid arr=()
+  resolve_opencode
   doctor >/dev/null 2>&1 || warn "preflight reported issues; continuing anyway"
   if [ -n "$only" ]; then
     [ -d "$only/.git" ] || die "not a git repo: $only"
@@ -219,12 +267,17 @@ start() {
       warn "$name already running; skipping"; continue
     fi
     write_prompt "$dir" "$label" "$STATE/prompts/$name.md"
-    DISPLAY="${DISPLAY:-:1}" WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}" \
-      setsid nohup ghostty --title="agent-$label-$n" \
-        -e "$OPENCODE_BIN" "$dir" --auto --prompt "$(cat "$STATE/prompts/$name.md")" \
-        > "$STATE/logs/$name.log" 2>&1 < /dev/null &
-    echo $! > "$STATE/run/$name.pid"
-    log "  started $name -> $dir ($label)"
+    pid="$(launch_window "$name" "$dir" "$(cat "$STATE/prompts/$name.md")" "$STATE/logs/$name.log")"
+    echo "$pid" > "$STATE/run/$name.pid"
+    # A window that dies during startup is indistinguishable from one that opened
+    # off-screen, and both read as "nothing happened". Give the TUI a moment to
+    # fail, then say so here instead of leaving the operator to guess.
+    sleep 3
+    if kill -0 "$pid" 2>/dev/null; then
+      log "  started $name -> $dir ($label) pid=$pid"
+    else
+      warn "$name exited during startup — see 'crew.sh logs $name 40'"
+    fi
   done
   log "crew launched. 'crew.sh status' to check, 'crew.sh stop' to halt."
 }
