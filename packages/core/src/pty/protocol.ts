@@ -20,9 +20,22 @@ export function metaFrame(cursor: number) {
   return out
 }
 
+const isHighSurrogate = (code: number) => code >= 0xd800 && code <= 0xdbff
+
 export function chunks(data: string) {
   const out: string[] = []
-  for (let i = 0; i < data.length; i += REPLAY_CHUNK) out.push(data.slice(i, i + REPLAY_CHUNK))
+  let i = 0
+  while (i < data.length) {
+    let end = Math.min(i + REPLAY_CHUNK, data.length)
+    // Every frame is UTF-8 encoded on its own, so a cut between the halves of a
+    // surrogate pair put a lone surrogate in the bytes and the terminal showed
+    // U+FFFD. Carry the pair into this frame instead of splitting it. Slicing by
+    // code unit also cut a frame up to one unit early, wasting part of the
+    // budget. Matches the guard in `ripgrep.ts` for oversized line previews.
+    if (end < data.length && isHighSurrogate(data.charCodeAt(end - 1))) end += 1
+    out.push(data.slice(i, end))
+    i = end
+  }
   return out
 }
 
