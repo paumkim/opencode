@@ -161,4 +161,62 @@ describe("Git trees", () => {
       expect(yield* read(path.join(root.path, "outside.txt"))).toBe("changed outside\n")
     }),
   )
+
+  // `SessionRevert.stage` passes every touched path, not just the ones that
+  // actually differ, so a file edited and then edited back would otherwise be
+  // reported as a 0/0 "modified" change with an empty patch and get staged.
+  it.live("omits caller-supplied paths that are identical between the two trees", () =>
+    Effect.gen(function* () {
+      const root = yield* Effect.acquireRelease(
+        Effect.promise(() => tmpdir()),
+        (dir) => Effect.promise(() => dir[Symbol.asyncDispose]()),
+      )
+      yield* Effect.promise(async () => {
+        await initRepo(root.path)
+        await fs.writeFile(path.join(root.path, "changed.txt"), "before\n")
+        await fs.writeFile(path.join(root.path, "same.txt"), "untouched\n")
+        await $`git add .`.cwd(root.path).quiet()
+        await $`git commit -m initial`.cwd(root.path).quiet()
+      })
+      const git = yield* Git.Service
+      const source = yield* git.repo.discover(AbsolutePath.make(root.path))
+      if (!source) throw new Error("Repository not found")
+      const repository = yield* git.repo.create({
+        worktree: source.worktree,
+        gitDirectory: AbsolutePath.make(path.join(root.path, ".snapshot")),
+        seed: source,
+      })
+      yield* git.index.refresh({ repository, scope: RelativePath.make(".") })
+      const before = yield* git.tree.write(repository)
+
+      yield* Effect.promise(async () => {
+        await fs.writeFile(path.join(root.path, "changed.txt"), "after\n")
+        // Touched and then reverted to identical content.
+        await fs.writeFile(path.join(root.path, "same.txt"), "touched\n")
+      })
+      yield* git.index.refresh({ repository, scope: RelativePath.make(".") })
+      const touched = yield* git.tree.write(repository)
+      yield* Effect.promise(() => fs.writeFile(path.join(root.path, "same.txt"), "untouched\n"))
+      yield* git.index.refresh({ repository, scope: RelativePath.make(".") })
+      const after = yield* git.tree.write(repository)
+
+      // Every touched path, as the revert flow passes them.
+      const paths = [RelativePath.make("changed.txt"), RelativePath.make("same.txt")]
+      const diffs = yield* git.tree.diff({ repository, from: before, to: after, paths, context: 1 })
+      expect(diffs.map((item) => [item.path, item.status, item.additions, item.deletions, item.patch])).toEqual([
+        [RelativePath.make("changed.txt"), "modified", 1, 1, expect.stringContaining("-before")],
+      ])
+
+      // The intermediate tree really did change same.txt, so the path was
+      // genuinely touched; it is only identical between `before` and `after`.
+      const intermediate = yield* git.tree.diff({
+        repository,
+        from: before,
+        to: touched,
+        paths,
+        context: 1,
+      })
+      expect(intermediate.map((item) => item.path)).toEqual(paths)
+    }),
+  )
 })

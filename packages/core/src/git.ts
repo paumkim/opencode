@@ -577,7 +577,7 @@ const layer = Layer.effect(
       paths?: readonly RelativePath[]
     }) {
       const paths = input.paths ?? (yield* treeFiles(input))
-      return yield* Effect.forEach(paths, (file) =>
+      const diffs = yield* Effect.forEach(paths, (file) =>
         Effect.gen(function* () {
           const statusText = (yield* repositoryOperation("diff", input.repository, [
             "diff",
@@ -588,6 +588,11 @@ const layer = Layer.effect(
             "--",
             file,
           ])).text.trim()
+          // A caller-supplied path that is identical between the two trees diffs
+          // to nothing. `SessionRevert.stage` passes every touched path rather
+          // than every changed one, so falling through to "modified" published a
+          // false 0/0 change with an empty patch.
+          if (!statusText) return
           const status = statusText.startsWith("A") ? "added" : statusText.startsWith("D") ? "deleted" : "modified"
           const stats = (yield* repositoryOperation("diff", input.repository, [
             "diff",
@@ -619,6 +624,7 @@ const layer = Layer.effect(
           } satisfies File.Diff
         }),
       )
+      return diffs.filter((item): item is NonNullable<typeof item> => item !== undefined)
     })
 
     const entry = Effect.fnUntraced(function* (repository: Repository, tree: TreeID, file: RelativePath) {
