@@ -121,6 +121,29 @@ describe("the stall sweep re-arms a goal whose turn ended without an idle event"
     await rt.dispose()
   })
 
+  test("a sweep never auto-continues a deployment that turned auto-continuation off", async () => {
+    const sessionID = "stall-8"
+    await createGoal(sessionID, "keep going", { maxAutoTurns: 100 })
+    await backdate(sessionID, 600)
+
+    // `auto_continue: false` is the documented way to stop the driver from prompting a session on
+    // its own. The IDLE path honoured it, but the sweep only ever asked whether a stall threshold
+    // was configured - so a deployment that set both kept receiving auto-continuations from the sweep
+    // while the setting read as "auto-continuation is off". The two paths reach the same
+    // `runAutoContinue`, so the opt-out has to be read at the sweep too, or the option is only
+    // half-honoured.
+    const rt = createGoalRuntime({
+      client: client() as never,
+      options: { auto_continue: false, max_stall_before_continue: 60 } as never,
+    })
+    await rt.sweepStalledGoals()
+
+    // Identical inputs to the first test in this file, which DOES continue. The only difference is
+    // the opt-out, so the sweep must do nothing.
+    expect((await getGoal(sessionID))?.autoTurns).toBe(0)
+    await rt.dispose()
+  })
+
   test("a session the sweep cannot confirm is left alone, not retired", async () => {
     const sessionID = "stall-6"
     await createGoal(sessionID, "keep going", { maxAutoTurns: 100 })
