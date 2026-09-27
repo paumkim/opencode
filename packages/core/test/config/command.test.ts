@@ -80,4 +80,45 @@ Review files`,
       ),
     ),
   )
+
+  it.live("still loads a command whose frontmatter has one wrong-typed value", () =>
+    Effect.acquireRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ).pipe(
+      Effect.flatMap((tmp) =>
+        Effect.gen(function* () {
+          yield* Effect.promise(async () => {
+            await fs.mkdir(path.join(tmp.path, "commands"), { recursive: true })
+            // `subtask` is a boolean. A quoted "yes" fails the whole struct, which used to make
+            // the command disappear from the list entirely — the reader saw a missing command and
+            // no indication that a single character of quoting was the reason.
+            await fs.writeFile(
+              path.join(tmp.path, "commands", "review.md"),
+              `---
+description: File review
+subtask: "yes"
+---
+Review files`,
+            )
+          })
+
+          const command = yield* CommandV2.Service
+          yield* ConfigCommandPlugin.Plugin.effect(host({ command: { ...command, reload: command.reload } })).pipe(
+            Effect.provideService(
+              Config.Service,
+              Config.Service.of({
+                entries: () =>
+                  Effect.succeed([new Config.Directory({ type: "directory", path: AbsolutePath.make(tmp.path) })]),
+              }),
+            ),
+          )
+
+          expect(yield* command.list()).toEqual([
+            CommandV2.Info.make({ name: "review", template: "Review files", description: "File review" }),
+          ])
+        }),
+      ),
+    ),
+  )
 })
