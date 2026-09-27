@@ -65,7 +65,11 @@ export const Plugin = define({
                 Effect.flatMap((content) => {
                   if (content === undefined) return Effect.succeed(undefined)
                   const decoded = decode(file, content)
-                  if (!decoded) return Effect.succeed(undefined)
+                  if (decoded.type === "unparseable")
+                    return Effect.logWarning("ignoring unparseable agent frontmatter", {
+                      path: file.filepath,
+                    }).pipe(Effect.as(undefined))
+                  if (decoded.type === "none") return Effect.succeed(undefined)
                   if (!decoded.rejected.length) return Effect.succeed(decoded.document)
                   // Report the keys that did not decode, so an agent that behaves differently from
                   // what the file says is at least traceable to the file.
@@ -168,9 +172,18 @@ function discover(fs: FSUtil.Interface, directory: string) {
   )
 }
 
+// `unparseable` is separated from `none` on purpose. A file whose frontmatter does not parse is a
+// mistake the user can fix, and it used to be dropped in total silence even though a file with a
+// merely wrong-typed KEY right below reports itself -- so the more broken a file was, the quieter the
+// loader got, which is backwards.
+type Decoded =
+  | { type: "document"; document: Config.Document; name: string; rejected: string[] }
+  | { type: "none" }
+  | { type: "unparseable" }
+
 function decode(file: { directory: string; filepath: string; primary: boolean }, content: string) {
   const markdown = ConfigMarkdown.parseOption(content)
-  if (!markdown) return
+  if (!markdown) return { type: "unparseable" as const }
   const name = path
     .relative(file.directory, file.filepath)
     .replaceAll("\\", "/")
@@ -208,7 +221,7 @@ function decode(file: { directory: string; filepath: string; primary: boolean },
     else rejected.push(key)
   }
   const recovered = attempt(kept)
-  if (!recovered) return
+  if (!recovered) return { type: "none" as const }
   return finish(file, recovered, name, rejected)
 }
 
@@ -221,12 +234,17 @@ function finish(
   agent: AttemptedAgent,
   name: string,
   rejected: string[],
-) {
+): Decoded {
   const info = Option.getOrUndefined(
     decodeConfig({
       agents: { [name]: file.primary ? { ...agent, mode: "primary" } : agent },
     }),
   )
-  if (!info) return
-  return { document: new Config.Document({ type: "document", path: file.filepath, info }), name, rejected }
+  if (!info) return { type: "none" as const }
+  return {
+    type: "document" as const,
+    document: new Config.Document({ type: "document", path: file.filepath, info }),
+    name,
+    rejected,
+  }
 }

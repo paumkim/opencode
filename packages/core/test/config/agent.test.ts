@@ -2,6 +2,7 @@ import { describe, expect } from "bun:test"
 import fs from "fs/promises"
 import path from "path"
 import { Effect, Schema } from "effect"
+import * as TestConsole from "effect/testing/TestConsole"
 import { AgentV2 } from "@opencode-ai/core/agent"
 import { Config } from "@opencode-ai/core/config"
 import { ConfigAgentPlugin } from "@opencode-ai/core/config/plugin/agent"
@@ -421,6 +422,56 @@ Legacy agent.`,
             system: "Legacy agent.",
             description: "Legacy agent",
           })
+        }),
+      ),
+    ),
+  )
+
+  // A frontmatter that does not parse leaves no keys to recover, so the agent is dropped -- and it
+  // used to be dropped in total silence, even though a file with a merely wrong-typed key reports
+  // itself in the same function. The more broken a file was, the quieter the loader got.
+  it.live("reports an agent file whose frontmatter does not parse, and still loads its siblings", () =>
+    Effect.acquireRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ).pipe(
+      Effect.flatMap((tmp) =>
+        Effect.gen(function* () {
+          yield* Effect.promise(async () => {
+            await fs.mkdir(path.join(tmp.path, "agents"), { recursive: true })
+            // An unterminated double quote is the shape `sanitize` cannot rescue, so it reaches the
+            // parser as a genuine YAML failure.
+            await fs.writeFile(
+              path.join(tmp.path, "agents", "broken.md"),
+              `---\ndescription: "unterminated\n---\nBroken body`,
+            )
+            await fs.writeFile(
+              path.join(tmp.path, "agents", "good.md"),
+              `---
+description: Still here
+---
+Good body.`,
+            )
+          })
+          const agents = yield* AgentV2.Service
+          const config = Config.Service.of({
+            entries: () => Effect.succeed([new Config.Directory({ type: "directory", path: tmp.path as never })]),
+          })
+
+          yield* ConfigAgentPlugin.Plugin.effect(host({ agent: agentHost(agents) })).pipe(
+            Effect.provideService(Config.Service, config),
+          )
+
+          // The warning must name the file. A bare "something was ignored" is not actionable, and
+          // with several agent files there is no other way to tell which agent is missing.
+          const lines = yield* TestConsole.logLines
+          const at = lines.indexOf("ignoring unparseable agent frontmatter")
+          expect(at).toBeGreaterThan(0)
+          expect(lines[at + 1]).toEqual({ path: path.join(tmp.path, "agents", "broken.md") })
+
+          // One broken file must not cost the user the working ones.
+          expect(yield* agents.get(AgentV2.ID.make("good"))).toMatchObject({ system: "Good body." })
+          expect(yield* agents.get(AgentV2.ID.make("broken"))).toBeUndefined()
         }),
       ),
     ),

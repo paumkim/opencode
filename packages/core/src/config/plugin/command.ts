@@ -94,7 +94,11 @@ function loadDirectory(fs: FSUtil.Interface, directory: string) {
         Effect.flatMap((content) => {
           if (content === undefined) return Effect.succeed(undefined)
           const decoded = decode(directory, filepath, content)
-          if (!decoded) return Effect.succeed(undefined)
+          if (decoded.type === "unparseable")
+            return Effect.logWarning("ignoring unparseable command frontmatter", { path: filepath }).pipe(
+              Effect.as(undefined),
+            )
+          if (decoded.type === "none") return Effect.succeed(undefined)
           const entry = { name: decoded.name, info: decoded.info }
           if (!decoded.rejected.length) return Effect.succeed(entry)
           // Report the keys that did not decode, so a command that behaves differently from what
@@ -115,12 +119,16 @@ function loadDirectory(fs: FSUtil.Interface, directory: string) {
   })
 }
 
+// `unparseable` is separated from `none` on purpose: a frontmatter that does not parse is a mistake
+// the user can fix, and it used to be dropped in total silence even though a file with a merely
+// wrong-typed KEY reports itself below -- the more broken a file was, the quieter the loader got.
 function decode(directory: string, filepath: string, content: string) {
   const markdown = ConfigMarkdown.parseOption(content)
-  if (!markdown) return
+  if (!markdown) return { type: "unparseable" as const }
   const decoded = decodeInfo(markdown.content.trim(), markdown.data as Record<string, unknown>)
-  if (!decoded) return
+  if (!decoded) return { type: "none" as const }
   return {
+    type: "document" as const,
     name: path
       .relative(directory, filepath)
       .replaceAll("\\", "/")
