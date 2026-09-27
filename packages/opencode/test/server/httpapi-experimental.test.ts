@@ -267,6 +267,35 @@ describe("experimental HttpApi", () => {
     { git: true, config: { formatter: false, lsp: false } },
   )
 
+  // `Schema.NumberFromString` never fails: "abc" decodes to NaN, "-5" to -5,
+  // "Infinity" to Infinity. A NaN `limit` reached drizzle, which drops the
+  // LIMIT clause when the value is not `>= 0`, so the query returned the whole
+  // session table; a NaN `start`/`cursor` became a `>= NULL` comparison and
+  // silently matched zero rows, breaking pagination with an empty page.
+  it.instance(
+    "rejects non-numeric session list pagination params",
+    () =>
+      Effect.gen(function* () {
+        const tmp = yield* TestInstance
+        yield* createSession({ title: "page-one" })
+        yield* createSession({ title: "page-two" })
+
+        for (const bad of [
+          { limit: "abc" },
+          { limit: "-1" },
+          { limit: "1.5" },
+          { limit: "Infinity" },
+          { cursor: "abc" },
+          { start: "abc" },
+        ] as Record<string, string>[]) {
+          const query: Record<string, string> = { directory: tmp.directory, ...bad }
+          const res = yield* request(`${ExperimentalPaths.session}?${new URLSearchParams(query)}`, tmp.directory)
+          expect({ ...bad, status: res.status }).toEqual({ ...bad, status: 400 })
+        }
+      }),
+    { git: true, config: { formatter: false, lsp: false } },
+  )
+
   testWorktreeMutations(
     "serves worktree mutations through the default server app",
     () =>

@@ -80,10 +80,13 @@ export class WorktreeApiError extends Schema.ErrorClass<WorktreeApiError>("Workt
 export const SessionListQuery = Schema.Struct({
   ...WorkspaceRoutingQueryFields,
   roots: Schema.optional(QueryBoolean),
-  start: Schema.optional(Schema.NumberFromString),
-  cursor: Schema.optional(Schema.NumberFromString),
+  // `Schema.NumberFromString` never fails, so these need a real bound. NaN
+  // made drizzle drop the LIMIT clause and return every session, and made
+  // `start`/`cursor` a `>= NULL` comparison that matched no rows.
+  start: Schema.optional(Schema.NumberFromString.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0))),
+  cursor: Schema.optional(Schema.NumberFromString.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0))),
   search: Schema.optional(Schema.String),
-  limit: Schema.optional(Schema.NumberFromString),
+  limit: Schema.optional(Schema.NumberFromString.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0))),
   archived: Schema.optional(QueryBoolean),
 })
 
