@@ -119,7 +119,12 @@ function projectMcpResult(result: CallToolResult, collect: (attachment: Attachme
 type Run = (input: unknown) => Effect.Effect<unknown, unknown>
 
 function toolTree(catalog: readonly CatalogEntry[], run: (entry: CatalogEntry) => Run) {
-  const tree: Record<string, Record<string, SandboxTool.Definition>> = {}
+  // Null-prototype tree. The namespace key is an MCP server name, so a server
+  // named after an Object.prototype member made `tree[entry.server]` resolve to
+  // the inherited `Object` function, which `??=` does not replace — so the
+  // server's tools were written as static properties on the global Object and
+  // the namespace stayed empty.
+  const tree: Record<string, Record<string, SandboxTool.Definition>> = Object.create(null)
   for (const entry of catalog) {
     const namespace = (tree[entry.server] ??= {})
     namespace[entry.local] = SandboxTool.make({

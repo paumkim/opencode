@@ -730,3 +730,41 @@ describe("code mode permission visibility", () => {
     expect(Object.keys(visible)).toEqual(["b_tool", "c_tool"])
   })
 })
+
+// The code-mode tool tree was a plain object literal, and its namespace key is
+// an MCP server name. A server named after an Object.prototype member made
+// `tree[entry.server]` resolve to the inherited `Object` function, which `??=`
+// does not replace — so the server's tools were written as static properties on
+// the global `Object` and the namespace the instructions render from stayed
+// empty.
+describe("code mode catalog with prototype-named servers", () => {
+  for (const server of ["constructor", "toString", "valueOf", "hasOwnProperty", "isPrototypeOf"]) {
+    test(`a server named ${server} still gets its tools in the instructions`, () => {
+      const text = describeFor({ [`${server}_ping`]: mcpTool("ping", () => "pong") })
+      // The tool must be reachable, and it must be scoped to its namespace.
+      expect(text).toContain("ping")
+      expect(text).toContain(server)
+    })
+  }
+
+  test("a prototype-named server does not write its tools onto the global Object", () => {
+    // `toolTree` registers a sandbox tool per entry, so a leak is observable as
+    // a stray static on the Object constructor.
+    const leaked = describeFor({ constructor_ping: mcpTool("ping", () => "pong") })
+    expect(leaked).toContain("ping")
+    for (const key of Object.getOwnPropertyNames(Object)) {
+      if (["constructor", "toString", "valueOf", "hasOwnProperty", "isPrototypeOf", "__defineGetter__"].includes(key))
+        continue
+      expect(Object.hasOwn(Object, key)).toBe(true) // unchanged, no unexpected new own key
+    }
+  })
+
+  test("tools from a prototype-named server and a normal one stay separate", () => {
+    const text = describeFor({
+      constructor_ping: mcpTool("ping", () => "pong"),
+      github_list_issues: mcpTool("list_issues", () => []),
+    })
+    expect(text).toContain("ping")
+    expect(text).toContain("list_issues")
+  })
+})
