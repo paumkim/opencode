@@ -63,6 +63,29 @@ describe("tool parameters", () => {
       })
     })
 
+    test("puts the closed todo sets on the wire, not only in the description", () => {
+      // The todo status/priority sets are closed in `session-todo.ts` on purpose: every consumer
+      // compares against the exact literals and none has a fallback, so an out-of-set value pins the
+      // progress indicator and the sidebar open, permanently and silently. The snapshot below records
+      // the wire shape, but a snapshot only fails when someone remembers to look at it -- a shape
+      // change is invisible until the file is regenerated. This asserts the substance directly, so a
+      // regression to a bare `type: "string"` fails here even if the snapshot is re-recorded.
+      const todo = (toJsonSchema(Todo) as any).properties.todos.items.properties
+      expect(todo.status).toEqual({
+        type: "string",
+        enum: ["pending", "in_progress", "completed", "cancelled"],
+        description: "Current status of the task: pending, in_progress, completed, cancelled",
+      })
+      expect(todo.priority).toEqual({
+        type: "string",
+        enum: ["high", "medium", "low"],
+        description: "Priority level of the task: high, medium, low",
+      })
+      expect(accepts(Todo, { todos: [{ content: "a", status: "pending", priority: "high" }] })).toBe(true)
+      expect(accepts(Todo, { todos: [{ content: "a", status: "done", priority: "high" }] })).toBe(false)
+      expect(accepts(Todo, { todos: [{ content: "a", status: "pending", priority: "urgent" }] })).toBe(false)
+    })
+
     test("preserves required nullable fields", () => {
       expect(toJsonSchema(Schema.Struct({ value: Schema.NullOr(Schema.String) }))).toMatchObject({
         properties: { value: { anyOf: expect.arrayContaining([{ type: "null" }]) } },
