@@ -2581,3 +2581,83 @@ itNoEdit.instance(
     }),
   { config: cfg },
 )
+
+// `loopReason` is the remediation advice a caller is handed alongside `loopDetected`. It used to be
+// re-derived at READ time from the cross-turn `textLoop`/`reasoningLoop` STREAMS instead of being
+// recorded when a detector fired. A genuine file change deletes those streams, in the very same
+// `process()` call that sets the flag - so a step that both repeated itself to the threshold AND
+// changed a file reported the fallback reason, "doom", for what was plainly a text loop, with
+// `loopDetected: true` sitting right beside it.
+//
+// The alternation detector was immune throughout, because its cause was a boolean on `ctx` the whole
+// time. That asymmetry is the tell: one detector remembered what it found, three re-derived it.
+it.live("a text loop that also changes a file still reports itself as a text loop", () =>
+  provideTmpdirServer(
+    ({ dir, llm }) =>
+      Effect.gen(function* () {
+        const { processors, session, provider } = yield* boot()
+
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "keep checking the parser")
+        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const A = "checking the parser"
+
+        const input = {
+          user: {
+            id: parent.id,
+            sessionID: chat.id,
+            role: "user",
+            time: parent.time,
+            agent: parent.agent,
+            model: { providerID: ref.providerID, modelID: ref.modelID },
+          } satisfies SessionV1.User,
+          sessionID: chat.id,
+          model: mdl,
+          agent: agent(),
+          system: [],
+          messages: [{ role: "user" as const, content: "keep checking the parser" }],
+          tools: {},
+        }
+
+        // `create()` once per STEP, the way `prompt.ts` drives it, and that is load-bearing. The
+        // within-turn runaway window is per-`create()`, so reusing ONE handle across steps lets it
+        // collect three identical texts and fire first - and the reason under test is then never
+        // consulted. One text part per step keeps the cross-turn `textLoop` the detector in play.
+        //
+        // `changesFile` writes between `create()` and `process()` because `create()` is what captures
+        // the pre-stream snapshot, so a file landing there is exactly the edit the step is credited
+        // with. That is the same shape the checkpoint test uses to produce a real patch, and a real
+        // patch is the whole point: without one, `stateChanged` stays false, the evidence is never
+        // cleared, and the test would pass for the wrong reason.
+        const step = (changesFile: boolean) =>
+          Effect.gen(function* () {
+            const fresh = yield* assistant(chat.id, parent.id, path.resolve(dir))
+            const h = yield* processors.create({ assistantMessage: fresh, sessionID: chat.id, model: mdl })
+            if (changesFile) yield* Effect.promise(() => Bun.write(path.join(dir, "parser.ts"), `// ${A}\n`))
+            yield* llm.push(reply().text(A).stop().item())
+            return { result: yield* h.process(input), handle: h }
+          })
+
+        // Two quiet steps put the cross-turn counter at 2. The third says the same sentence, which
+        // reaches TEXT_LOOP_THRESHOLD, and in that same step changes a file.
+        expect((yield* step(false)).result.noEditStreak).toBe(1)
+        expect((yield* step(false)).result.noEditStreak).toBe(2)
+
+        const third = yield* step(true)
+
+        // The file really did change: the streak is reset, not merely carried. That reset is the
+        // same `stateChanged` branch that deleted the text-loop evidence, so its being visible here
+        // is what makes the assertion below mean something.
+        expect(third.result.noEditStreak).toBe(0)
+        expect(third.result.runaway).toBe(false)
+        expect(third.handle.loopDetected).toBe(true)
+        // The whole assertion: the detector that fired is the one named, even though its bookkeeping
+        // was cleared in the same breath.
+        expect(third.handle.loopReason).toBe("text")
+      }),
+    // `git: true` is load-bearing, not decoration: the snapshot diff that decides `stateChanged` is
+    // taken against a git worktree, so without a repo there is no patch and the test would quietly
+    // assert nothing.
+    { git: true, config: (url) => providerCfg(url) },
+  ),
+)

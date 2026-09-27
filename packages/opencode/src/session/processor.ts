@@ -121,6 +121,21 @@ function recordTurnSignature(
   return true
 }
 
+/**
+ * Why a loop was reported. `"none"` is not a report - it is the absence of one.
+ *
+ * `loopDetected` and `loopReason` are two views of the same value, so they are stored as one. They
+ * used to be a boolean plus a separately-derived reason, and the reason was re-derived from the
+ * shared `textLoop`/`reasoningLoop` STREAMS at read time rather than recorded when the detector
+ * fired. A stream is mutable shared state, and the same `process()` call that sets the flag deletes
+ * those entries on a real file change - so a turn that both tripped the text detector and edited a
+ * file reported `loopDetected: true` alongside `loopReason: "doom"`, the fallback, because the
+ * evidence had been cleared out from under the reader. The alternation detector was immune, since
+ * its cause was a boolean on `ctx` all along, which is the tell that this was a bug and not a
+ * design choice.
+ */
+type LoopReason = "doom" | "text" | "reasoning" | "alternation" | "none"
+
 export type Result = "compact" | "stop" | "continue"
 
 export interface ProcessResult {
@@ -164,7 +179,7 @@ export interface Handle {
    * does not set `loopDetected`, and the other two have no detector at all. A consumer that branched
    * on one of them was writing code the loop detector could never reach, and the type invited it.
    */
-  readonly loopReason: "doom" | "text" | "reasoning" | "alternation" | "none"
+  readonly loopReason: LoopReason
   /** Self-watch: the session checks its own health + all child/subagent sessions. */
   readonly watch: () => Effect.Effect<WatchEntry[]>
 }
@@ -205,12 +220,12 @@ interface ProcessorContext extends Input {
    */
   lastStepText: string
   reasoningMap: Record<string, SessionV1.ReasoningPart>
-  loopDetected: boolean
+  /** Which detector fired, recorded at the moment it fired. Single-sourced with `Handle.loopReason`. */
+  loopCause: LoopReason
   runawayDetected: boolean
   turnSignature: string
   hasEditInStep: boolean
   stateChanged: boolean
-  alternationDetected: boolean
   noEditStreak: number
   turnStarted: number
   lastDelta: number
@@ -293,12 +308,11 @@ const layer = Layer.effect(
         currentText: undefined,
         lastStepText: "",
         reasoningMap: {},
-        loopDetected: false,
+        loopCause: "none",
         runawayDetected: false,
         turnSignature: "",
         hasEditInStep: false,
         stateChanged: false,
-        alternationDetected: false,
         noEditStreak: noEditStreaks.get(input.sessionID) ?? 0,
         turnStarted: Date.now(),
         lastDelta: Date.now(),
@@ -619,7 +633,7 @@ const saveToolLearning = Effect.fn("SessionProcessor.saveToolLearning")(function
             // output and forcing a retry. The repeat being hunted is a repeat ACROSS deltas and
             // turns, so requiring the delta to have grown the text leaves that intact.
             if (value.text && isRunawayReasoning(ctx.reasoningMap[value.id].text)) {
-              ctx.loopDetected = true
+              ctx.loopCause = "reasoning"
               ctx.runawayDetected = true
               yield* Effect.logError("runaway_reasoning", {
                 "session.id": ctx.sessionID,
@@ -648,7 +662,7 @@ const reasoning = ctx.reasoningMap[value.id]
                   }
                   reasoningLoop.set(key, entry)
                   if (entry.count >= REASONING_LOOP_THRESHOLD) {
-                    ctx.loopDetected = true
+                    ctx.loopCause = "reasoning"
                     yield* Effect.logError("reasoning_loop", {
                       "session.id": ctx.sessionID,
                       messageID: ctx.assistantMessage.id,
@@ -912,7 +926,7 @@ const reasoning = ctx.reasoningMap[value.id]
             // Runaway detection: same text repeated → interrupt and retry.
             // Only a delta that actually added bytes counts; see the reasoning-delta case.
             if (value.text && isRunawayText(ctx.currentText.text)) {
-              ctx.loopDetected = true
+              ctx.loopCause = "text"
               ctx.runawayDetected = true
               yield* Effect.logError("runaway_text", {
                 "session.id": ctx.sessionID,
@@ -982,7 +996,7 @@ if (ctx.currentText.text.trim()) {
                }
                textLoop.set(key, entry)
                if (entry.count >= TEXT_LOOP_THRESHOLD) {
-                 ctx.loopDetected = true
+                 ctx.loopCause = "text"
                  yield* Effect.logError("text_loop", {
                    "session.id": ctx.sessionID,
                    messageID: ctx.assistantMessage.id,
@@ -1114,8 +1128,7 @@ if (ctx.currentText.text.trim()) {
           yield* Effect.gen(function* () {
             ctx.currentText = undefined
             ctx.reasoningMap = {}
-            ctx.loopDetected = false
-            ctx.alternationDetected = false
+            ctx.loopCause = "none"
             ctx.runawayDetected = false
             ctx.turnSignature = ""
             ctx.stateChanged = false
@@ -1159,7 +1172,7 @@ if (ctx.currentText.text.trim()) {
                 Stream.takeUntil(() => ctx.needsCompaction),
                 Stream.runDrain,
               )
-              if (outputSeen || aborted || ctx.needsCompaction || ctx.blocked || ctx.loopDetected || ctx.assistantMessage.error) return
+              if (outputSeen || aborted || ctx.needsCompaction || ctx.blocked || ctx.loopCause !== "none" || ctx.assistantMessage.error) return
               const parts = (yield* MessageV2.parts(ctx.assistantMessage.id).pipe(
                 Effect.provideService(Database.Service, database),
               )).filter((part) => !baseline.has(part.id))
@@ -1224,8 +1237,7 @@ if (ctx.currentText.text.trim()) {
           // (A → B → A → B) that the consecutive-identity detectors miss.
           if (ctx.turnSignature) {
             if (recordTurnSignature(turnSignatures, ctx.sessionID, ctx.turnSignature)) {
-              ctx.loopDetected = true
-              ctx.alternationDetected = true
+              ctx.loopCause = "alternation"
               yield* Effect.logError("alternation_loop", {
                 "session.id": ctx.sessionID,
                 messageID: ctx.assistantMessage.id,
@@ -1262,22 +1274,14 @@ if (ctx.currentText.text.trim()) {
           return ctx.assistantMessage
         },
         get loopDetected() {
-          return ctx.loopDetected
+          return ctx.loopCause !== "none"
         },
         get noEditStreak() {
           return ctx.noEditStreak
         },
         get loopReason() {
-            if (!ctx.loopDetected) return "none"
-            // Most specific detectors first: a model that is repeating
-            // identical reasoning or text across turns is in a content loop,
-            // not a tool-call loop, so it deserves the matching message.
-            if (ctx.alternationDetected) return "alternation"
-            if (textLoop.get(ctx.sessionID)?.count && textLoop.get(ctx.sessionID)!.count >= TEXT_LOOP_THRESHOLD) return "text"
-            if (reasoningLoop.get(ctx.sessionID)?.count && reasoningLoop.get(ctx.sessionID)!.count >= REASONING_LOOP_THRESHOLD) return "reasoning"
-
-            return "doom"
-          },
+          return ctx.loopCause
+        },
         updateToolCall,
         completeToolCall,
         process,
