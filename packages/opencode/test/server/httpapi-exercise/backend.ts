@@ -44,10 +44,36 @@ type CachedApp = BackendApp & { readonly dispose: () => Promise<void> }
 
 const appCache: Partial<Record<string, CachedApp>> = {}
 
+// `app.dispose()` is `Effect.runPromise(Scope.close(...))` over the whole app layer, and that
+// close intermittently blocks on a background fiber from the layer. Teardown must not decide
+// the run's outcome: `disposeApps` is called after every mutating scenario (inside
+// `Effect.promise`, which is uninterruptible, so even the 30s scenario timeout cannot rescue a
+// stuck one) and again from the scope finalizer, where `Effect.scoped` waits for it before
+// `process.exit` is reached. A wedged teardown therefore turned runs that had already printed
+// `pass=209 fail=0 missing=0` into CI timeouts. Bound the wait here, at the operation that owns
+// it, so both call sites are covered by one rule. Abandoning a stuck close is safe: the cache is
+// emptied above before awaiting, so the next caller builds a fresh app. The warning keeps the
+// stuck close visible instead of hiding it.
+const disposeTimeoutMs = 30_000
+
 export async function disposeApps() {
   const apps = Object.values(appCache)
   for (const key of Object.keys(appCache)) delete appCache[key]
-  await Promise.all(apps.flatMap((app) => (app === undefined ? [] : [app.dispose()])))
+  await Promise.all(
+    apps.flatMap((app) => {
+      if (app === undefined) return []
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const expired = new Promise<void>((resolve) => {
+        timer = setTimeout(() => {
+          console.error(
+            `\x1b[33mwarning: app teardown did not finish within ${disposeTimeoutMs / 1000}s; continuing\x1b[0m`,
+          )
+          resolve()
+        }, disposeTimeoutMs)
+      })
+      return [Promise.race([app.dispose().then(() => undefined), expired]).finally(() => clearTimeout(timer))]
+    }),
+  )
 }
 
 function app(modules: Runtime, options: CallOptions) {
