@@ -261,7 +261,15 @@ function setEnvScoped(key: string, value: string) {
 }
 
 describe("provider HttpApi", () => {
-  it.instance.skip(
+  // `ProviderHandler.provider.get` is the only producer of `ProviderNotFoundError` in the repo
+  // (`packages/server/src/handlers/provider.ts:24`), and that error is the only thing that carries a
+  // 404 for a provider -- it is declared `{ httpApiStatus: 404 }` and nothing else produces that
+  // status on this route. So the shape asserted here is the contract: the `_tag` is what the effect
+  // httpapi encoder keys the status off, and a change that renames the class, drops the `providerID`
+  // field, or forgets the status annotation would turn this into a 500 with an opaque body. This test
+  // was skipped rather than kept current when the v2 surface landed, so the only coverage of the
+  // route's failure path was nothing at all.
+  it.instance(
     "returns public v2 provider not found errors",
     Effect.gen(function* () {
       const directory = (yield* TestInstance).directory
