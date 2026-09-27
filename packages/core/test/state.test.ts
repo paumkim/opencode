@@ -112,4 +112,41 @@ describe("State", () => {
       expect(finalized).toBe(2)
     }),
   )
+
+  it.effect("materializes a transform registered by a fiber that outlives its batch", () =>
+    Effect.gen(function* () {
+      const state = State.create({
+        initial: () => ({ values: [] as string[] }),
+        draft: (draft) => ({ add: (value: string) => draft.values.push(value) }),
+      })
+
+      const started = yield* Deferred.make<void>()
+      const go = yield* Deferred.make<void>()
+
+      // A plugin may fork while a batch is open and finish loading later. The forked fiber
+      // inherits the batch reference, but the batch has already drained by then, so queueing the
+      // reload on it would drop the transform: the domain would never rebuild and the plugin's
+      // contribution would silently never appear.
+      yield* State.batch(
+        Effect.gen(function* () {
+          yield* Effect.forkScoped(
+            Effect.gen(function* () {
+              yield* Deferred.await(go)
+              yield* state.transform((draft) => {
+                draft.add("forked")
+              })
+              yield* Deferred.succeed(started, undefined)
+            }),
+          )
+        }),
+      )
+
+      // The enclosing batch is over before the fork registers anything.
+      expect(state.get().values).toEqual([])
+
+      yield* Deferred.succeed(go, undefined)
+      yield* Deferred.await(started)
+      expect(state.get().values).toEqual(["forked"])
+    }),
+  )
 })
