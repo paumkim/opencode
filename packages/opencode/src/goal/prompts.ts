@@ -78,6 +78,7 @@ Continuation behavior:
 - This goal persists across turns. Ending this turn does not require shrinking the objective to what fits now.
 - Keep the full objective intact. If it cannot be finished now, make concrete progress toward the real requested end state.
 - Temporary rough edges are acceptable while the work is moving in the right direction. Completion still requires the requested end state to be true and verified.
+- Long runs: keep your context small. Call the \`compact\` tool (no permission needed, it preserves the goal and committed work) when the window is getting heavy, when tool output has piled up, or when you move to a new unit of work. Every turn re-processes the whole window, so an unpruned context is the main reason a long goal starts responding slowly.
 
 Budget:
 ${budgetLines(goal)}
