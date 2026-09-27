@@ -163,8 +163,13 @@ export const DEFAULT_THEMES: Record<string, ThemeJson> = {
   carbonfox,
 }
 
-const pluginThemes: Record<string, ThemeJson> = {}
-let customThemes: Record<string, ThemeJson> = {}
+// Null-prototype registries. Theme names come from theme file names and from
+// plugin-supplied `addTheme`/`upsertTheme` calls, so a name can collide with an
+// Object.prototype member. `hasTheme("constructor")` was reporting true (so
+// addTheme refused it) and `upsertTheme` wrote to the wrong store, because both
+// used bare indexing.
+const pluginThemes: Record<string, ThemeJson> = Object.create(null)
+let customThemes: Record<string, ThemeJson> = Object.create(null)
 let systemTheme: ThemeJson | undefined
 const listeners = new Set<(themes: Record<string, ThemeJson>) => void>()
 
@@ -174,6 +179,15 @@ export function resolveTheme(theme: ThemeJson, mode: "dark" | "light") {
   let modeCache = _resolveThemeCache.get(theme)
   const cached = modeCache?.get(mode)
   if (cached) return cached
+
+  // Own-property lookups, not bare indexing. `defs` and `theme.theme` are
+  // Records parsed from a theme JSON on disk, and a reference name is any
+  // string, so `defs["constructor"]` returned the inherited `Object` function.
+  // That passed the `undefined` check and then fell through to the variant
+  // branch, reading `.dark` off a function and dying with an opaque TypeError
+  // instead of "Color reference not found".
+  const resolveRef = (record: Record<string, unknown>, key: string) =>
+    Object.hasOwn(record, key) ? record[key] : undefined
 
   const defs = theme.defs ?? {}
   function resolveColor(c: ColorValue, chain: string[] = []): RGBA {
@@ -187,7 +201,7 @@ export function resolveTheme(theme: ThemeJson, mode: "dark" | "light") {
         throw new Error(`Circular color reference: ${[...chain, c].join(" -> ")}`)
       }
 
-      const next = defs[c] ?? theme.theme[c as ThemeColor]
+      const next = resolveRef(defs, c) ?? resolveRef(theme.theme, c)
       if (next === undefined) {
         throw new Error(`Color reference "${c}" not found in defs or theme`)
       }
@@ -276,7 +290,10 @@ export function subscribeThemes(listener: (themes: Record<string, ThemeJson>) =>
 }
 
 export function setCustomThemes(themes: Record<string, ThemeJson>) {
-  customThemes = themes
+  // Copied into a null-prototype record rather than aliased: the caller supplies
+  // a plain object, and a custom theme file named after an Object.prototype
+  // member would otherwise be visible to every bare-index lookup below.
+  customThemes = Object.assign(Object.create(null), themes)
   syncThemes()
 }
 
@@ -287,7 +304,7 @@ export function setSystemTheme(theme: ThemeJson | undefined) {
 
 export function hasTheme(name: string) {
   if (!name) return false
-  return allThemes()[name] !== undefined
+  return Object.hasOwn(allThemes(), name)
 }
 
 export function addTheme(name: string, theme: unknown) {
@@ -302,7 +319,7 @@ export function addTheme(name: string, theme: unknown) {
 export function upsertTheme(name: string, theme: unknown) {
   if (!name) return false
   if (!isTheme(theme)) return false
-  if (customThemes[name] !== undefined) {
+  if (Object.hasOwn(customThemes, name)) {
     customThemes[name] = theme
   } else {
     pluginThemes[name] = theme
