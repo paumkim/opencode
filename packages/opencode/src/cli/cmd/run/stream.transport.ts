@@ -64,6 +64,25 @@ type Trace = {
   write(type: string, data?: unknown): void
 }
 
+/**
+ * Reads a list from the SDK, treating a typed HTTP failure as a failure.
+ *
+ * The generated client resolves typed failures into `.error` rather than
+ * rejecting, so `Effect.orElseSucceed` only ever caught transport errors. A
+ * 404, 500 or timeout resolved with `data: undefined`, and `?? []` turned that
+ * into an authoritative empty list — which for `permission.list` and
+ * `question.list` means a session with a blocked agent showing no prompt at
+ * all, and no way for the user to answer it.
+ *
+ * This exists so the bootstrap and replay paths cannot drift apart again: they
+ * read the same things, and only the replay ones used to check `.error`.
+ */
+export const readTypedList = <A, E, R>(
+  effect: Effect.Effect<{ data?: A; error?: E }, E, R>,
+  fallback: A,
+): Effect.Effect<A, E, R> =>
+  effect.pipe(Effect.flatMap((item) => (item.error ? Effect.fail(item.error) : Effect.succeed(item.data ?? fallback))))
+
 const StreamClosed = undefined as never
 
 type StreamInput = {
@@ -539,11 +558,13 @@ function createLayer(input: StreamInput) {
             return agent
           }
 
-          const list = yield* Effect.promise(() =>
-            input.sdk.app.agents(input.directory ? { directory: input.directory } : undefined, { throwOnError: true }),
-          ).pipe(
-            Effect.map((item) => item.data ?? []),
-            Effect.orElseSucceed(() => []),
+          const list = yield* readTypedList(
+            Effect.promise(() =>
+              input.sdk.app.agents(input.directory ? { directory: input.directory } : undefined, {
+                throwOnError: true,
+              }),
+            ),
+            [],
           )
           const next = list.find((item) => item.mode !== "subagent" && item.hidden !== true)?.name
           if (next) {
@@ -565,10 +586,10 @@ function createLayer(input: StreamInput) {
                 return
               }
 
-              const questions = yield* Effect.promise(() => input.sdk.question.list()).pipe(
-                Effect.map((item) => (item.data ?? []).filter((request) => request.sessionID === input.sessionID)),
-                Effect.orElseSucceed(() => []),
-              )
+              const questions = yield* readTypedList(
+                Effect.promise(() => input.sdk.question.list()),
+                [],
+              ).pipe(Effect.map((list) => list.filter((request) => request.sessionID === input.sessionID)))
               if (state.data.questions.length > 0 || !state.data.tools.has(partID)) {
                 return
               }
@@ -599,34 +620,39 @@ function createLayer(input: StreamInput) {
         })
 
         const messages = (sessionID: string, limit?: number) =>
-          Effect.promise(() =>
-            input.sdk.session.messages({
-              sessionID,
-              ...(typeof limit === "number" ? { limit } : {}),
-            }),
-          ).pipe(
-            Effect.map((item) => item.data ?? []),
-            Effect.orElseSucceed(() => []),
+          readTypedList(
+            Effect.promise(() =>
+              input.sdk.session.messages({
+                sessionID,
+                ...(typeof limit === "number" ? { limit } : {}),
+              }),
+            ),
+            [],
           )
 
         const replayMessages = () =>
-          Effect.promise(() =>
-            input.sdk.session.messages({
-              sessionID: input.sessionID,
-              ...(input.replayLimit === undefined
-                ? {}
-                : { limit: Math.max(input.replayLimit, SUBAGENT_BOOTSTRAP_LIMIT) }),
-            }),
-          ).pipe(Effect.flatMap((item) => (item.error ? Effect.fail(item.error) : Effect.succeed(item.data ?? []))))
+          readTypedList(
+            Effect.promise(() =>
+              input.sdk.session.messages({
+                sessionID: input.sessionID,
+                ...(input.replayLimit === undefined
+                  ? {}
+                  : { limit: Math.max(input.replayLimit, SUBAGENT_BOOTSTRAP_LIMIT) }),
+              }),
+            ),
+            [],
+          )
 
         const replayRequests = () =>
           Effect.all(
             [
-              Effect.promise(() => input.sdk.permission.list()).pipe(
-                Effect.flatMap((item) => (item.error ? Effect.fail(item.error) : Effect.succeed(item.data ?? []))),
+              readTypedList(
+                Effect.promise(() => input.sdk.permission.list()),
+                [],
               ),
-              Effect.promise(() => input.sdk.question.list()).pipe(
-                Effect.flatMap((item) => (item.error ? Effect.fail(item.error) : Effect.succeed(item.data ?? []))),
+              readTypedList(
+                Effect.promise(() => input.sdk.question.list()),
+                [],
               ),
             ],
             { concurrency: "unbounded" },
@@ -684,21 +710,21 @@ function createLayer(input: StreamInput) {
                     : Math.max(input.replayLimit, SUBAGENT_BOOTSTRAP_LIMIT)
                   : SUBAGENT_BOOTSTRAP_LIMIT,
               ),
-              Effect.promise(() =>
-                input.sdk.session.children({
-                  sessionID: input.sessionID,
-                }),
-              ).pipe(
-                Effect.map((item) => item.data ?? []),
-                Effect.orElseSucceed(() => []),
+              readTypedList(
+                Effect.promise(() =>
+                  input.sdk.session.children({
+                    sessionID: input.sessionID,
+                  }),
+                ),
+                [],
               ),
-              Effect.promise(() => input.sdk.permission.list()).pipe(
-                Effect.map((item) => item.data ?? []),
-                Effect.orElseSucceed(() => []),
+              readTypedList(
+                Effect.promise(() => input.sdk.permission.list()),
+                [],
               ),
-              Effect.promise(() => input.sdk.question.list()).pipe(
-                Effect.map((item) => item.data ?? []),
-                Effect.orElseSucceed(() => []),
+              readTypedList(
+                Effect.promise(() => input.sdk.question.list()),
+                [],
               ),
             ],
             {
