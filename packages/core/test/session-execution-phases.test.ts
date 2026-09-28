@@ -18,13 +18,13 @@ import { SessionRunCoordinator } from "@opencode-ai/core/session/run-coordinator
 import { FanoutDelivery } from "@opencode-ai/core/fanout/delivery"
 import { FanoutLedger } from "@opencode-ai/core/fanout/ledger"
 import { FanoutGroupTable, FanoutWorkerTable } from "@opencode-ai/core/fanout/sql"
-import { FanoutTool } from "@opencode-ai/core/tool/fanout"
 import { PermissionV2 } from "@opencode-ai/core/permission"
 import { ReferenceGuidance } from "@opencode-ai/core/reference/guidance"
 import { SessionRunnerModel } from "@opencode-ai/core/session/runner/model"
 import { SkillGuidance } from "@opencode-ai/core/skill/guidance"
 import { SystemContextRegistry } from "@opencode-ai/core/system-context/registry"
 import { Snapshot } from "@opencode-ai/core/snapshot"
+import { ToolRegistry } from "@opencode-ai/core/tool/registry"
 import { LocationServiceMap } from "@opencode-ai/core/location-service-map"
 import { buildLocationServiceMap } from "@opencode-ai/core/location-services"
 import { SessionExecution } from "@opencode-ai/core/session/execution"
@@ -48,6 +48,7 @@ import {
   systemContext,
 } from "./session-runner.fixture"
 import { testEffect } from "./lib/effect"
+import * as Crew from "./lib/crew"
 
 const assertions: PermissionV2.AssertInput[] = []
 const allowPermission = Layer.succeed(
@@ -109,6 +110,10 @@ process.on("exit", () => {
 const locationMap = buildLocationServiceMap([
   [LayerNodePlatform.llmClient, client],
   [Config.node, config],
+  // THE LINE UNDER TEST: the crew tool reaches the parent through the real
+  // Location graph, so the tool really is a Location tool settled by the real
+  // `SessionRunner` inside a real parent turn rather than called directly.
+  [ToolRegistry.toolsNode, Crew.tools],
   [PermissionV2.node, allowPermission],
   [ReferenceGuidance.node, referenceGuidance],
   [SessionRunnerModel.node, models],
@@ -169,7 +174,7 @@ const callFanout = () => [
   LLMEvent.stepStart({ index: 0 }),
   LLMEvent.toolCall({
     id: "call-fanout",
-    name: FanoutTool.name,
+    name: Crew.name,
     input: {
       title: "audit",
       workers: [
@@ -256,7 +261,7 @@ describe("fan-out from a real parent turn", () => {
       expect((yield* jobs.list()).map((job) => job.status)).toEqual(["running", "running"])
       // What the parent read back: the crew is running, not the crew's output.
       expect(JSON.stringify(State.requests[1]?.messages)).toContain("running in the background")
-      expect(assertions).toMatchObject([{ sessionID, action: FanoutTool.name, resources: ["*"] }])
+      expect(assertions).toMatchObject([{ sessionID, action: Crew.name, resources: ["*"] }])
       // The parent's turn really is a completed turn, with the crew still live.
       // The parent's turn really is a completed turn, and the tool's own answer
       // -- the one the model read back -- reports a crew that is still running.
@@ -268,7 +273,7 @@ describe("fan-out from a real parent turn", () => {
           content: [
             {
               type: "tool",
-              name: FanoutTool.name,
+              name: Crew.name,
               state: {
                 status: "completed",
                 content: [{ type: "text", text: expect.stringContaining("running in the background") }],

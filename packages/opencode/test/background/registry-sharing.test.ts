@@ -12,18 +12,17 @@ import { Config } from "@opencode-ai/core/config"
 import { PermissionV2 } from "@opencode-ai/core/permission"
 import { SessionRunnerModel } from "@opencode-ai/core/session/runner/model"
 import { Snapshot } from "@opencode-ai/core/snapshot"
-import { FanoutTool } from "@opencode-ai/core/tool/fanout"
 import { BackgroundJob } from "@/background/job"
 import { locationServiceReplacements } from "@/server/routes/instance/httpapi/server"
 import { testEffect } from "../lib/effect"
 
 /**
- * `FanoutTool` is a Location node, so it reaches `BackgroundJob` through the
- * Location graph's own hoisted globals -- a graph `LayerNode.compile` builds
- * independently of the application group. Two graphs means two registries, and a
- * v1 abort of a parent session enumerates the application graph's registry to
- * cancel its background work, so a crew the tool started would be invisible to
- * it.
+ * A Location-scoped tool reaches `BackgroundJob` through the Location graph's
+ * own hoisted globals -- a graph `LayerNode.compile` builds independently of the
+ * application group. Two graphs means two registries, and a v1 abort of a parent
+ * session enumerates the application graph's registry to cancel its background
+ * work, so a background job started from inside a Location graph would be
+ * invisible to it.
  *
  * Both graphs are built here, exactly as production builds them, and the
  * assertion is that a job registered from inside the Location graph is visible
@@ -65,14 +64,14 @@ describe("BackgroundJob registry sharing", () => {
       const locations = yield* LocationServiceMap.Service
       const ref = Location.Ref.make({ directory })
 
-      // Register from inside the Location graph, the way `FanoutTool` does. A
+      // Register from inside the Location graph, the way a Location tool does. A
       // Location-scoped caller has no `InstanceRef`, so this also covers the
       // registry keying that has to survive it.
       yield* Effect.gen(function* () {
         const registry = yield* BackgroundJob.Service
         yield* registry.start({
           id: "ses_child",
-          type: FanoutTool.name,
+          type: "crew",
           metadata: { sessionId: "ses_child", parentSessionId: "ses_parent" },
           run: Effect.never,
         })

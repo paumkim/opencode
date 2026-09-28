@@ -11,8 +11,6 @@ import { Database } from "@opencode-ai/core/database/database"
 import { FanoutDelivery } from "@opencode-ai/core/fanout/delivery"
 import { FanoutLedger } from "@opencode-ai/core/fanout/ledger"
 import { FanoutGroupTable, FanoutWorkerTable } from "@opencode-ai/core/fanout/sql"
-import { FanoutTool } from "@opencode-ai/core/tool/fanout"
-import { ToolRegistry } from "@opencode-ai/core/tool/registry"
 import { PermissionV2 } from "@opencode-ai/core/permission"
 import { Snapshot } from "@opencode-ai/core/snapshot"
 import { SessionEvent } from "@opencode-ai/core/session/event"
@@ -27,7 +25,6 @@ import { SkillGuidance } from "@opencode-ai/core/skill/guidance"
 import { SystemContextRegistry } from "@opencode-ai/core/system-context/registry"
 import {
   AbsolutePath,
-  ApplicationTools,
   AgentV2,
   DateTime,
   EventV2,
@@ -50,7 +47,7 @@ import {
   type LLMRequest,
 } from "./session-runner.fixture"
 import { testEffect } from "./lib/effect"
-import { settleTool, toolIdentity } from "./lib/tool"
+import { crewServices, launchCrew } from "./lib/crew"
 
 const assertions: PermissionV2.AssertInput[] = []
 const allowPermission = Layer.succeed(
@@ -73,12 +70,9 @@ const it = testEffect(
     LayerNode.group([
       Database.node,
       EventV2.node,
-      ApplicationTools.node,
       SessionProjector.node,
       SessionStore.node,
       AgentV2.node,
-      ToolRegistry.node,
-      ToolRegistry.toolsNode,
       SessionRunnerModel.node,
       SystemContextRegistry.node,
       SkillGuidance.node,
@@ -89,7 +83,6 @@ const it = testEffect(
       SessionExecution.node,
       SessionV2.node,
       BackgroundJob.node,
-      FanoutTool.node,
       FanoutDelivery.node,
     ]),
     [
@@ -116,12 +109,6 @@ const eventually = <A, R>(effect: Effect.Effect<A, never, R>, accept: (value: A)
   )
 
 const say = (id: string, text: string) => fragmentFixture("text", id, [text]).completeEvents
-
-const call = (input: FanoutTool.Input) => ({
-  sessionID,
-  ...toolIdentity,
-  call: { type: "tool-call" as const, id: "call-fanout", name: FanoutTool.name, input },
-})
 
 const crew = (count: number) => ({
   title: "audit",
@@ -162,25 +149,23 @@ const compact = Effect.fn(function* (summary: string) {
 })
 
 /**
- * Launches a real crew through the real tool, so every worker is a genuine
- * `SessionV1.Event.Created` child session with `parentID` set, owned by a
- * background job, and still mid-flight behind `gate`.
+ * Launches a real crew, so every worker is a genuine `SessionV1.Event.Created`
+ * child session with `parentID` set, owned by a background job, and still
+ * mid-flight behind `gate`.
  *
  * The gate is read when a worker's stream is called, which happens before
- * `settleTool` returns, so clearing `State.streamGate` afterwards releases the
+ * `launchCrew` returns, so clearing `State.streamGate` afterwards releases the
  * parent's own turns without letting the workers answer.
  */
 const launch = (digests: readonly string[]) =>
   Effect.gen(function* () {
-    const registry = yield* ToolRegistry.Service
     const gate = yield* Deferred.make<void>()
     State.responses = [
       ...digests.map((digest, index) => say(`worker-${index}`, digest)),
       ...Array.from({ length: 8 }, () => say("parent", "Noted, thanks.")),
     ]
     State.streamGate = gate
-    const settled = yield* settleTool(registry, call(crew(digests.length)))
-    expect(settled.result.type).toBe("text")
+    yield* launchCrew(yield* crewServices, { ...crew(digests.length), parent: sessionID })
     const { db } = yield* Database.Service
     const rows = yield* db.select().from(FanoutWorkerTable).all().pipe(Effect.orDie)
     expect(rows).toHaveLength(digests.length)
