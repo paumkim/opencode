@@ -33,6 +33,7 @@ import path from "path"
 import { useKV } from "./kv"
 import { usePermission } from "./permission"
 import { useOptionalSharedWorkspace } from "./shared-workspace"
+import { readRemote, type Read } from "../util/read-remote"
 
 const emptyConsoleState: ConsoleState = {
   consoleManagedProviders: [],
@@ -58,6 +59,67 @@ function compareMessage(a: Message, b: Message) {
 
 const messageKey = (message: Message) => message.time.created + message.id
 
+type SyncStore = {
+  status: "loading" | "partial" | "complete"
+  provider: Provider[]
+  provider_default: Record<string, string>
+  provider_next: ProviderListResponse
+  console_state: ConsoleState
+  capabilities: {
+    experimentalBackgroundSubagents: boolean
+  }
+  provider_auth: Record<string, ProviderAuthMethod[]>
+  agent: Agent[]
+  command: Command[]
+  permission: {
+    [sessionID: string]: PermissionRequest[]
+  }
+  question: {
+    [sessionID: string]: QuestionRequest[]
+  }
+  config: Config
+  session: Session[]
+  session_status: {
+    [sessionID: string]: SessionStatus
+  }
+  session_diff: {
+    [sessionID: string]: SnapshotFileDiff[]
+  }
+  todo: {
+    [sessionID: string]: Todo[]
+  }
+  message: {
+    [sessionID: string]: Message[]
+  }
+  part: {
+    [messageID: string]: Part[]
+  }
+  lsp: LspStatus[]
+  mcp: {
+    [key: string]: McpStatus
+  }
+  mcp_resource: {
+    [key: string]: McpResource
+  }
+  formatter: FormatterStatus[]
+  vcs: VcsInfo | undefined
+  /**
+   * Which capability reads could not be completed, and why. A capability that
+   * is absent from this record was genuinely empty; one present here is
+   * *unknown*, and the UI must not claim it has none.
+   */
+  unreadable: {
+    command?: string
+    lsp?: string
+    mcp?: string
+    mcp_resource?: string
+    formatter?: string
+    session_status?: string
+    provider_auth?: string
+    vcs?: string
+  }
+}
+
 export const {
   context: SyncContext,
   use: useSync,
@@ -68,51 +130,7 @@ export const {
     const startup = useTuiStartup()
     const kv = useKV()
     const permission = usePermission()
-    const [store, setStore] = createStore<{
-      status: "loading" | "partial" | "complete"
-      provider: Provider[]
-      provider_default: Record<string, string>
-      provider_next: ProviderListResponse
-      console_state: ConsoleState
-      capabilities: {
-        experimentalBackgroundSubagents: boolean
-      }
-      provider_auth: Record<string, ProviderAuthMethod[]>
-      agent: Agent[]
-      command: Command[]
-      permission: {
-        [sessionID: string]: PermissionRequest[]
-      }
-      question: {
-        [sessionID: string]: QuestionRequest[]
-      }
-      config: Config
-      session: Session[]
-      session_status: {
-        [sessionID: string]: SessionStatus
-      }
-      session_diff: {
-        [sessionID: string]: SnapshotFileDiff[]
-      }
-      todo: {
-        [sessionID: string]: Todo[]
-      }
-      message: {
-        [sessionID: string]: Message[]
-      }
-      part: {
-        [messageID: string]: Part[]
-      }
-      lsp: LspStatus[]
-      mcp: {
-        [key: string]: McpStatus
-      }
-      mcp_resource: {
-        [key: string]: McpResource
-      }
-      formatter: FormatterStatus[]
-      vcs: VcsInfo | undefined
-    }>({
+    const [store, setStore] = createStore<SyncStore>({
       provider_next: {
         all: [],
         default: {},
@@ -142,6 +160,7 @@ export const {
       mcp_resource: {},
       formatter: [],
       vcs: undefined,
+      unreadable: {},
     })
 
     const event = useEvent()
@@ -524,21 +543,56 @@ export const {
         .then(() => {
           if (store.status !== "complete") setStore("status", "partial")
           // non-blocking
+          // Each read below used to end in `x.data ?? []`, which made a server
+          // that could not be reached indistinguishable from one that genuinely
+          // has nothing configured. A failed `mcp.status` rendered as "No MCP
+          // Servers" and a failed `command.list` as "no custom commands" — a
+          // claim about the user's setup, drawn from a read that never landed.
+          // `record` keeps the two apart so the UI can say "unknown" instead.
+          const record = <K extends keyof SyncStore["unreadable"]>(key: K, result: Read<unknown>) => {
+            batch(() => {
+              if (result.ok) {
+                setStore("unreadable", key, undefined)
+                return
+              }
+              setStore("unreadable", key, result.reason)
+            })
+          }
           void Promise.all([
             ...(args.continue ? [] : [sessionListPromise.then((sessions) => setStore("session", reconcile(sessions)))]),
             consoleStatePromise.then((consoleState) => setStore("console_state", reconcile(consoleState))),
-            sdk.client.command.list({ workspace }).then((x) => setStore("command", reconcile(x.data ?? []))),
-            sdk.client.lsp.status({ workspace }).then((x) => setStore("lsp", reconcile(x.data ?? []))),
-            sdk.client.mcp.status({ workspace }).then((x) => setStore("mcp", reconcile(x.data ?? {}))),
-            sdk.client.experimental.resource
-              .list({ workspace })
-              .then((x) => setStore("mcp_resource", reconcile(x.data ?? {}))),
-            sdk.client.formatter.status({ workspace }).then((x) => setStore("formatter", reconcile(x.data ?? []))),
-            sdk.client.session.status({ workspace }).then((x) => {
-              setStore("session_status", reconcile(x.data ?? {}))
+            readRemote(() => sdk.client.command.list({ workspace }), []).then((x) => {
+              if (x.ok) setStore("command", reconcile(x.data))
+              record("command", x)
             }),
-            sdk.client.provider.auth({ workspace }).then((x) => setStore("provider_auth", reconcile(x.data ?? {}))),
-            sdk.client.vcs.get({ workspace }).then((x) => setStore("vcs", reconcile(x.data))),
+            readRemote(() => sdk.client.lsp.status({ workspace }), []).then((x) => {
+              if (x.ok) setStore("lsp", reconcile(x.data))
+              record("lsp", x)
+            }),
+            readRemote(() => sdk.client.mcp.status({ workspace }), {}).then((x) => {
+              if (x.ok) setStore("mcp", reconcile(x.data))
+              record("mcp", x)
+            }),
+            readRemote(() => sdk.client.experimental.resource.list({ workspace }), {}).then((x) => {
+              if (x.ok) setStore("mcp_resource", reconcile(x.data))
+              record("mcp_resource", x)
+            }),
+            readRemote(() => sdk.client.formatter.status({ workspace }), []).then((x) => {
+              if (x.ok) setStore("formatter", reconcile(x.data))
+              record("formatter", x)
+            }),
+            readRemote(() => sdk.client.session.status({ workspace }), {}).then((x) => {
+              if (x.ok) setStore("session_status", reconcile(x.data))
+              record("session_status", x)
+            }),
+            readRemote(() => sdk.client.provider.auth({ workspace }), {}).then((x) => {
+              if (x.ok) setStore("provider_auth", reconcile(x.data))
+              record("provider_auth", x)
+            }),
+            readRemote(() => sdk.client.vcs.get({ workspace }), undefined).then((x) => {
+              if (x.ok) setStore("vcs", reconcile(x.data))
+              record("vcs", x)
+            }),
             project.workspace.sync(),
           ]).then(() => {
             setStore("status", "complete")
