@@ -11,6 +11,7 @@ const sync = await import("../../src/context/sync")
 const theme = await import("../../src/context/theme")
 
 type Unreadable = {
+  session?: string
   command?: string
   lsp?: string
   mcp?: string
@@ -95,4 +96,55 @@ test("one failed capability does not hide the others", async () => {
   })
   expect(text).toContain("1 MCP Servers")
   expect(text).toContain("Formatters unavailable: ETIMEDOUT")
+})
+
+// Five of the nine recorded failures had no reader at all. A failed
+// `session.status` read in particular leaves a running background subagent
+// displaying as stopped, because the code requires a defined status before
+// treating one as anything but idle — and a failed `command.list` removes
+// slash-command completion. Both were invisible.
+test("a failed session.status read is reported", async () => {
+  const text = await frame({ mcp: {}, unreadable: { session_status: "connection refused" } })
+  expect(text).toContain("Could not read")
+  expect(text).toContain("Session status: connection refused")
+})
+
+test("a failed command read is reported", async () => {
+  const text = await frame({ mcp: {}, unreadable: { command: "timed out" } })
+  expect(text).toContain("Custom commands: timed out")
+})
+
+test("every unread key is reported, not a hand-picked few", async () => {
+  const text = await frame({
+    mcp: {},
+    unreadable: {
+      command: "e1",
+      mcp_resource: "e2",
+      session_status: "e3",
+      provider_auth: "e4",
+      vcs: "e5",
+    },
+  })
+  for (const label of [
+    "Custom commands: e1",
+    "MCP resources: e2",
+    "Session status: e3",
+    "Provider auth methods: e4",
+    "Branch: e5",
+  ]) {
+    expect(text).toContain(label)
+  }
+})
+
+// mcp/lsp/formatter already have their own sections, and the session read is
+// shown in the session list dialog, so none of them should be listed twice.
+test("reads with their own section are not listed twice", async () => {
+  const text = await frame({
+    mcp: {},
+    unreadable: { mcp: "mcp failed", lsp: "lsp failed", formatter: "fmt failed", session: "session failed" },
+  })
+  expect(text).toContain("MCP Servers unavailable: mcp failed")
+  expect(text).toContain("LSP Servers unavailable: lsp failed")
+  expect(text).toContain("Formatters unavailable: fmt failed")
+  expect(text).not.toContain("Could not read")
 })

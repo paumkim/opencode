@@ -45,6 +45,62 @@ function Capability(props: {
   )
 }
 
+/**
+ * Human names for reads that have no list of their own to annotate. The
+ * capability sections above cover mcp, lsp and formatter; everything else
+ * recorded a failure here rather than pretending it had nothing.
+ */
+const READ_LABELS: Record<string, string> = {
+  command: "Custom commands",
+  mcp_resource: "MCP resources",
+  session_status: "Session status",
+  provider_auth: "Provider auth methods",
+  vcs: "Branch",
+  session: "Session list",
+}
+
+/** Keys already given their own section above, so they are not listed twice. */
+const SHOWN_ELSEWHERE = new Set(["mcp", "lsp", "formatter"])
+
+/**
+ * Reports every recorded read failure this dialog does not already show.
+ *
+ * Five of the nine recorded failures had no reader anywhere: a failed
+ * `session.status` read leaves a running background subagent displaying as
+ * stopped, and a failed `command.list` silently removes slash-command
+ * completion — both with nothing on screen explaining why. Deriving the list
+ * from the store rather than a hand-maintained subset means a read cannot be
+ * added later and quietly become invisible again.
+ *
+ * `session` and the project read are shown in the session list dialog, where
+ * the staleness actually matters, so they are not repeated here.
+ */
+function UnreadableReads() {
+  const sync = useSync()
+  const { theme } = useTheme()
+  const failures = createMemo(() =>
+    Object.entries(sync.data.unreadable)
+      .filter(([key, reason]) => reason !== undefined && !SHOWN_ELSEWHERE.has(key) && key !== "session")
+      .map(([key, reason]) => ({ label: READ_LABELS[key] ?? key, reason: reason as string })),
+  )
+  return (
+    <Show when={failures().length > 0}>
+      <box flexDirection="column">
+        <text fg={theme.text} attributes={TextAttributes.BOLD}>
+          Could not read
+        </text>
+        <For each={failures()}>
+          {(item) => (
+            <text fg={theme.warning} wrapMode="word">
+              • {item.label}: {item.reason}
+            </text>
+          )}
+        </For>
+      </box>
+    </Show>
+  )
+}
+
 export function DialogStatus() {
   const sync = useSync()
   const { theme } = useTheme()
@@ -207,6 +263,7 @@ export function DialogStatus() {
           </For>
         </box>
       </Show>
+      <UnreadableReads />
     </box>
   )
 }
