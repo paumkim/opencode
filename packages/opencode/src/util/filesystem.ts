@@ -6,6 +6,7 @@ import { Readable } from "stream"
 import { pipeline } from "stream/promises"
 import { Glob } from "@opencode-ai/core/util/glob"
 import { FSUtil } from "@opencode-ai/core/fs-util"
+import { errorMessage } from "@/util/error"
 import { fileURLToPath } from "url"
 
 // Fast sync version for metadata checks
@@ -169,6 +170,33 @@ export function overlaps(a: string, b: string) {
 
 export function contains(parent: string, child: string) {
   return FSUtil.contains(parent, child)
+}
+
+/**
+ * Describes why an `FSUtil` read failed, reaching into a `PlatformError`'s cause.
+ *
+ * `errorMessage` on a `PlatformError` yields its tag and method ("NotFound: FileSystem.readFile
+ * (...)") but not the underlying errno, so a `PermissionDenied` reported as "PermissionDenied" tells a
+ * reader nothing they did not already know. The cause carries "EACCES: permission denied", which is
+ * the part that identifies the problem.
+ *
+ * This lives here rather than beside either caller because two of them needed it: refusing to write
+ * `model.json` over an unreadable file, and refusing to pick a model from an unreadable one. A private
+ * copy in each would be the second convention for the same answer.
+ */
+export function describeReadFailure(cause: unknown) {
+  const message = errorMessage(cause)
+  // A `PlatformError` nests the specific failure at `reason.cause`, and that is where the errno
+  // lives. Without walking in, the message reads "PermissionDenied: FileSystem.readJson (model.json)"
+  // - which names the operation but not the cause, so a reader learns nothing they did not already
+  // know from the fact that the read failed.
+  const reason = (cause as { reason?: { cause?: unknown } } | undefined)?.reason
+  const errno = (reason?.cause ?? (cause as { cause?: unknown } | undefined)?.cause) as
+    | { code?: unknown; message?: unknown }
+    | undefined
+  if (!errno) return message
+  const detail = typeof errno.code === "string" ? errno.code : errorMessage(errno)
+  return message.includes(detail) ? message : `${message} (${detail})`
 }
 
 export async function findUp(
