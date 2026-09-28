@@ -113,6 +113,15 @@ async function corpus() {
 
 const DECLARATION = /^export\s+(?:async\s+)?(?:function|const|class|let)\s+([A-Za-z_$][\w$]*)/gm
 
+// A module's name is its basename with the extension removed, and the extension a specifier carries is
+// not necessarily the one the file has on disk. TypeScript sources here are written both ways: most
+// import `./shell`, but ESM-style `./values.js` is equally valid and is what `packages/codemode` uses
+// throughout. Stripping only ".ts" makes such a specifier read as the module name "values.js", so an
+// imported module looks like an orphan -- a false failure that would blame an import rather than the
+// guard. Every extension either side can be written is removed on both sides.
+const EXTENSION = /\.[cm]?[jt]sx?$/
+const moduleName = (specifier: string) => path.basename(specifier).replace(EXTENSION, "")
+
 describe("no dead exports in core", () => {
   test("every exported function or const in core/src is referenced somewhere", async () => {
     const { count, counts } = await corpus()
@@ -144,8 +153,7 @@ describe("no dead exports in core", () => {
     // its steps with `import(...)`, so matching only the first form reports every migration as an
     // orphan.
     for (const match of text.matchAll(/(?:\bfrom\s*|\bimport\s*\()\s*"([^"]+)"/g)) {
-      const specifier = match[1]!
-      imported.add(path.basename(specifier).replace(/\.ts$/, ""))
+      imported.add(moduleName(match[1]!))
     }
 
     const orphans: string[] = []
@@ -153,7 +161,7 @@ describe("no dead exports in core", () => {
       if (EXEMPT_FILES.has(file.relative)) continue
       if (BARRELS.test(path.basename(file.absolute))) continue
 
-      if (!imported.has(path.basename(file.absolute, ".ts"))) orphans.push(file.relative)
+      if (!imported.has(moduleName(file.absolute))) orphans.push(file.relative)
     }
     expect(orphans).toEqual([])
   })
