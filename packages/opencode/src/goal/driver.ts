@@ -325,6 +325,45 @@ function isIdleEvent(event: { type?: string; properties?: Record<string, unknown
   )
 }
 
+/**
+ * The server's own per-session status map - `GET /session/status`, one call covering every goal -
+ * or null when the lookup failed or came back in a shape this cannot read. Null is what lets a
+ * caller fall back to the local event cache rather than guess: "I could not ask" must never be
+ * read as "the answer was idle".
+ *
+ * An empty map is a real answer, not a failure. The server deletes a session's entry when it goes
+ * idle, so an empty map means nothing anywhere is busy.
+ */
+async function fetchSessionStatusMap(client: Client) {
+  try {
+    const result = await client.session.status()
+    // A non-2xx resolves as a result tuple carrying `error` rather than rejecting, so the catch
+    // below does not cover HTTP failures.
+    if ((result as { error?: unknown } | undefined)?.error) return null
+    const data = (result as { data?: unknown } | undefined)?.data
+    return isRecord(data) ? (data as Record<string, unknown>) : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Whether the server says this session is still working, or `null` when the server did not say.
+ * Absent means idle: the server drops the entry on idle, which is why its own `get` defaults to
+ * `{ type: "idle" }` (`src/session/status.ts`).
+ *
+ * `retry` counts as working, deliberately, because the local cache treats it that way too - a retry
+ * clears the turn watchdog but never removes the session from `busySessions`. A session sitting in
+ * a provider backoff is mid-turn, and prompting into it is a second prompt for one turn.
+ */
+function serverSaysBusy(statusMap: Record<string, unknown> | null, sessionID: string) {
+  if (!statusMap) return null
+  const status = statusMap[sessionID]
+  if (status === undefined) return false
+  if (!isRecord(status) || typeof status.type !== "string") return null
+  return status.type !== "idle"
+}
+
 function sessionIDFromEvent(event: { type?: string; properties?: Record<string, unknown> }) {
   const direct = event.properties?.sessionID
   if (typeof direct === "string") return direct
@@ -820,16 +859,55 @@ export function createGoalRuntime(input: { client: Client; options?: Options }):
    * the prompt-failure ladder all still apply. That last one is what stops a session whose turns
    * abort deterministically from hot-looping: each re-arm that fails counts as a continuation
    * failure and the goal eventually self-pauses.
+   *
+   * "Is this session still working" is asked of the SERVER, never of the local busy cache - see
+   * the guard inside for why that distinction is the whole fix.
    */
   async function sweepStalledGoals() {
     if (stallSweepMs == null) return
     const now = Math.floor(Date.now() / 1000)
     const state = await goalBookkeeping("readState", () => readState())
     if (!state) return
-    for (const goal of Object.values(state.goals)) {
-      if (goal.status !== "active") continue
+    const active = Object.values(state.goals).filter((goal) => goal.status === "active")
+    // Hoisted out of the loop so the round trip below is not paid by a deployment that never
+    // opened a goal: the timer is armed by `max_stall_before_continue` alone and runs forever.
+    if (active.length === 0) return
+    // ONE status lookup for every goal below - cheaper than the per-goal `client.session.get` this
+    // sweep already makes - and fetched up here rather than inside the loop so that handling a
+    // missing or unusable answer is written once instead of once per goal.
+    const statusMap = await fetchSessionStatusMap(client)
+    for (const goal of active) {
       const sessionID = goal.sessionID
-      if (busySessions.has(sessionID)) continue
+      // The local `busySessions` set is NOT authority on whether this session is still working, and
+      // asking it here is what left this sweep unable to fire in the one case it exists for.
+      //
+      // It is a cache of EVENTS: an entry goes in on a `session.status` event reporting `busy` and
+      // comes out only on an idle event or a delete. The failure this sweep was written for is a
+      // turn that ABORTS - observed live, aborting inside session compaction - which ends the busy
+      // state without ever publishing idle. Under exactly that hypothesis the clearing event never
+      // arrives, so the cache holds the session forever and this guard skips it forever: the set
+      // re-creates the condition the sweep exists to detect, and the guard is why the net could not
+      // catch it. The goal then reads as perfectly healthy from the outside - `status: active`,
+      // `autoTurns: 0`, `lastStatus: "Goal set."`, `noProgressTurns: 0/8` - while doing nothing at
+      // all, 351s past a 5m `max_stall_before_continue` with nothing left to re-arm it (the turn
+      // watchdog is inert here by design: `max_turn_time` was unset, only the stall threshold set).
+      //
+      // The server's status map is the authority that does not depend on an event arriving. It is
+      // answered from live in-memory state, an aborted turn is absent from it, and the answer then
+      // contradicts the cache - which is the rescue path, and the reason this fix exists.
+      //
+      // `null` means the server gave no readable answer, and then the cache is the only evidence
+      // there is. Its answer is the conservative one, so a failed lookup can only ever skip a goal,
+      // never dispatch into a session that is genuinely working.
+      if (serverSaysBusy(statusMap, sessionID) ?? busySessions.has(sessionID)) continue
+      // Reached only when the server says this session is NOT working, or said nothing and the
+      // cache already agreed. A local entry that contradicts the server is not "probably wrong":
+      // the server watched the turn end, so the entry is stale. It has to be DROPPED here, not just
+      // overruled for one call, because `runAutoContinue` - the dispatch this re-arm routes
+      // through - re-checks the same cache before it prompts, as do the idle path and the watchdog.
+      // Overruling it for a single call would skip the re-arm and rebuild the deadlock one call
+      // deeper; dropping it also stops the rest of the process believing a lie about the session.
+      busySessions.delete(sessionID)
       if (activeContinuations.has(sessionID)) continue
       if (scheduledContinuations.has(sessionID)) continue
       // Compared as a FRACTION of a second, not floored to whole seconds. Flooring turned every
