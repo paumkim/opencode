@@ -1,5 +1,3 @@
-export * as SessionExecutionLocal from "./local"
-
 import { Cause, Effect, Exit, Layer } from "effect"
 import { EventV2 } from "../../event"
 import { LocationServiceMap } from "../../location-service-map"
@@ -91,3 +89,5 @@ export const node = makeGlobalNode({
   layer,
   deps: [SessionStore.node, LocationServiceMap.node, EventV2.node],
 })
+
+export * as SessionExecutionLocal from "./local"
