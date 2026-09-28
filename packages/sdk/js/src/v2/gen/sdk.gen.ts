@@ -113,6 +113,8 @@ import type {
   McpStatusResponses,
   ModelRef,
   MoveSessionDestination,
+  NewsListErrors,
+  NewsListResponses,
   OutputFormat,
   Part as Part2,
   PartDeleteErrors,
@@ -223,6 +225,8 @@ import type {
   SessionUnshareResponses,
   SessionUpdateErrors,
   SessionUpdateResponses,
+  SharedWsErrors,
+  SharedWsResponses,
   SubtaskPartInput,
   SyncHistoryListErrors,
   SyncHistoryListResponses,
@@ -2527,6 +2531,20 @@ export class Mcp extends HeyApiClient {
   }
 }
 
+export class News extends HeyApiClient {
+  /**
+   * List news
+   *
+   * Get a curated list of recently released AI models from across providers.
+   */
+  public list<ThrowOnError extends boolean = false>(options?: Options<never, ThrowOnError>) {
+    return (options?.client ?? this.client).get<NewsListResponses, NewsListErrors, ThrowOnError>({
+      url: "/news",
+      ...options,
+    })
+  }
+}
+
 export class Project extends HeyApiClient {
   /**
    * List all projects
@@ -3116,14 +3134,14 @@ export class Permission extends HeyApiClient {
   /**
    * Respond to permission request
    *
-   * Approve or deny a permission request from the AI assistant.
+   * Approve or deny a permission request from the AI assistant, scoped to the session query parameter.
    */
   public reply<ThrowOnError extends boolean = false>(
     parameters: {
       requestID: string
-      sessionID: string
       directory?: string
       workspace?: string
+      sessionID: string
       reply?: "once" | "always" | "reject"
       message?: string
     },
@@ -3135,9 +3153,9 @@ export class Permission extends HeyApiClient {
         {
           args: [
             { in: "path", key: "requestID" },
-            { in: "query", key: "sessionID" },
             { in: "query", key: "directory" },
             { in: "query", key: "workspace" },
+            { in: "query", key: "sessionID" },
             { in: "body", key: "reply" },
             { in: "body", key: "message" },
           ],
@@ -4402,6 +4420,38 @@ export class Part extends HeyApiClient {
         ...options?.headers,
         ...params.headers,
       },
+    })
+  }
+}
+
+export class Shared extends HeyApiClient {
+  /**
+   * Shared workspace WebSocket
+   *
+   * WebSocket endpoint for multi-client shared workspace sessions
+   */
+  public ws<ThrowOnError extends boolean = false>(
+    parameters?: {
+      directory?: string
+      workspace?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).get<SharedWsResponses, SharedWsErrors, ThrowOnError>({
+      url: "/ws",
+      ...options,
+      ...params,
     })
   }
 }
@@ -7169,6 +7219,11 @@ export class OpencodeClient extends HeyApiClient {
     return (this._mcp ??= new Mcp({ client: this.client }))
   }
 
+  private _news?: News
+  get news(): News {
+    return (this._news ??= new News({ client: this.client }))
+  }
+
   private _project?: Project
   get project(): Project {
     return (this._project ??= new Project({ client: this.client }))
@@ -7202,6 +7257,11 @@ export class OpencodeClient extends HeyApiClient {
   private _part?: Part
   get part(): Part {
     return (this._part ??= new Part({ client: this.client }))
+  }
+
+  private _shared?: Shared
+  get shared(): Shared {
+    return (this._shared ??= new Shared({ client: this.client }))
   }
 
   private _sync?: Sync

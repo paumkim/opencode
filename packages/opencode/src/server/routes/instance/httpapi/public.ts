@@ -352,9 +352,38 @@ function normalizeLegacyErrorResponses(operation: OpenApiOperation) {
     operation.responses["404"] = legacyErrorResponse("Not found", "NotFoundError")
   }
 }
-
+// `/api/event` documents its 200 as a JSON string carrying the event union,
+// not as the union itself, so a generated client gets something it can iterate
+// rather than a union it cannot narrow. The `$ref` to `VStream` is written
+// unconditionally, so this has to define `VStream` for whichever spelling
+// HttpApi produced — otherwise the document ships a reference to a schema that
+// does not exist, and the SDK generator aborts on the dangling pointer instead
+// of regenerating.
+//
+// Two spellings reach here. HttpApi can leave the string wrapper as `V2Event`
+// with the union beside it as `V2Event1`, or it can unwrap the union itself and
+// emit `V2Event` for the union plus `V2EventStream` for the wrapper. Only the
+// first used to be handled, so the second left `VStream` undefined. Normalise
+// both to `V2Event` (the union) + `VStream` (the string wrapper), and drop a
+// wrapper that nothing points at any more.
 function fixV2EventSchemas(spec: OpenApiSpec) {
-  const schemas = spec.components?.schemas as Record<string, any> || {}; if (!schemas) return; const streamWrapper = schemas["V2Event"]; const eventUnion = schemas["V2Event1"]; if (streamWrapper && streamWrapper.type === "string" && eventUnion && eventUnion.anyOf) { schemas["V2Event"] = eventUnion; delete schemas["V2Event1"]; schemas["VStream"] = { type: "string", contentMediaType: "application/json", contentSchema: { $ref: "#/components/schemas/V2Event" } }; } }
+  const schemas = spec.components?.schemas as Record<string, any> | undefined
+  if (!schemas) return
+  const wrapper =
+    schemas["V2Event"]?.type === "string" ? "V2Event" : schemas["V2EventStream"] ? "V2EventStream" : undefined
+  if (!wrapper) return
+  const union = wrapper === "V2Event" ? schemas["V2Event1"] : schemas["V2Event"]
+  if (!union?.anyOf) return
+  schemas["V2Event"] = union
+  delete schemas["V2Event1"]
+  if (wrapper === "V2EventStream" && !referencesComponent(spec.paths, "V2EventStream")) delete schemas["V2EventStream"]
+  schemas["VStream"] = {
+    type: "string",
+    contentMediaType: "application/json",
+    contentSchema: { $ref: "#/components/schemas/V2Event" },
+  }
+}
+
 function deleteUnusedLegacyErrorComponents(spec: OpenApiSpec) {
   for (const name of [
     "Unauthorized",
