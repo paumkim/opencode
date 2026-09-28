@@ -601,11 +601,18 @@ const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Service | C
                   if (!refs.length) return new Map<string, { before: string; after: string }>()
 
                   const batch = yield* appProcess.run(
-                    ChildProcess.make("git", [...cfg, ...args(["cat-file", "--batch"])], {
+                    ChildProcess.make("git", [...cfg, ...args(["cat-file", "--batch", "-z"])], {
                       cwd: state.directory,
                       extendEnv: true,
                     }),
-                    { stdin: refs.map((item) => item.ref).join("\n") + "\n" },
+                    // NUL-delimited, because a filename may contain a newline --
+                    // a ref carrying one would be read as two requests, and both
+                    // would come back "missing" for a file that plainly exists.
+                    // -z makes the output byte-identical to the line-oriented form
+                    // (verified against git 2.55), so the parser below is unchanged.
+                    // An older git that rejects -z exits non-zero, which the
+                    // branch after this already turns into the same per-file fallback.
+                    { stdin: refs.map((item) => item.ref).join("\0") + "\0" },
                   )
                   if (batch.exitCode !== 0) {
                     yield* Effect.logInfo(
@@ -689,32 +696,51 @@ const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Service | C
               const result: FileDiff[] = []
               const status = new Map<string, "added" | "deleted" | "modified">()
 
+              // Both reads below are NUL-delimited, and that is not a formatting
+              // preference. Without -z git C-quotes any path containing a tab, a
+              // newline, a quote, or a backslash, and the quoted form is not a
+              // path: it is the key the diff is reported under, and it is what
+              // gets handed to `git show <rev>:<file>`, which then fails with
+              // "path ... does not exist". A file with an ordinary name looked
+              // up as `"tab\tfile.txt"` yields no content at all, silently.
               const statuses = yield* git(
-                [...quote, ...args(["diff", "--no-ext-diff", "--name-status", "--no-renames", from, to, "--", "."])],
+                [
+                  ...quote,
+                  ...args(["diff", "--no-ext-diff", "--name-status", "--no-renames", "-z", from, to, "--", "."]),
+                ],
                 { cwd: state.directory },
               )
 
-              for (const line of statuses.text.trim().split("\n")) {
-                if (!line) continue
-                const [code, file] = line.split("\t")
+              // --name-status -z emits `code NUL path NUL`, so every other record
+              // is a path and has a code before it.
+              const statusRecords = statuses.text.split("\0").filter(Boolean)
+              for (let i = 0; i < statusRecords.length; i += 2) {
+                const code = statusRecords[i]
+                const file = statusRecords[i + 1]
                 if (!code || !file) continue
                 status.set(file, code.startsWith("A") ? "added" : code.startsWith("D") ? "deleted" : "modified")
               }
 
               const numstat = yield* git(
-                [...quote, ...args(["diff", "--no-ext-diff", "--no-renames", "--numstat", from, to, "--", "."])],
+                [...quote, ...args(["diff", "--no-ext-diff", "--no-renames", "--numstat", "-z", from, to, "--", "."])],
                 {
                   cwd: state.directory,
                 },
               )
 
               const rows = numstat.text
-                .trim()
-                .split("\n")
+                .split("\0")
                 .filter(Boolean)
-                .flatMap((line) => {
-                  const [adds, dels, file] = line.split("\t")
+                .flatMap((record) => {
+                  // --numstat -z is `adds TAB dels TAB path NUL`, and the path may
+                  // itself contain tabs, so only the first two are separators.
+                  const a = record.indexOf("\t")
+                  const b = record.indexOf("\t", a + 1)
+                  if (a === -1 || b === -1) return []
+                  const file = record.slice(b + 1)
                   if (!file) return []
+                  const adds = record.slice(0, a)
+                  const dels = record.slice(a + 1, b)
                   const binary = adds === "-" && dels === "-"
                   const additions = binary ? 0 : parseInt(adds)
                   const deletions = binary ? 0 : parseInt(dels)

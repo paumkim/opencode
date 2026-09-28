@@ -5,7 +5,7 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import fs from "fs/promises"
 import path from "path"
-import { Effect, Fiber, Layer } from "effect"
+import { Effect, Fiber, Layer, Logger } from "effect"
 import { Snapshot } from "../../src/snapshot"
 import {
   disposeAllInstances,
@@ -21,6 +21,10 @@ const it = testEffect(
 )
 // Windows forbids both * and : in directory names.
 const nonWindowsIt = process.platform === "win32" ? it.live.skip : it.live
+// Windows also forbids a tab in a filename, and git only quotes a path in
+// non-`-z` output when it needs to, so a tab is the one character that
+// separates "the file is named this" from "git is escaping a name to display".
+const nonWindowsInstance = process.platform === "win32" ? it.instance.skip : it.instance
 
 // Git always outputs /-separated paths internally. Snapshot.patch() joins them
 // with path.join (which produces \ on Windows) then normalizes back to /.
@@ -1121,6 +1125,95 @@ it.instance(
       expect(diffs[0].patch).toBe("")
     }),
   ),
+  { git: true },
+)
+
+nonWindowsInstance(
+  "diffFull reports the real name of a file git has to quote",
+  Effect.gen(function* () {
+    const tmp = yield* bootstrap()
+    const snapshot = yield* Snapshot.Service
+    const quoted = "tab\tfile.txt"
+    yield* write(`${tmp.path}/${quoted}`, "before\n")
+    const before = yield* snapshot.track()
+    expect(before).toBeTruthy()
+    yield* write(`${tmp.path}/${quoted}`, "after\n")
+    const after = yield* snapshot.track()
+    expect(after).toBeTruthy()
+
+    const diffs = yield* snapshot.diffFull(before!, after!)
+    expect(diffs.length).toBe(1)
+    // The name git prints under -z is the name on disk. The display-quoted form
+    // is not a path anything can act on: `git show HEAD:"tab\tfile.txt"` fails
+    // with "does not exist", so a diff built from it carries no content.
+    expect(diffs[0].file).toBe(quoted)
+    expect(diffs[0].patch).toContain("-before")
+    expect(diffs[0].patch).toContain("+after")
+  }),
+  { git: true },
+)
+
+nonWindowsInstance(
+  "diffFull reports the real name of a file with a quote in it",
+  Effect.gen(function* () {
+    const tmp = yield* bootstrap()
+    const snapshot = yield* Snapshot.Service
+    const quoted = 'quote"file.txt'
+    yield* write(`${tmp.path}/${quoted}`, "before\n")
+    const before = yield* snapshot.track()
+    expect(before).toBeTruthy()
+    yield* write(`${tmp.path}/${quoted}`, "after\n")
+    const after = yield* snapshot.track()
+    expect(after).toBeTruthy()
+
+    const diffs = yield* snapshot.diffFull(before!, after!)
+    expect(diffs.length).toBe(1)
+    expect(diffs[0].file).toBe(quoted)
+    expect(diffs[0].patch).toContain("-before")
+    expect(diffs[0].patch).toContain("+after")
+  }),
+  { git: true },
+)
+
+nonWindowsInstance(
+  "diffFull reports the real name of a file with a newline in it",
+  Effect.gen(function* () {
+    const tmp = yield* bootstrap()
+    const snapshot = yield* Snapshot.Service
+    const awkward = "new\nline.txt"
+    yield* write(`${tmp.path}/${awkward}`, "before\n")
+    const before = yield* snapshot.track()
+    expect(before).toBeTruthy()
+    yield* write(`${tmp.path}/${awkward}`, "after\n")
+    const after = yield* snapshot.track()
+    expect(after).toBeTruthy()
+
+    const messages: unknown[] = []
+    const diffs = yield* snapshot.diffFull(before!, after!).pipe(
+      Effect.provide(
+        Logger.layer([
+          Logger.make<unknown, void>((options) => {
+            messages.push(options.message)
+          }),
+        ]),
+      ),
+    )
+    expect(diffs.length).toBe(1)
+    expect(diffs[0].file).toBe(awkward)
+    // A ref carrying a newline is two requests to a line-oriented cat-file, and
+    // both answer "missing" for a file that exists. The diff still comes out
+    // right -- the per-file `git show` fallback rescues it -- so correctness
+    // cannot tell the two apart; this asserts the batch is not silently dropped,
+    // because a repo with such a file would otherwise pay a process per file on
+    // every diff for no visible reason.
+    expect(
+      messages.filter(
+        (item) => Array.isArray(item) && String(item[0]).includes("cat-file --batch") && item[0] !== undefined,
+      ),
+    ).toEqual([])
+    expect(diffs[0].patch).toContain("-before")
+    expect(diffs[0].patch).toContain("+after")
+  }),
   { git: true },
 )
 
