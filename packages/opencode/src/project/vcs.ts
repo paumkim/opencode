@@ -282,9 +282,9 @@ export interface Interface {
   readonly init: () => Effect.Effect<void>
   readonly branch: () => Effect.Effect<string | undefined>
   readonly defaultBranch: () => Effect.Effect<string | undefined>
-  readonly status: () => Effect.Effect<FileStatus[]>
-  readonly diff: (mode: Mode, options?: DiffOptions) => Effect.Effect<FileDiff[]>
-  readonly diffRaw: () => Effect.Effect<string>
+  readonly status: () => Effect.Effect<FileStatus[], Git.CommandError>
+  readonly diff: (mode: Mode, options?: DiffOptions) => Effect.Effect<FileDiff[], Git.CommandError>
+  readonly diffRaw: () => Effect.Effect<string, Git.CommandError>
   readonly apply: (input: ApplyInput) => Effect.Effect<ApplyResult, PatchApplyError>
 }
 
