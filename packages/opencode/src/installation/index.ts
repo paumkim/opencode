@@ -71,6 +71,33 @@ export class UpgradeFailedError extends Schema.TaggedErrorClass<UpgradeFailedErr
   }
 }
 
+/**
+ * Renders an upgrade failure as the reason a human would want logged.
+ *
+ * `UpgradeFailedError` overrides `message` to return the installer command's
+ * own stderr, so the interesting detail — a package manager needing an elevated
+ * shell, a full disk, a 404 — survives a plain `error.message` read. Going
+ * through this rather than `String(error)` also keeps the non-Error cases
+ * (a thrown string, a rejected value) from producing "[object Object]".
+ */
+export function describeUpgradeFailure(error: unknown): string {
+  // `error.name` rather than String(error) for the empty-message case:
+  // String(new Error("")) is "Error", but JSON.stringify of one is "{}",
+  // because Errors carry no enumerable own properties.
+  if (error instanceof Error) return error.message || error.name
+  if (typeof error === "string" && error) return error
+  if (typeof error === "object" && error !== null) {
+    // A rejected plain object is a plausible Effect defect, and String() on one
+    // is literally "[object Object]" — which would defeat the point of logging.
+    try {
+      return JSON.stringify(error) ?? String(error)
+    } catch {
+      return String(error)
+    }
+  }
+  return String(error)
+}
+
 // Response schemas for external version APIs
 const GitHubRelease = Schema.Struct({ tag_name: Schema.String })
 const NpmPackage = Schema.Struct({ version: Schema.String })

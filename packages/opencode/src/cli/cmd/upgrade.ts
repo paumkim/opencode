@@ -43,7 +43,17 @@ export const UpgradeCommand = {
       }
     }
     prompts.log.info("Using method: " + method)
-    const target = args.target ? args.target.replace(/^v/, "") : await Installation.latest()
+    // Unguarded until now: with no target this awaited the network, so a
+    // registry or GitHub hiccup rejected out of the command handler as a raw
+    // stack trace rather than the clean error every other failure here gets.
+    const target = args.target ? args.target.replace(/^v/, "") : await Installation.latest().catch((error) => error)
+    if (typeof target !== "string") {
+      prompts.log.error(
+        `Could not check the latest version: ${target instanceof Error ? target.message : String(target)}`,
+      )
+      prompts.outro("Done")
+      return
+    }
 
     if (InstallationVersion === target) {
       prompts.log.warn(`opencode upgrade skipped: ${target} is already installed`)
