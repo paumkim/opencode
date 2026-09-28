@@ -3,6 +3,7 @@ import { useSDK } from "./sdk"
 import type { EventSource } from "./sdk"
 import { useRoute } from "./route"
 import { useProject } from "./project"
+import { useToast } from "../ui/toast"
 import { createEffect, onCleanup } from "solid-js"
 
 export type SharedWorkspaceMessage =
@@ -36,6 +37,7 @@ export const { use: useSharedWorkspace, provider: SharedWorkspaceProvider, useOp
     const sdk = useSDK()
     const route = useRoute()
     const project = useProject()
+    const toast = useToast()
 
     let ws: WebSocket | undefined
     let connected = false
@@ -116,7 +118,7 @@ export const { use: useSharedWorkspace, provider: SharedWorkspaceProvider, useOp
           }
         }
 
-        socket.onclose = () => {
+        socket.onclose = (event) => {
           if (socketGeneration !== generation) return
           connected = false
           if (ws === socket) ws = undefined
@@ -124,7 +126,12 @@ export const { use: useSharedWorkspace, provider: SharedWorkspaceProvider, useOp
           timer = undefined
           if (!settled) {
             settled = true
-            reject(new Error("WebSocket connection failed"))
+            // The server closes with a reason when it will not honour a join - a failed session
+            // read, a session on another workspace. Waiting out the ten-second timeout to learn
+            // nothing was possible; the reason is already here. `reason` is empty for a normal
+            // end-of-stream, so the generic message still covers the ordinary case.
+            const reason = (event as CloseEvent).reason
+            reject(new Error(reason || "WebSocket connection failed"))
           }
         }
 
@@ -190,8 +197,14 @@ export const { use: useSharedWorkspace, provider: SharedWorkspaceProvider, useOp
             return
           }
           joinCleanup = cleanup
-        }).catch(() => {
-          // Connection failed, will retry on next route change
+        }).catch((error) => {
+          // The old comment here said "will retry on next route change", which is false in the
+          // only case that matters: the user is already on this route and will not leave it, so
+          // there is no next change and no retry. They were left sitting on a session that shows
+          // no live updates with nothing on screen to explain why.
+          if (disposed) return
+          const reason = error instanceof Error ? error.message : "could not connect to the shared workspace"
+          toast.show({ variant: "error", title: "Not watching this session live", message: reason })
         })
       }
     })
