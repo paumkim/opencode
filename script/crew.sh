@@ -68,9 +68,21 @@ resolve_opencode() {
 # here is what could put a window on a display the operator was not looking at,
 # and a window they cannot see is indistinguishable from a crew that never started.
 # Every caller goes through here so the env and the argv cannot drift apart again.
+#
+# `setsid` was here to detach the window from the launching shell, and on this
+# desktop it did the opposite of what the comment above warns about: the crew ran
+# fine and was invisible. A Wayland compositor presents a window in the session
+# that creates it, and `setsid` moves the process into a brand new session with
+# no controlling terminal and no activation token, so the window was created
+# where nothing could surface it. Verified on KDE Plasma: `setsid nohup ghostty`
+# produced a running ghostty process that never appeared, while a plain
+# `nohup ghostty` from the same shell appeared immediately. So the window stays
+# in the operator's own session - `nohup` and the redirected log still keep the
+# launching shell from blocking, and `stop` still works, because it signals the
+# pid this function returns.
 launch_window() {
   local name="$1" dir="$2" prompt="$3" logf="$4"
-  setsid nohup ghostty --title="agent-$name" \
+  nohup ghostty --title="agent-$name" \
     -e "${OPENCODE_CMD[@]}" "$dir" --auto --prompt "$prompt" \
     > "$logf" 2>&1 < /dev/null &
   echo $!
