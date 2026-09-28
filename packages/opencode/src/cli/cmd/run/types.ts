@@ -223,8 +223,11 @@ export type FooterOutput = {
 export type FooterEvent =
   | {
       type: "catalog"
-      agents: RunAgent[]
-      resources: RunResource[]
+      // `undefined` means the read failed, not that the list is empty. The
+      // footer keeps whatever it already had in that case, so a transient error
+      // cannot empty a picker.
+      agents?: RunAgent[]
+      resources?: RunResource[]
       commands?: RunCommand[]
     }
   | {
