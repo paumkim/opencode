@@ -28,6 +28,7 @@ import { INTERACTIVE_INPUT_ERROR, resolveInteractiveStdin } from "./run/runtime.
 import { AppRuntime } from "@/effect/app-runtime"
 import { Config } from "@/config/config"
 import { disposeAllInstancesAndEmitGlobalDisposed } from "@/server/global-lifecycle"
+import { errorMessage } from "@/util/error"
 
 type ModelInput = Parameters<OpencodeClient["session"]["prompt"]>[0]["model"]
 
@@ -98,6 +99,40 @@ function block(info: Inline, output?: string) {
 
 function formatRunError(error: unknown) {
   return FormatError(error) ?? FormatUnknownError(error)
+}
+
+export interface ShareNotice {
+  readonly danger: boolean
+  readonly prefix: string
+  readonly text: string
+}
+
+/**
+ * Decides what `opencode run` prints after asking the server to share a session.
+ *
+ * The generated SDK resolves typed HTTP failures through `.error` as schema objects — for this
+ * endpoint a `BadRequestError | NotFoundError | EffectHttpApiErrorInternalServerError |
+ * InstanceLoadError` — rather than rejecting, so `error instanceof Error` is false for every one of
+ * them and the old notice only ever fired on a transport rejection. A 400, 404 or 500 therefore
+ * arrived as `res.error`, fell through the `!res.error` success check, and printed nothing: the user
+ * asked for `run --share` (or sharing was on by config) and got no URL and no explanation. The
+ * `disabled` message, which is the one case the old code tried to surface, is carried by exactly the
+ * typed errors that could never reach it.
+ *
+ * `errorMessage` reads `message` off a plain object as well as an `Error`, so the reason survives
+ * either shape.
+ */
+export function shareNotice(response: { data?: { share?: { url?: string | null } | null } | null; error?: unknown }) {
+  if (response.error) {
+    const message = errorMessage(response.error)
+    // Sharing turned off in config or on the server is a deliberate refusal, not a failure, and it
+    // already carries its own wording.
+    if (message.includes("disabled")) return { danger: true, prefix: "!  ", text: message }
+    return { danger: true, prefix: "!  ", text: `Failed to share session: ${message}` }
+  }
+  const url = response.data?.share?.url
+  if (url) return { danger: false, prefix: "~  ", text: url }
+  return undefined
 }
 
 async function tool(part: ToolPart) {
@@ -560,15 +595,10 @@ export const RunCommand = effectCmd({
         const cfg = await sdk.config.get()
         if (!cfg.data) return
         if (cfg.data.share !== "auto" && !flags.autoShare && !args.share) return
-        const res = await sdk.session.share({ sessionID }).catch((error) => {
-          if (error instanceof Error && error.message.includes("disabled")) {
-            UI.println(UI.Style.TEXT_DANGER_BOLD + "!  " + error.message)
-          }
-          return { error }
-        })
-        if (!res.error && "data" in res && res.data?.share?.url) {
-          UI.println(UI.Style.TEXT_INFO_BOLD + "~  " + res.data.share.url)
-        }
+        const res = await sdk.session.share({ sessionID }).catch((error) => ({ error }))
+        const notice = shareNotice(res)
+        if (notice)
+          UI.println(UI.Style[notice.danger ? "TEXT_DANGER_BOLD" : "TEXT_INFO_BOLD"] + notice.prefix + notice.text)
       }
 
       async function createFreshSession(
