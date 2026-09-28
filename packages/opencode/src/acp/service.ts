@@ -720,13 +720,54 @@ function makeUsageService(sdk: OpencodeClient) {
   })
 }
 
-function replayMessages(subscription: ACPEvent.Subscription | undefined, messages: SessionMessageResponse[]) {
-  if (!subscription) return Effect.void
+/**
+ * Replays a session's history to a (re)connected ACP client, reporting each message that could not be
+ * replayed.
+ *
+ * The per-message catch is deliberate: one message the client cannot accept should not cost it the rest
+ * of the history, so the loop keeps going. Reporting is what was missing. `replayMessage` drives
+ * `connection.sessionUpdate` calls, so a failure here is the transport refusing a message, and the
+ * caller (`loadSession`, `forkSession`) returns success immediately afterwards. The editor then shows a
+ * session that looks complete but is silently missing part of its transcript, with no signal that
+ * anything was dropped — the client cannot tell a short history from a failed one.
+ *
+ * Exported so the behaviour is testable: a loop that continues and a report that fires are the two
+ * properties worth pinning, and neither is observable from the return value.
+ */
+export function replayFailures(
+  replay: (message: SessionMessageResponse) => Promise<unknown>,
+  messages: readonly SessionMessageResponse[],
+  report: (message: string) => void,
+) {
   return Effect.promise(async () => {
-    for (const message of messages) {
-      await subscription.replayMessage(message).catch(() => {})
+    let failed = 0
+    for (const [index, message] of messages.entries()) {
+      try {
+        await replay(message)
+      } catch (error) {
+        failed++
+        report(replayFailure(index, messages.length, message.info.id, error))
+      }
+    }
+    if (failed > 0) {
+      report(
+        `[acp] session history is incomplete: ${failed} of ${messages.length} message(s) could not be replayed to the client`,
+      )
     }
   })
+}
+
+export function replayFailure(index: number, total: number, messageID: string, error: unknown): string {
+  return `[acp] failed to replay message ${index + 1} of ${total} (${messageID}) to the client: ${errorMessage(error)}`
+}
+
+function replayMessages(subscription: ACPEvent.Subscription | undefined, messages: SessionMessageResponse[]) {
+  if (!subscription) return Effect.void
+  return replayFailures(
+    (message) => subscription.replayMessage(message),
+    messages,
+    (message) => console.error(message),
+  )
 }
 
 type ConfigState = {
