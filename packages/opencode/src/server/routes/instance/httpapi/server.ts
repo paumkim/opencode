@@ -8,6 +8,7 @@ import { Account } from "@/account/account"
 import { Agent } from "@/agent/agent"
 import { Auth } from "@/auth"
 import { BackgroundJob } from "@/background/job"
+import { BackgroundJob as CoreBackgroundJob } from "@opencode-ai/core/background-job"
 import { Command } from "@/command"
 import { Config } from "@/config/config"
 import { Workspace } from "@/control-plane/workspace"
@@ -283,10 +284,26 @@ export const app = LayerNode.group([
   PtyTicket.node,
 ])
 
+/**
+ * The application's globals, as the Location graph has to resolve them.
+ *
+ * The Location graph hoists global nodes into a graph of its own, and
+ * `LayerNode.compile` builds each root independently -- so a global the Location
+ * graph resolves to a different node is a second implementation of it, not a
+ * shared one. Fan-out registers its crew's background jobs from inside the
+ * Location graph, while a v1 abort of the parent session cancels background work
+ * through the application graph, so the two have to be one registry.
+ *
+ * Exported so the guard asserts on this wiring rather than on a graph a test
+ * built itself.
+ */
+export const locationServiceReplacements = () =>
+  [[CoreBackgroundJob.node, BackgroundJob.node]] as LayerNode.Replacements
+
 export function createRoutes(
   corsOptions?: CorsOptions,
 ): Layer.Layer<never, EffectConfig.ConfigError, RouteRequirements> {
-  const locationServiceMapV2 = buildLocationServiceMap()
+  const locationServiceMapV2 = buildLocationServiceMap(locationServiceReplacements())
 
   return Layer.mergeAll(
     rootApiRoutes,
