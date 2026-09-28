@@ -12,6 +12,7 @@ import type { WorkspaceAdapter } from "../../src/control-plane/types"
 import { Workspace } from "../../src/control-plane/workspace"
 import { InstanceRef, WorkspaceRef } from "../../src/effect/instance-ref"
 import { Project } from "../../src/project/project"
+import { InstanceStore } from "../../src/project/instance-store"
 import { Session } from "../../src/session/session"
 import { disposeMiddleware, markInstanceForDisposal } from "../../src/server/routes/instance/httpapi/lifecycle"
 import {
@@ -347,6 +348,40 @@ describe("HttpApi instance context middleware", () => {
       expect(response.status).toBe(200)
       expect(yield* response.json).toBe(true)
       expect(yield* Fiber.join(disposed)).toEqual({ directory: workspaceDir, workspace: workspace.id })
+    }),
+  )
+
+  // The runtime half of the contract. A load failure is reachable in production —
+  // an unreadable directory, a database that will not answer, a plugin that
+  // throws while bootstrapping — and because the store reports those as defects,
+  // the response used to be a bare 500 that no endpoint declared and no client
+  // could anticipate. The two `/probe` routes here are declared only with the
+  // middleware, so a 200 proves the load succeeded and a typed InstanceLoadError
+  // proves the failure is now described rather than merely thrown.
+  it.live("returns a typed InstanceLoadError when the instance cannot be loaded", () =>
+    Effect.gen(function* () {
+      const failingStore = Layer.mock(InstanceStore.Service, {
+        load: (input) => Effect.die(new Error(`simulated boot failure for ${input.directory}`)),
+      })
+      const routes = HttpApiBuilder.layer(ProbeApi).pipe(
+        Layer.provide(probeHandlers),
+        // Same wiring as probeRoutes, only with a store whose load always dies.
+        Layer.provide(Layer.provideMerge(instanceContextLayer, failingStore)),
+        Layer.provide(workspaceRoutingLayer.pipe(Layer.provide(Socket.layerWebSocketConstructorGlobal))),
+        Layer.provide(Layer.mock(Session.Service)({})),
+      )
+      yield* routes.pipe(HttpRouter.serve, Layer.build)
+
+      const response = yield* HttpClient.get(`/probe?directory=${encodeURIComponent("/tmp/does-not-matter")}`)
+
+      expect(response.status).toBe(500)
+      expect(yield* response.json).toMatchObject({
+        name: "InstanceLoadError",
+        data: {
+          message: "simulated boot failure for /tmp/does-not-matter",
+          directory: "/tmp/does-not-matter",
+        },
+      })
     }),
   )
 })

@@ -88,3 +88,25 @@ export function notFound(message: string) {
     data: { message },
   })
 }
+
+/**
+ * The instance backing a request could not be loaded.
+ *
+ * Every endpoint that reads through `InstanceContextMiddleware` needs a live
+ * instance first: config resolution, provider bundles, plugin hooks and the
+ * project row all come from it. When that load fails — an unreadable directory,
+ * a database that will not answer, a plugin that throws during bootstrap — the
+ * endpoint has no result to return, and previously produced a bare undeclared
+ * 500. A client had no way to tell that apart from a server fault it could
+ * retry, and the OpenAPI document claimed no such response existed.
+ */
+export class ApiInstanceLoadError extends Schema.ErrorClass<ApiInstanceLoadError>("InstanceLoadError")(
+  {
+    name: Schema.Literal("InstanceLoadError"),
+    data: Schema.Struct({
+      message: Schema.String,
+      directory: Schema.String,
+    }),
+  },
+  { httpApiStatus: 500 },
+) {}

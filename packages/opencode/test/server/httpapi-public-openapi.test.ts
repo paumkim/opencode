@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test"
 import { OpenApi } from "effect/unstable/httpapi"
 import { PublicApi } from "../../src/server/routes/instance/httpapi/public"
+import { OpenCodeHttpApi } from "../../src/server/routes/instance/httpapi/api"
+import { InstanceContextMiddleware } from "../../src/server/routes/instance/httpapi/middleware/instance-context"
 
 type Method = "get" | "post" | "put" | "delete" | "patch"
 type OpenApiSchema = {
@@ -384,5 +386,55 @@ describe("PublicApi OpenAPI v2 errors", () => {
     expect(componentName(responseRef(spec.paths["/project/{projectID}"]?.patch?.responses?.["404"]) ?? "")).toBe(
       "ProjectNotFoundError",
     )
+  })
+
+  // Every instance-scoped endpoint needs a live instance before it can answer,
+  // and that load fails for real reasons: an unreadable directory, a database
+  // that will not respond, a plugin that throws while bootstrapping. The store
+  // reports those as defects, and a defect is in no endpoint's contract — so the
+  // response was a bare 500 that no client could anticipate and no OpenAPI
+  // document described. Clients compensated by guessing, which is how a TUI came
+  // to read a failed `/path` as "you are in directory X".
+  //
+  // Asserting the whole class, not a sample: the error is declared once on
+  // InstanceContextMiddleware, and this proves it reached every group that
+  // requires an instance.
+  test("every instance-scoped endpoint documents the 500 it can actually return", () => {
+    const spec = OpenApi.fromApi(PublicApi) as OpenApiSpec
+    const groups = (OpenCodeHttpApi as unknown as { groups: Record<string, { endpoints?: unknown }> }).groups
+    const undocumented: string[] = []
+    let scoped = 0
+
+    for (const [groupName, group] of Object.entries(groups)) {
+      if (!group.endpoints) continue
+      const entries = group.endpoints instanceof Map ? [...group.endpoints.entries()] : Object.entries(group.endpoints)
+      for (const [endpointName, endpoint] of entries) {
+        const value = endpoint as { middlewares?: Set<unknown>; method: string; path: string }
+        if (!(value.middlewares instanceof Set) || !value.middlewares.has(InstanceContextMiddleware)) continue
+        scoped++
+        // Endpoint paths are `:param`; the document writes `{param}`.
+        const path = value.path.replace(/:(\w+)\??/g, "{$1}")
+        const method = value.method.toLowerCase() as Method
+        if (spec.paths[path]?.[method]?.responses?.["500"] === undefined) {
+          undocumented.push(`${groupName}.${endpointName} (${method} ${path})`)
+        }
+      }
+    }
+
+    // Guards the loop above: a test that silently checked nothing would pass.
+    expect(scoped).toBeGreaterThan(100)
+    expect(undocumented).toEqual([])
+  })
+
+  test("the instance-load error carries the directory and a message", () => {
+    const spec = OpenApi.fromApi(PublicApi) as OpenApiSpec
+    const schema = spec.components.schemas.InstanceLoadError
+
+    expect(schema?.required).toEqual(expect.arrayContaining(["name", "data"]))
+    expect(schema?.properties?.name?.enum).toEqual(["InstanceLoadError"])
+    // The directory is what makes the failure actionable: a client that cannot
+    // read `/path` at least learns which directory the server could not open.
+    expect(Object.keys(schema?.properties?.data?.properties ?? {}).toSorted()).toEqual(["directory", "message"])
+    expect(componentName(responseRef(spec.paths["/path"]?.get?.responses?.["500"]) ?? "")).toBe("InstanceLoadError")
   })
 })
