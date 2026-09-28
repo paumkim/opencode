@@ -5,6 +5,8 @@ import { Global } from "@opencode-ai/core/global"
 import { text } from "node:stream/consumers"
 import fs from "fs/promises"
 import { Filesystem } from "@/util/filesystem"
+import { errorMessage } from "@/util/error"
+import { downloadRefusal, locateViaXcrun, serverInstallFailed } from "./install-failure"
 import type { InstanceContext } from "../project/instance-context"
 import { Archive } from "@/util/archive"
 import { Process } from "@/util/process"
@@ -873,11 +875,8 @@ export const SourceKit: Info = {
     // This is specific to macOS where sourcekit-lsp is typically installed with Xcode
     if (!which("xcrun")) return
 
-    const lspLoc = await output(["xcrun", "--find", "sourcekit-lsp"])
-
-    if (lspLoc.code !== 0) return
-
-    const bin = lspLoc.text.trim()
+    const bin = await locateViaXcrun((args) => output(args))
+    if (!bin) return
 
     return {
       process: spawn(bin, {
@@ -1208,24 +1207,43 @@ export const JDTLS: Info = {
       const archiveName = "release.tar.gz"
 
       const download = await fetch(releaseURL)
-      if (!download.ok || !download.body) {
+      const refusal = downloadRefusal(download)
+      if (refusal || !download.body) {
+        serverInstallFailed("jdtls", `downloading ${releaseURL}`, refusal ?? "the response had no body")
         return
       }
-      await Filesystem.writeStream(path.join(distPath, archiveName), download.body)
+      const written = await Filesystem.writeStream(path.join(distPath, archiveName), download.body).then(
+        () => undefined,
+        (error) => error,
+      )
+      if (written) {
+        serverInstallFailed("jdtls", `writing ${archiveName}`, errorMessage(written))
+        return
+      }
 
       const tarResult = await run(["tar", "-xzf", archiveName], { cwd: distPath })
       if (tarResult.code !== 0) {
+        serverInstallFailed(
+          "jdtls",
+          "extracting the release archive",
+          tarResult.stderr.toString("utf8").trim() || `tar exited ${tarResult.code}`,
+        )
         return
       }
 
       await fs.rm(path.join(distPath, archiveName), { force: true })
     }
-    const jarFileName =
-      (await fs.readdir(launcherDir).catch(() => []))
-        .find((item) => /^org\.eclipse\.equinox\.launcher_.*\.jar$/.test(item))
-        ?.trim() ?? ""
+    const listing = await fs.readdir(launcherDir).then(
+      (items) => items,
+      (error) => {
+        serverInstallFailed("jdtls", `listing ${launcherDir}`, errorMessage(error))
+        return [] as string[]
+      },
+    )
+    const jarFileName = listing.find((item) => /^org\.eclipse\.equinox\.launcher_.*\.jar$/.test(item))?.trim() ?? ""
     const launcherJar = path.join(launcherDir, jarFileName)
     if (!(await pathExists(launcherJar))) {
+      serverInstallFailed("jdtls", "finding the equinox launcher", `no equinox launcher jar in ${launcherDir}`)
       return
     }
     const configFile = path.join(
@@ -1332,16 +1350,27 @@ export const KotlinLS: Info = {
       await fs.mkdir(distPath, { recursive: true })
       const archivePath = path.join(distPath, "kotlin-ls.zip")
       const download = await fetch(releaseURL)
-      if (!download.ok || !download.body) {
+      const refusal = downloadRefusal(download)
+      if (refusal || !download.body) {
+        serverInstallFailed("kotlin-ls", `downloading ${releaseURL}`, refusal ?? "the response had no body")
         return
       }
-      await Filesystem.writeStream(archivePath, download.body)
-      const ok = await Archive.extractZip(archivePath, distPath)
-        .then(() => true)
-        .catch((error) => {
-          return false
-        })
-      if (!ok) return
+      const written = await Filesystem.writeStream(archivePath, download.body).then(
+        () => undefined,
+        (error) => error,
+      )
+      if (written) {
+        serverInstallFailed("kotlin-ls", `writing ${path.basename(archivePath)}`, errorMessage(written))
+        return
+      }
+      const extracted = await Archive.extractZip(archivePath, distPath).then(
+        () => undefined,
+        (error) => error,
+      )
+      if (extracted) {
+        serverInstallFailed("kotlin-ls", "extracting the release archive", errorMessage(extracted))
+        return
+      }
       await fs.rm(archivePath, { force: true })
       if (process.platform !== "win32") {
         await fs.chmod(launcherScript, 0o755).catch(() => {})
