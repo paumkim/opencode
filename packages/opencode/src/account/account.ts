@@ -397,9 +397,15 @@ const layer: Layer.Layer<Service, never, AccountRepo.Service | HttpClient.HttpCl
       //
       // An account that could not be read does not block this: the one being removed is being
       // discarded anyway, and the fallback only needs *some* readable account to switch to.
-      const next = (yield* orgsByAccount()).groups.flatMap((group) =>
-        group.orgs.map((org) => ({ accountID: group.account.id, orgID: org.id })),
-      )[0]
+      //
+      // The account being removed is excluded from the candidates. It used to be included, and with
+      // a single account that was the only candidate - so `remove` deleted the row and then pointed
+      // the active selection at it, which the account_state foreign key rejects. The user saw a raw
+      // constraint error from `opencode auth logout` and was left logged out anyway, because the
+      // delete had already happened.
+      const next = (yield* orgsByAccount()).groups
+        .filter((group) => group.account.id !== accountID)
+        .flatMap((group) => group.orgs.map((org) => ({ accountID: group.account.id, orgID: org.id })))[0]
       yield* repo.remove(accountID)
       if (!next) return
       yield* repo.use(next.accountID, Option.some(next.orgID))
