@@ -9,6 +9,7 @@ import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { Provider } from "@/provider/provider"
 import { Context, Effect, Layer, SynchronizedRef } from "effect"
+import { errorMessage } from "@/util/error"
 
 export type AssistantTokenCost = Pick<OpenCodeAssistantMessage, "cost" | "tokens">
 
@@ -122,6 +123,51 @@ export function findContextLimit(
   return providers[providerID]?.models[modelID]?.limit.context
 }
 
+/**
+ * Hands a usage update to the client, and says so when it could not be handed over.
+ *
+ * Both `sendUpdate` implementations - the service in this file and the fallback in `service.ts` -
+ * used to end in `connection.sessionUpdate({...}).catch(() => {})`. A failed *fetch* of the
+ * messages behind the update is logged a few lines above that call in both places; the refused
+ * *send* was not, and `sendUpdate` runs once per turn. So one refusal left the client's context
+ * and cost indicator frozen for the rest of the session, with nothing on the server or the client
+ * saying it had stopped because the update could not be delivered.
+ *
+ * Shared by both implementations so the two halves of this cannot drift apart again, and taking an
+ * optional `report` for the same reason as the other ACP transports.
+ */
+export function deliverUsageUpdate(
+  connection: UsageConnection,
+  params: {
+    readonly sessionId: string
+    readonly used: number
+    readonly size: number
+    readonly cost: { readonly amount: number; readonly currency: string }
+  },
+  options?: { report?: (message: string) => void },
+): Effect.Effect<void> {
+  const report = options?.report ?? ((message: string) => console.error(message))
+  return Effect.promise(() =>
+    connection.sessionUpdate({
+      sessionId: params.sessionId,
+      update: {
+        sessionUpdate: "usage_update",
+        used: params.used,
+        size: params.size,
+        cost: params.cost,
+      },
+    }),
+  ).pipe(
+    Effect.catchCause((cause) =>
+      Effect.sync(() =>
+        report(
+          `[acp] failed to deliver the usage update for session ${params.sessionId} to the client: ${errorMessage(cause)}`,
+        ),
+      ),
+    ),
+  )
+}
+
 export const contextLimitLoaderLayer = Layer.effect(
   ContextLimitLoader,
   Effect.gen(function* () {
@@ -144,6 +190,7 @@ const layer = Layer.effect(
   Effect.gen(function* () {
     const messageLoader = yield* MessageLoader
     const contextLimitLoader = yield* ContextLimitLoader
+    const report = (text: string) => console.error(text)
     const limits = yield* SynchronizedRef.make(new Map<string, Effect.Effect<number | undefined>>())
 
     const cachedLimit = Effect.fnUntraced(function* (input: {
@@ -205,18 +252,15 @@ const layer = Layer.effect(
       })
       if (!size) return
 
-      yield* Effect.promise(() =>
-        input.connection
-          .sessionUpdate({
-            sessionId: input.sessionID,
-            update: {
-              sessionUpdate: "usage_update",
-              used: contextTokens(message),
-              size,
-              cost: { amount: totalSessionCost(messages), currency: "USD" },
-            },
-          })
-          .catch(() => {}),
+      yield* deliverUsageUpdate(
+        input.connection,
+        {
+          sessionId: input.sessionID,
+          used: contextTokens(message),
+          size,
+          cost: { amount: totalSessionCost(messages), currency: "USD" },
+        },
+        { report },
       )
     })
 

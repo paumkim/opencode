@@ -316,3 +316,84 @@ describe("acp usage", () => {
     )
   })
 })
+
+describe("acp usage update delivery", () => {
+  const report = () => {
+    const seen: string[] = []
+    return { seen, fn: (message: string) => seen.push(message) }
+  }
+
+  it.effect("reports a usage update the client refused", () =>
+    Effect.gen(function* () {
+      // The regression: `sendUpdate` ended in `connection.sessionUpdate({...}).catch(() => {})` in
+      // both implementations. A failed *fetch* of the messages behind the update is logged a few
+      // lines above that call; the refused *send* was not. And `sendUpdate` runs once per turn, so
+      // one refusal left the client's context and cost indicator frozen for the rest of the session
+      // with nothing on either side saying why.
+      const r = report()
+      yield* UsageService.deliverUsageUpdate(
+        { sessionUpdate: () => Promise.reject(new Error("connection closed")) } as never,
+        { sessionId: "ses_1", used: 30, size: 1000, cost: { amount: 1, currency: "USD" } },
+        { report: r.fn },
+      )
+
+      expect(r.seen).toHaveLength(1)
+      expect(r.seen[0]).toContain("ses_1")
+      // The cause travels with it: "it did not work" is not a diagnosis.
+      expect(r.seen[0]).toContain("connection closed")
+    }),
+  )
+
+  it.effect("keeps delivering after one refusal, so the indicator does not stay frozen", () =>
+    Effect.gen(function* () {
+      // A "stop updating after a failure" behaviour would look identical from the client's side to
+      // the freeze this is meant to fix, so the second attempt has to be real.
+      const updates: SessionNotification[] = []
+      const r = report()
+      let refuseNext = true
+      const connection = {
+        sessionUpdate(params: SessionNotification) {
+          if (refuseNext) {
+            refuseNext = false
+            return Promise.reject(new Error("connection closed"))
+          }
+          updates.push(params)
+          return Promise.resolve()
+        },
+      }
+      for (let i = 0; i < 2; i++) {
+        yield* UsageService.deliverUsageUpdate(
+          connection as never,
+          { sessionId: "ses_1", used: 30, size: 1000, cost: { amount: 1, currency: "USD" } },
+          { report: r.fn },
+        )
+      }
+
+      expect(r.seen).toHaveLength(1)
+      expect(updates).toHaveLength(1)
+      expect(updates[0]?.update.sessionUpdate).toBe("usage_update")
+    }),
+  )
+
+  it.effect("says nothing when the client accepts the update", () =>
+    Effect.gen(function* () {
+      // The other direction. A report that fires on the happy path is noise, and a test covering
+      // only the failure cannot tell a correct guard from an absent one.
+      const updates: SessionNotification[] = []
+      const r = report()
+      yield* UsageService.deliverUsageUpdate(
+        {
+          sessionUpdate: (params: SessionNotification) => {
+            updates.push(params)
+            return Promise.resolve()
+          },
+        } as never,
+        { sessionId: "ses_1", used: 30, size: 1000, cost: { amount: 1, currency: "USD" } },
+        { report: r.fn },
+      )
+
+      expect(r.seen).toEqual([])
+      expect(updates).toHaveLength(1)
+    }),
+  )
+})
