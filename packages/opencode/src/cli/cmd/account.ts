@@ -2,7 +2,14 @@ import { cmd } from "./cmd"
 import { Duration, Effect, Match, Option } from "effect"
 import { UI } from "../ui"
 import { Account } from "@/account/account"
-import { AccountID, OrgID, PollExpired, type PollResult, type AccountError } from "@/account/schema"
+import {
+  AccountID,
+  AccountServiceError,
+  OrgID,
+  PollExpired,
+  type PollResult,
+  type AccountError,
+} from "@/account/schema"
 import { effectCmd } from "../effect-cmd"
 import * as Prompt from "../effect/prompt"
 import open from "open"
@@ -118,10 +125,26 @@ interface OrgChoice {
   label: string
 }
 
+/**
+ * Reports a partial org read instead of the "No orgs found" it used to be indistinguishable from.
+ * One broken account used to empty every account's orgs in the listing, and the user was told those
+ * orgs do not exist.
+ */
+const orgReadFailed = Effect.fn("orgReadFailed")(function* (failures: readonly Account.AccountOrgsFailure[]) {
+  for (const failure of failures) {
+    yield* println(`Could not read orgs for ${failure.accountID}: ${failure.error.message}`)
+  }
+  return yield* Effect.fail(new AccountServiceError({ message: "Could not read orgs", cause: failures[0]?.error }))
+})
+
 const switchEffect = Effect.fn("switch")(function* () {
   const service = yield* Account.Service
 
-  const groups = yield* service.orgsByAccount()
+  const result = yield* service.orgsByAccount()
+  // Refuse before saying anything about orgs. "No orgs found" and "the orgs could not be read" are
+  // different answers, and only the first is something the user can act on by picking from a list.
+  if (result.failures.length > 0) return yield* orgReadFailed(result.failures)
+  const groups = result.groups
   if (groups.length === 0) return yield* println("Not logged in")
 
   const active = yield* service.active()
@@ -150,7 +173,9 @@ const switchEffect = Effect.fn("switch")(function* () {
 const orgsEffect = Effect.fn("orgs")(function* () {
   const service = yield* Account.Service
 
-  const groups = yield* service.orgsByAccount()
+  const result = yield* service.orgsByAccount()
+  if (result.failures.length > 0) return yield* orgReadFailed(result.failures)
+  const groups = result.groups
   if (groups.length === 0) return yield* println("No accounts found")
   if (!groups.some((group) => group.orgs.length > 0)) return yield* println("No orgs found")
 

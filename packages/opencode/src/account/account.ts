@@ -1,6 +1,6 @@
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { httpClient } from "@opencode-ai/core/effect/app-node-platform"
-import { Cache, Clock, Duration, Effect, Layer, Option, Schema, SchemaGetter, Context } from "effect"
+import { Cache, Clock, Duration, Effect, Layer, Option, Result, Schema, SchemaGetter, Context } from "effect"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
 import {
   FetchHttpClient,
@@ -61,6 +61,31 @@ export {
 export type AccountOrgs = {
   account: Info
   orgs: readonly Org[]
+}
+
+export type AccountOrgsFailure = {
+  accountID: AccountID
+  error: AccountError
+}
+
+export type AccountOrgsResult = {
+  /**
+   * The accounts whose orgs could be read, in the same order as `repo.list()`. An account missing
+   * from here appears in `failures` instead - it is never silently reported as having no orgs.
+   */
+  groups: readonly AccountOrgs[]
+  /**
+   * The accounts whose orgs could not be read.
+   *
+   * This exists because the two obvious answers to a failed read are both wrong. Reporting an
+   * empty list claims the account has no orgs, and every caller acts on that claim: `account orgs`
+   * printed "No orgs found", `account switch` refused to open a picker, and the console route
+   * answered `switchableOrgCount: 0` so the TUI's Switch org command disappeared. Propagating the
+   * failure instead is also wrong, because this is a per-account fan-out: one broken account would
+   * take down the listing for every other account, and would block `remove` of an unrelated
+   * account outright. So the read is partial, and the partial is labelled.
+   */
+  failures: readonly AccountOrgsFailure[]
 }
 
 export type ActiveOrg = {
@@ -169,7 +194,7 @@ export interface Interface {
   readonly active: () => Effect.Effect<Option.Option<Info>, AccountError>
   readonly activeOrg: () => Effect.Effect<Option.Option<ActiveOrg>, AccountError>
   readonly list: () => Effect.Effect<Info[], AccountError>
-  readonly orgsByAccount: () => Effect.Effect<readonly AccountOrgs[], AccountError>
+  readonly orgsByAccount: () => Effect.Effect<AccountOrgsResult, AccountError>
   readonly remove: (accountID: AccountID) => Effect.Effect<void, AccountError>
   readonly use: (accountID: AccountID, orgID: Option.Option<OrgID>) => Effect.Effect<void, AccountError>
   readonly orgs: (accountID: AccountID) => Effect.Effect<readonly Org[], AccountError>
@@ -328,15 +353,26 @@ const layer: Layer.Layer<Service, never, AccountRepo.Service | HttpClient.HttpCl
 
     const orgsByAccount = Effect.fn("Account.orgsByAccount")(function* () {
       const accounts = yield* repo.list()
-      return yield* Effect.forEach(
+      // `allSettled` rather than `all`, and a `failures` list rather than a catch into `[]`. See
+      // the `AccountOrgsResult` docstring for why both of the simpler answers are wrong.
+      const settled = yield* Effect.forEach(
         accounts,
         (account) =>
           orgs(account.id).pipe(
-            Effect.catch(() => Effect.succeed([] as readonly Org[])),
             Effect.map((orgs) => ({ account, orgs })),
+            Effect.result,
           ),
         { concurrency: 3 },
       )
+      const groups: AccountOrgs[] = []
+      const failures: AccountOrgsFailure[] = []
+      for (const [index, entry] of settled.entries()) {
+        const account = accounts[index]
+        if (Result.isSuccess(entry)) groups.push(entry.success)
+        else
+          failures.push({ accountID: account.id, error: accountErrorFromCause(entry.failure, "Failed to read orgs") })
+      }
+      return { groups, failures } satisfies AccountOrgsResult
     })
 
     const orgs = Effect.fn("Account.orgs")(function* (accountID: AccountID) {
@@ -350,12 +386,21 @@ const layer: Layer.Layer<Service, never, AccountRepo.Service | HttpClient.HttpCl
 
     const remove = Effect.fn("Account.remove")(function* (accountID: AccountID) {
       const active = yield* repo.active()
-      yield* repo.remove(accountID)
-      if (Option.isNone(active) || active.value.id !== accountID) return
-
-      const next = (yield* orgsByAccount()).flatMap((group) =>
+      if (Option.isNone(active) || active.value.id !== accountID) {
+        yield* repo.remove(accountID)
+        return
+      }
+      // The fallback is resolved *before* the removal, not after. This used to remove first and
+      // then read, so a failed read left the user with the active account deleted and no new one
+      // selected - and, with the catch above, said nothing about it. Reading first means a failure
+      // leaves the account in place and reports why, which is the only outcome the user can act on.
+      //
+      // An account that could not be read does not block this: the one being removed is being
+      // discarded anyway, and the fallback only needs *some* readable account to switch to.
+      const next = (yield* orgsByAccount()).groups.flatMap((group) =>
         group.orgs.map((org) => ({ accountID: group.account.id, orgID: org.id })),
       )[0]
+      yield* repo.remove(accountID)
       if (!next) return
       yield* repo.use(next.accountID, Option.some(next.orgID))
     })
