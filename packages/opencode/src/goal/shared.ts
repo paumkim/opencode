@@ -29,6 +29,11 @@ export type Options = {
 
 export type CreateGoalArgs = {
   objective: string
+  /**
+   * Optional short status-bar label. Snake-cased like the rest of the tool args; `createGoalFromTool`
+   * maps it onto `CreateGoalOptions.title`, which is where the limit and the truncation live.
+   */
+  title?: string | null
   token_budget?: number | null
   max_auto_turns?: number | null
   max_duration_seconds?: number | null

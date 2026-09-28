@@ -25,7 +25,7 @@ import {
   validateObjective,
 } from "@/goal/impl"
 import { internalPluginIds } from "@/plugin/index"
-import { goalEvidenceArg, goalLimitArgs, goalObjectiveArg } from "@/goal/tools"
+import { goalEvidenceArg, goalLimitArgs, goalObjectiveArg, goalTitleArg } from "@/goal/tools"
 import {
   type CreateGoalOptions,
   GOAL_DEFAULT_MAX_AUTO_TURNS,
@@ -656,6 +656,61 @@ describe("H10: goal mode is core and its tool set matches the shipped prompt", (
     expect(GOAL_PROMPT).toContain('Call update_goal with status "complete" only if the goal is achieved')
   })
 
+  test("the short title the /goal prompt tells the model to pass is accepted by the tools it names", () => {
+    // The same bidirectional contract as H27, for the label rather than a limit. The prompt now
+    // tells the model to write a short objective and pass a `title` beside it, and the bar only
+    // renders the label when the title actually got stored. So all three tools that take an
+    // objective must accept a title, must expose it to the model as an OPTIONAL property (a required
+    // one would make the prompt's "pass a title whenever you can" a demand the model cannot refuse),
+    // and must not carry a length cap of their own: `validateTitle` truncates instead of rejecting,
+    // so a schema-level `.max()` would fail a title the implementation accepts.
+    expect(GOAL_PROMPT).toContain("title")
+    const titled = z.object({ objective: goalObjectiveArg, title: goalTitleArg })
+    expect(titled.safeParse({ objective: "rewrite the lexer", title: "Incremental lexer" }).success).toBe(true)
+    // Omitting it stays legal, which is what the prompt promises and what every pre-title goal relies on.
+    expect(titled.safeParse({ objective: "rewrite the lexer" }).success).toBe(true)
+    expect(goalTitleArg.safeParse("").success).toBe(false)
+    expect(goalTitleArg.safeParse("A".repeat(1_000)).success).toBe(true)
+
+    for (const id of ["create_goal", "set_goal", "update_goal_objective"]) {
+      const schema = goalToolNames()[id]?.jsonSchema as
+        | { properties?: Record<string, { description?: string }>; required?: string[] }
+        | undefined
+      const label = `goal tool ${id}`
+      expect(`${label}: ${JSON.stringify(schema?.properties?.title)}`).toContain("status bar")
+      expect(schema?.required ?? []).not.toContain("title")
+    }
+  })
+
+  test("a title passed to the tools reaches the state the goal bar reads", async () => {
+    // The other half of the contract above: a schema that ACCEPTS a title proves nothing about the
+    // bar, which reads the state file. A title dropped at the tool boundary - never handed to
+    // `createGoal`, or never forwarded to `updateGoalObjective` - would leave the model confidently
+    // passing a label the bar never renders, with every schema-level assertion still green.
+    const toolContext = (sessionID: string) =>
+      ({ sessionID, messageID: "msg-1", agent: "build", abort: new AbortController().signal }) as never
+    const runTool = (tool: string, args: unknown, sessionID: string) =>
+      Effect.runPromise(goalToolNames()[tool].execute(args as never, toolContext(sessionID))).then((result) =>
+        JSON.parse(result.output) as { goal: { title?: string } },
+      )
+
+    const sessionID = "tool-title"
+    const created = await runTool(
+      "create_goal",
+      { objective: "Rewrite the incremental lexer", title: "Incremental lexer" },
+      sessionID,
+    )
+    expect(created.goal.title).toBe("Incremental lexer")
+    expect((await readState()).goals[sessionID].title).toBe("Incremental lexer")
+
+    // Relabelling through the edit tool, then editing the objective WITHOUT one: the label has to
+    // survive an edit that never mentioned it, which is the common case the bar's fallback covers.
+    await runTool("update_goal_objective", { objective: "Rewrite the parser", title: "Parser rewrite" }, sessionID)
+    expect((await readState()).goals[sessionID].title).toBe("Parser rewrite")
+    await runTool("update_goal_objective", { objective: "Rewrite the parser front end" }, sessionID)
+    expect((await readState()).goals[sessionID].title).toBe("Parser rewrite")
+  })
+
   test("H33: the no_progress_token_threshold guidance points the knob the way the scorer reads it", async () => {
     // `no_progress_token_threshold` is the floor a continuation turn must CLEAR to count as
     // progress: the scorer computes `lowOutput = outputTokens < threshold`, and a low-output turn
@@ -1276,6 +1331,146 @@ describe("H33: the continuation prompt carries the guard the model is being meas
     const prompt = limitPrompt(goal!)
     expect(prompt).toContain(`- Tokens used: ${goal!.tokensUsed}`)
     expect(prompt).toContain(goal!.stopReason ?? "")
+  })
+})
+
+describe("H36: the continuation prompt has to DRIVE a turn, not just describe the goal", () => {
+  // The ledger block added by the earlier work answered "what is finished", which is necessary and
+  // was never sufficient. For an open-ended objective - "keep improving the codebase" - choosing the
+  // next unit of work IS the turn, and the prompt said nothing about how to make that choice: its
+  // only "Moving forward" advice was bookkeeping, so a turn that had just closed its last named item
+  // fell back on whatever was nearest, which is the re-audit loop the ledger exists to break. The
+  // tests below pin the procedure, the missing build half of the scope, the collapsed closing rules,
+  // and the limit prompt's missing ledger call - none of which any other test in this file can see,
+  // because they are all assertions about text that used to be absent.
+  const goalFor = async (sessionID: string, objective: string) => {
+    await createGoal(sessionID, objective, { maxAutoTurns: 0 })
+    await recordGoalCompletion(sessionID, "fixed the retry backoff")
+    return (await getGoal(sessionID))!
+  }
+
+  test("the prompt states the implement -> verify -> commit -> record order, and names the unit first", async () => {
+    const goal = await goalFor("h36-order", "keep improving the codebase")
+
+    const prompt = continuationPrompt(goal)
+
+    // The failure: the prompt said to record "the moment a unit of work is genuinely done and
+    // verified" and never said what comes BEFORE that. An agent that records first writes a ledger
+    // entry for work the repository does not contain, and the next turn - which is explicitly told to
+    // trust the ledger - skips it. Asserted as an ORDERED chain, not as four separate mentions: the
+    // whole defect is that the prompt never states the sequence.
+    expect(prompt).toMatch(
+      /implement\s*->\s*verify[^\n]*->\s*commit if this repo expects commits\s*->\s*call record_goal_completion/,
+    )
+    // And the turn needs a declared target, or "the next unit" is chosen implicitly and drifts.
+    expect(prompt).toMatch(/name (that|the) one unit in a single line/i)
+    // The task list is how a turn that survived a compaction knows it has a plan at all. The tool
+    // existed and `script/crew.sh` points crew windows at it, but no goal prompt ever mentioned it,
+    // so every continuation re-planned from zero.
+    expect(prompt).toContain("todowrite")
+    // The reconstruction path, for the turn that genuinely has no next unit in its context.
+    expect(prompt).toMatch(/fresh turn or a compaction[\s\S]*?reconstruct it from the worktree/i)
+  })
+
+  test("the prompt says building a requested capability is in scope, not only defect repair", async () => {
+    // The failure: every noun in the prompt was defect language - "re-fixing", "defects", "further
+    // bugs" - and nothing anywhere said the objective could equally call for something the repo does
+    // not have yet. So an agent read "improve the codebase" as "hunt bugs", closed a hundred of them,
+    // and never built the feature the objective literally named. Both halves are pinned: the scope
+    // statement, and the Fidelity line, which is where a model that HAS understood the scope still
+    // talks itself out of the build by retreating into repairs that already pass.
+    const goal = await goalFor("h36-capability", "add the missing bulk-export affordance")
+
+    const prompt = continuationPrompt(goal)
+
+    expect(prompt).toMatch(/not only defect repair/i)
+    expect(prompt).toMatch(/names a feature, a capability, or an affordance/i)
+    // The consequence, stated: repairs alone are not the objective.
+    expect(prompt).toMatch(/never built the requested capability has not met the objective/i)
+    expect(prompt).toMatch(/do not settle into safe repairs/i)
+  })
+
+  test("the closing rules are stated once, not three times over", async () => {
+    // The prompt said "complete only with evidence" in the completion audit AND in the closing
+    // paragraph, and "unmet only when blocked" in the blocked audit AND in that same paragraph. The
+    // duplication is not harmless: it is what let the block grow every time a rule was added, on a
+    // prompt every single turn pays for. The concrete audit steps are the valuable half and must
+    // survive the collapse - only the repeated verdicts are pinned here.
+    const goal = await goalFor("h36-dedup", "ship the migration")
+
+    const prompt = continuationPrompt(goal)
+
+    expect(prompt.match(/truly at an impasse/gi)?.length).toBe(1)
+    expect(prompt.match(/status "unmet"/g)?.length).toBe(1)
+    // The steps themselves, kept verbatim.
+    expect(prompt).toContain("Restate the objective as concrete deliverables or success criteria")
+    expect(prompt).toMatch(/Verify that any manifest, verifier, test suite, or green status/)
+    expect(prompt).toMatch(/Treat uncertainty, missing evidence, indirect evidence, or weak coverage/)
+  })
+
+  test("the limit prompt records what was finished instead of only summarizing it", async () => {
+    // The data loss, not the style. `limitPrompt` said to "summarize useful progress" and never once
+    // said to CALL record_goal_completion, so the last units of work a run finished before a token or
+    // duration limit tripped never reached the ledger - and the next turn, which is handed the ledger
+    // rather than the transcript, could not tell finished work from interrupted work and redid it.
+    // Wrapping up in prose is invisible to the one durable record of the run.
+    //
+    // This pins the PROMPT half; the test below pins the runtime half that makes the call it demands
+    // actually land. They have to be pinned together: while `recordGoalCompletion` gated on `active`
+    // alone, the sentence this test asserts on described a tool call the runtime refused, so the
+    // prompt was correct and the goal still lost the work. The prompt contract is what this file
+    // asserts; the gate is asserted where it lives.
+    //
+    // A real tripped limit rather than a hand-built snapshot, so the status in the prompt is the one
+    // the driver would actually send it for.
+    const limitSessionID = "h36-limit-prompt"
+    await createGoal(limitSessionID, "keep improving the codebase", {
+      tokenBudget: 1_000,
+      maxAutoTurns: 0,
+      sessionTokensAtCreation: 0,
+    })
+    await accountUsage(limitSessionID, 1_500)
+    const limited = (await getGoal(limitSessionID))!
+    expect(limited.status).toBe("budgetLimited")
+
+    const prompt = limitPrompt(limited)
+
+    expect(prompt).toContain("record_goal_completion")
+    // Before the wrap-up, not after it: the turn ends, so an instruction to record that trails the
+    // instruction to wrap up is an instruction that never gets followed.
+    const lower = prompt.toLowerCase()
+    expect(lower.indexOf("record_goal_completion")).toBeLessThan(lower.indexOf("wrap up this turn soon"))
+    // And the tool must not be reachable only through a summary it cannot act on.
+    expect(prompt).not.toMatch(/summarize useful progress/)
+  })
+
+  test("the ledger a limited goal is holding is still the one the next turn resumes from", async () => {
+    // The runtime half of the test above, stated as the fact it depends on. A limited goal is not
+    // closed - it can be extended and resumed - so a unit finished right before the limit tripped is
+    // work the resumed run must not redo, and the completed list is the only place that survives. This
+    // assertion is the tripwire for the impl.ts gate, and it is now stated in the direction the fix
+    // moved: the record LANDS. It was written to fail if the gate were narrowed back to `active`,
+    // because that silently turns the wrap-up prompt above into a wasted tool call and loses the last
+    // units of an overnight run.
+    const sessionID = "h36-limit-gate"
+    await createGoal(sessionID, "keep improving the codebase", {
+      tokenBudget: 1_000,
+      maxAutoTurns: 0,
+      sessionTokensAtCreation: 0,
+    })
+    await accountUsage(sessionID, 1_500)
+
+    const limited = (await getGoal(sessionID))!
+    expect(limited.status).toBe("budgetLimited")
+    const recorded = await recordGoalCompletion(sessionID, "built the export affordance")
+    expect(recorded?.completed).toEqual(["built the export affordance"])
+    // Recording must not be a back door into resuming: the limited status is what makes `extendGoal`
+    // accept the goal and `setGoalStatus` still refuse to resume it, so a record that moved the status
+    // would remove the very remedy the stop exists to force.
+    expect(recorded?.status).toBe("budgetLimited")
+    // And the ledger is a disk fact, not a snapshot artefact: the resumed run reads the state file.
+    const raw = JSON.parse(await Bun.file(statePath()).text())
+    expect(raw.goals[sessionID].completed).toEqual(["built the export affordance"])
   })
 })
 

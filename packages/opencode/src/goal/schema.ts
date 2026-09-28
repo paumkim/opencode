@@ -17,6 +17,17 @@ export const GOAL_METADATA_KEY = "opencode.goal"
 export const GOAL_MAX_OBJECTIVE = 4000
 export const GOAL_MAX_EVIDENCE = 4000
 /**
+ * The optional one-line label the TUI goal bar shows INSTEAD of the objective, and the budget that
+ * label is held to. The objective is the durable record and is allowed to be as long as the work
+ * needs, but a goal bar is a single truncated row: rendering the raw objective there meant the most
+ * informative part of a well-written objective - its subject - was the part that got cut off.
+ *
+ * Counted in code points like every other limit here, and TRUNCATED rather than rejected (see
+ * `validateTitle`): a title is a presentation affordance, so a long one has to degrade to a short
+ * label instead of failing goal creation over a cosmetic field.
+ */
+export const GOAL_MAX_TITLE = 80
+/**
  * The ONE definition of "is this model-supplied string within its character limit?", shared by the
  * zod tool schemas and by `validateObjective`/`validateEvidence`. Counting lives here rather than
  * in each caller because the two previously used different units, which is precisely how a limit
@@ -128,6 +139,11 @@ export type GoalCheckpoint = {
 export type Goal = {
   sessionID: string
   objective: string
+  /**
+   * Optional short label for the status bar. Absent means "no title was given", and the TUI then
+   * renders the objective - so this is an addition to the goal, never a replacement for it.
+   */
+  title?: string
   status: GoalStatus
   tokenBudget: number | null
   tokensUsed: number
@@ -208,6 +224,12 @@ export type GoalSnapshot = Omit<
 }
 
 export type CreateGoalOptions = {
+  /**
+   * Optional short status-bar label. `null`/absent means "no title"; anything else is trimmed and
+   * truncated to `GOAL_MAX_TITLE` rather than rejected. Snake-cased tool args are mapped here by
+   * `createGoalFromTool`.
+   */
+  title?: string | null
   tokenBudget?: number | null
   maxAutoTurns?: number | null
   maxDurationSeconds?: number | null
@@ -270,6 +292,10 @@ const NullableNumber = Schema.optional(Schema.NullOr(Schema.Number))
 const GoalSchema = Schema.Struct({
   sessionID: Schema.String,
   objective: Schema.String,
+  // Optional so goals persisted before this field existed still decode; normalizeGoal bounds it on
+  // the next read. A required field here would fail decode for every goal already on disk, which
+  // quarantines the WHOLE state file (see `maxPromptFailures` below for the same precedent).
+  title: Schema.optional(Schema.String),
   status: Schema.Literals([
     "active",
     "paused",

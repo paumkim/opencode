@@ -24,7 +24,14 @@ const dialog = await import("../../src/ui/dialog")
 const toast = await import("../../src/ui/toast")
 const prompt = await import("../../src/ui/dialog-prompt")
 
-type Goal = { sessionID?: string; status: string; objective: string; createdAt: number; stopReason?: string }
+type Goal = {
+  sessionID?: string
+  status: string
+  objective: string
+  title?: string
+  createdAt: number
+  stopReason?: string
+}
 // createdAt is in SECONDS, matching the goal plugin's persisted state.
 const goal = (sessionID?: string, status = "active"): Goal => ({
   sessionID,
@@ -231,6 +238,37 @@ test("GoalBar keeps the objective compact and truncates it on a narrow prompt", 
   expect(frame).toMatch(/l bar/)
   expect(frame.split("\n")).toHaveLength(1)
   expect(frame.length).toBeLessThanOrEqual(40)
+})
+
+// The objective is the goal's durable record and is deliberately written to be as detailed as the
+// work needs, which is the wrong shape for a one-row bar: opentui cuts it head-and-tail, and the
+// part that names the work is usually in the half that gets dropped. The title is the model's short
+// label for exactly this row, so it is what the bar renders when the goal has one.
+test("GoalBar shows the goal title instead of the long objective", async () => {
+  const objective =
+    "Rewrite the incremental lexer at packages/opencode/src/goal/lexer.ts so a partial token survives a resumption boundary"
+  const titled = { ...goal("session-a"), objective, title: "Incremental lexer" }
+  await using view = await mount([titled], "session-a", false, WIDE)
+  const frame = await view.frame()
+  expect(frame).toContain("Incremental lexer")
+  // The whole point: the objective's subject is nowhere in the row, whole or truncated.
+  expect(frame).not.toContain("Rewrite the incremental lexer")
+  expect(frame).not.toContain("resumption boundary")
+  // A title is a few words, so the row still fits - that is what makes it worth preferring.
+  expect(frame).not.toContain("...")
+  expect(frame.split("\n")).toHaveLength(1)
+})
+
+test("GoalBar falls back to the objective when a goal has no usable title", async () => {
+  // Not a safety net: every goal created before titles existed has none, and a hand-edited state
+  // file can hold a whitespace-only one. Both must take the same route to the objective.
+  const objective = "Rewrite the incremental lexer at packages/opencode/src/goal/lexer.ts"
+  for (const title of [undefined, "   "]) {
+    await using view = await mount([{ ...goal("session-a"), objective, title }], "session-a", false, WIDE)
+    const frame = await view.frame()
+    expect(frame).toContain("Rewrite the incremental lexer")
+    expect(frame).toContain("lexer.ts")
+  }
 })
 
 test("GoalBar does not let an unscoped active goal override a matching paused goal", async () => {

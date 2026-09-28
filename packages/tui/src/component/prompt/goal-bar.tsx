@@ -21,6 +21,11 @@ type Goal = {
   id?: string
   sessionID?: string
   objective?: string
+  /**
+   * Optional short label the model supplies for exactly this bar. Absent on every goal created
+   * before the field existed, which is why the objective is still the fallback and not dead code.
+   */
+  title?: string
   text?: string
   status: GoalStatus | string
   createdAt: number | string
@@ -31,6 +36,15 @@ type Goal = {
 function goalText(g: Goal): string {
   if (typeof g.objective === "string" && g.objective.trim()) return g.objective
   if (typeof g.text === "string" && g.text.trim()) return g.text
+  return ""
+}
+
+/**
+ * The short label, or "" when the goal has none. Trimmed, because this reads a user-writable state
+ * file and a title of "   " must fall through to the objective rather than render as a blank row.
+ */
+function goalTitle(g: Goal): string {
+  if (typeof g.title === "string" && g.title.trim()) return g.title.trim()
   return ""
 }
 
@@ -266,7 +280,12 @@ export function GoalBar(props: { sessionID?: string }) {
     // "Goal paused" hides the one action that would actually let the user continue, and the
     // "Resume goal" menu row would then fail.
     if (goal.status === "paused" && goal.stopReason === "plan mode") return "switch to Build mode to run this goal"
-    return goalText(goal)
+    // The title when there is one, the objective otherwise. The objective is the durable record and
+    // is written to be as detailed as the work needs, which is the wrong shape for a one-row bar: it
+    // truncated to a head-and-tail fragment that usually cut off the part naming the work. A title
+    // the model wrote is a few words by construction, so it survives the row whole. Goals created
+    // before titles existed, and titles that are blank, still fall through to the objective.
+    return goalTitle(goal) || goalText(goal)
   })
   // The goal plugin always registers a command literally named `goal`.
   const goalCommandName = createMemo(() => {

@@ -3,8 +3,11 @@ import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
+  accountUsage,
+  completeGoal,
   createGoal,
   getGoal,
+  markGoalUnmet,
   recordAssistantProgress,
   recordContinuationResult,
   recordGoalCompletion,
@@ -142,6 +145,80 @@ describe("the completed-work ledger", () => {
 
     expect(output).not.toContain("nothing was recorded")
     expect((await getGoal(sessionID))?.completed).toEqual(["fixed the retry backoff"])
+  })
+
+  // The failure: `limitPrompt` is sent ONLY for a budgetLimited/usageLimited goal and it ends with
+  // "call record_goal_completion once for each unit you actually finished and verified in this
+  // session" - while `recordGoalCompletion` recorded onto `active` alone. The goal system's own
+  // wrap-up prompt was therefore a no-op: the tool answered "nothing was recorded", and the last
+  // units of work before the limit tripped vanished from the only durable record of them. The next
+  // turn is handed the ledger instead of the transcript, so it cannot tell finished work from
+  // interrupted work and redoes it.
+  test("a budget-limited goal still accepts the record its wrap-up prompt asks for", async () => {
+    const sessionID = "ledger-budget-limited"
+    // A real tripped limit rather than a hand-built status: `maybeStopForBudget` is what the runtime
+    // would have produced, so this is the goal the driver actually sends the wrap-up prompt for.
+    await createGoal(sessionID, "keep improving", { tokenBudget: 1_000, maxAutoTurns: 0, sessionTokensAtCreation: 0 })
+    await accountUsage(sessionID, 1_500)
+    expect((await getGoal(sessionID))?.status).toBe("budgetLimited")
+
+    const output = await runTool("record_goal_completion", { item: "built the export affordance" }, sessionID)
+
+    expect(output).not.toContain("nothing was recorded")
+    const goal = await getGoal(sessionID)
+    expect(goal?.completed).toEqual(["built the export affordance"])
+    // Widening the gate must not resurrect the goal: recording is the ONLY thing allowed here, so the
+    // limited status, its stopReason and the "extend before resuming" shape all have to survive a
+    // record. A record that flipped the status back to `active` would walk straight past the guard
+    // `setGoalStatus` enforces, and past `extendGoal`'s eligibility.
+    expect(goal?.status).toBe("budgetLimited")
+    expect(goal?.stopReason).toContain("token budget reached")
+  })
+
+  // The same failure on the OTHER limit: `reserveContinuation` routes budgetLimited and usageLimited
+  // to the same wrap-up prompt, so a turn cap or a duration cap that trips on the last unit of work
+  // loses that unit exactly as a token budget does.
+  test("a usage-limited goal still accepts the record its wrap-up prompt asks for", async () => {
+    const sessionID = "ledger-usage-limited"
+    // `maxAutoTurns: 0` means unbounded, so a usage limit needs a real cap, and
+    // `maybeStopForUsageLimit` is checked BEFORE the increment - hence two reservations to trip it.
+    await createGoal(sessionID, "keep improving", { maxAutoTurns: 1 })
+    await reserveContinuation(sessionID, 1, 0)
+    await reserveContinuation(sessionID, 1, 0)
+    expect((await getGoal(sessionID))?.status).toBe("usageLimited")
+
+    await runTool("record_goal_completion", { item: "ported the tokenizer to the new API" }, sessionID)
+
+    const goal = await getGoal(sessionID)
+    expect(goal?.completed).toEqual(["ported the tokenizer to the new API"])
+    expect(goal?.status).toBe("usageLimited")
+  })
+
+  // The half of the gate that must NOT move with the limit. A finished goal's ledger is what a
+  // completion audit reads back, and a record landing after `complete`/`unmet` would make that audit
+  // non-reproducible: the same finished goal would report different completed work depending on
+  // whether the wrap-up turn happened to call this tool. Both closed statuses are checked because
+  // `isClosed` is the one thing both share, and the tool must name which one refused.
+  test("a finished goal still refuses the record", async () => {
+    const cases = [
+      { status: "complete", sessionID: "ledger-complete" },
+      { status: "unmet", sessionID: "ledger-unmet" },
+    ] as const
+
+    for (const { status, sessionID } of cases) {
+      await createGoal(sessionID, "keep improving", { maxAutoTurns: 100 })
+      if (status === "complete") await completeGoal(sessionID, "verified in the worktree")
+      else await markGoalUnmet(sessionID, "the upstream API does not exist")
+      expect((await getGoal(sessionID))?.status).toBe(status)
+
+      const output = await runTool("record_goal_completion", { item: "fixed the retry backoff" }, sessionID)
+
+      expect(output).toContain("nothing was recorded")
+      // The refusal has to name the status, or the model is told a record was dropped without being
+      // told why and re-issues it against whatever goal it thinks is current.
+      expect(output).toContain(status)
+      expect((await getGoal(sessionID))?.completed).toEqual([])
+    }
   })
 
   test("a full ledger still records the new item instead of calling it a no-op", async () => {

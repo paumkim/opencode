@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdtemp, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
@@ -17,6 +17,7 @@ import {
   updateGoalObjective,
 } from "@/goal/impl"
 import { resolveCreateGoalLimits } from "@/goal/shared"
+import { GOAL_MAX_TITLE } from "@/goal/schema"
 
 let stateDir: string | undefined
 const previous = process.env.OPENCODE_GOAL_STATE_PATH
@@ -247,5 +248,95 @@ test("explicit null overrides configured token and duration defaults", () => {
     tokenBudget: 10,
     maxAutoTurns: null,
     maxDurationSeconds: 20,
+  })
+})
+
+// The title is the short label the TUI goal bar renders in place of the objective. It exists because
+// the objective is the goal's durable record and is written to be as detailed as the work needs,
+// which is the wrong shape for a single truncated row: the bar cut off the half naming the work.
+describe("goal title label", () => {
+  test("createGoal persists the trimmed short title the bar renders", async () => {
+    await isolated()
+    const sessionID = "titled"
+    const created = await createGoal(sessionID, "Rewrite the incremental lexer", {
+      title: "  Incremental lexer  ",
+    })
+    expect(created.title).toBe("Incremental lexer")
+    // Persisted, not merely returned: the bar reads the state file, never this snapshot.
+    expect((await readState()).goals[sessionID].title).toBe("Incremental lexer")
+  })
+
+  test("an over-long title is truncated rather than failing goal creation", async () => {
+    await isolated()
+    const sessionID = "long-title"
+    // Deliberately not a schema refusal. The title only ever reaches a bar that truncates anyway,
+    // so rejecting goal creation over a cosmetic field - the treatment `validateObjective` gives the
+    // objective - would fail the whole goal for a label nobody needed to be that precise.
+    const created = await createGoal(sessionID, "rewrite the lexer", { title: "A".repeat(GOAL_MAX_TITLE + 40) })
+    expect(created.title).toBe("A".repeat(GOAL_MAX_TITLE))
+    expect([...created.title!].length).toBe(GOAL_MAX_TITLE)
+    // ...and what gets bounded is the label, never the durable record.
+    expect(created.objective).toBe("rewrite the lexer")
+  })
+
+  test("a blank or absent title is stored as absent, not as an empty label", async () => {
+    await isolated()
+    expect((await createGoal("blank", "rewrite the lexer", { title: "   " })).title).toBeUndefined()
+    expect((await createGoal("absent", "rewrite the lexer")).title).toBeUndefined()
+    // Not "" and not null: `GoalSchema` declares the field as an optional String, so writing either
+    // would fail decode for the WHOLE state file, and a "" label renders as a row of padding
+    // instead of falling through to the objective.
+    const raw = JSON.parse(await readFile(process.env.OPENCODE_GOAL_STATE_PATH!, "utf8")) as {
+      goals: Record<string, { title?: string }>
+    }
+    expect(raw.goals.blank).not.toHaveProperty("title")
+    expect(raw.goals.absent).not.toHaveProperty("title")
+  })
+
+  test("a hand-edited state file cannot put an unbounded or blank title into the bar", async () => {
+    await isolated()
+    const sessionID = "hand-edited"
+    await createGoal(sessionID, "rewrite the lexer", { title: "Parser rewrite" })
+
+    // The state file is user-writable, so the bar cannot trust this field; bounding it on the READ
+    // path is what covers a value that never passed through `validateTitle` at all.
+    const overlong = await readState()
+    overlong.goals[sessionID].title = "B".repeat(GOAL_MAX_TITLE + 25)
+    await Bun.write(process.env.OPENCODE_GOAL_STATE_PATH!, JSON.stringify(overlong))
+    expect((await getGoal(sessionID))?.title).toBe("B".repeat(GOAL_MAX_TITLE))
+
+    const blanked = await readState()
+    blanked.goals[sessionID].title = "   "
+    await Bun.write(process.env.OPENCODE_GOAL_STATE_PATH!, JSON.stringify(blanked))
+    expect((await getGoal(sessionID))?.title).toBeUndefined()
+  })
+
+  test("updateGoalObjective relabels the goal and records the change in history", async () => {
+    await isolated()
+    const sessionID = "relabel"
+    await createGoal(sessionID, "ship the parser rewrite", { title: "Parser rewrite" })
+    const updated = await updateGoalObjective(sessionID, "ship the incremental parser rewrite", "active", {
+      title: "Incremental parser",
+    })
+    expect(updated.title).toBe("Incremental parser")
+    expect((await readState()).goals[sessionID].title).toBe("Incremental parser")
+    // A silent relabel would be indistinguishable from the edit never landing, and the label is
+    // the only thing the user sees in the bar while the work runs.
+    expect(updated.history.some((entry) => entry.detail.includes("Incremental parser"))).toBe(true)
+  })
+
+  test("an omitted title is kept, so an ordinary objective edit cannot drop the bar's label", async () => {
+    await isolated()
+    const sessionID = "no-relabel"
+    await createGoal(sessionID, "ship the parser rewrite", { title: "Parser rewrite" })
+    // `update_goal_objective` exists to change the objective, which is a required arg; a caller with
+    // no reason to relabel must not lose the label to an argument it never sent.
+    const kept = await updateGoalObjective(sessionID, "ship the incremental parser rewrite")
+    expect(kept.title).toBe("Parser rewrite")
+    expect(kept.history.some((entry) => entry.detail.includes("title"))).toBe(false)
+
+    // An explicit blank does clear it, which is the only way back to the objective fallback.
+    const cleared = await updateGoalObjective(sessionID, "ship the rewrite", "active", { title: "  " })
+    expect(cleared.title).toBeUndefined()
   })
 })
