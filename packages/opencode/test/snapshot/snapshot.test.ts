@@ -29,7 +29,9 @@ const nonWindowsInstance = process.platform === "win32" ? it.instance.skip : it.
 // Git always outputs /-separated paths internally. Snapshot.patch() joins them
 // with path.join (which produces \ on Windows) then normalizes back to /.
 // This helper does the same for expected values so assertions match cross-platform.
-const fwd = (...parts: string[]) => path.join(...parts).replaceAll("\\", "/")
+// Only path.sep is rewritten, because a backslash is a legal character in a
+// POSIX filename and replacing every one of them invents a directory.
+const fwd = (...parts: string[]) => path.join(...parts).replaceAll(path.sep, "/")
 const SNAPSHOT_BATCH_BOUNDARY = 100
 const OVER_BATCH_COUNT = SNAPSHOT_BATCH_BOUNDARY + 1
 const MIXED_BATCH_GROUP_COUNT = Math.ceil(OVER_BATCH_COUNT / 4)
@@ -252,6 +254,40 @@ it.instance(
       expect(files).toContain(fwd(tmp.path, "file with spaces.txt"))
       expect(files).toContain(fwd(tmp.path, "file-with-dashes.txt"))
       expect(files).toContain(fwd(tmp.path, "file_with_underscores.txt"))
+    }),
+  ),
+  { git: true },
+)
+
+// Windows forbids a tab, a newline, and a trailing space in a filename, so
+// every name below is unmakeable there. Git quotes a path in non-`-z` output
+// only when it must, and it is that escaping -- not the character itself -- that
+// is what the parser has to survive.
+nonWindowsInstance(
+  "patch names files git has to escape, and names with edge whitespace",
+  withTrackedSnapshot(({ tmp, snapshot, before }) =>
+    Effect.gen(function* () {
+      // A tab, a newline, a double quote, and a backslash are the four things
+      // git C-quotes. The last one is not quoted at all, so it separates the
+      // escaping problem from the trimming problem.
+      const escaped = [
+        "tab\tfile.txt",
+        "new\nline.txt",
+        'quote"file.txt',
+        "back\\slash.txt",
+        "trail .txt",
+        "trailing ",
+        " leading",
+      ]
+      for (const name of escaped) yield* write(`${tmp.path}/${name}`, "CONTENT")
+      const files = (yield* snapshot.patch(before)).files
+      for (const name of escaped) expect(files).toContain(fwd(tmp.path, name))
+      // Every reported name has to be a path that exists, not merely one that
+      // was reported: a quoted or trimmed name reads back as a file nobody can
+      // open, which is the whole point of this list. This also catches a name
+      // that got split in two, which would otherwise pass the loop above.
+      for (const item of files) expect(yield* exists(item)).toBe(true)
+      expect(files.length).toBe(escaped.length)
     }),
   ),
   { git: true },
