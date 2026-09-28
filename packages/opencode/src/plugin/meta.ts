@@ -4,6 +4,7 @@ import { fileURLToPath } from "url"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { Global } from "@opencode-ai/core/global"
 import { Filesystem } from "@/util/filesystem"
+import { errorMessage } from "@/util/error"
 import { Flock } from "@opencode-ai/core/util/flock"
 
 import { parsePluginSpecifier, pluginSource } from "./shared"
@@ -110,9 +111,51 @@ function fingerprint(value: Core) {
   return [value.target, value.requested ?? "", value.version ?? ""].join("|")
 }
 
-async function read(file: string): Promise<Store> {
-  return Filesystem.readJson<Store>(file).catch(() => ({}) as Store)
+/**
+ * Reads the plugin metadata store, distinguishing "not written yet" from "could not be read".
+ *
+ * The old version was `readJson(file).catch(() => ({}) as Store)`, which made a failed read
+ * indistinguishable from a first run - and that matters because every writer reads first and writes
+ * the result back. `touchMany` would take the empty store, add only the plugins in the current batch,
+ * and write that out, so one transient failure (a file locked by another process, a partial write
+ * from a killed process) permanently erased the recorded metadata of every plugin not in that batch:
+ * install times, fingerprints, and user-picked themes. Silent, unrecoverable data loss caused by a
+ * read that was merely expected to be recoverable.
+ *
+ * So a read that fails for any reason other than ENOENT throws. ENOENT is the genuine first-run case
+ * and still yields an empty store. A read that SUCCEEDS but does not contain an object is a
+ * different problem again - a corrupt or foreign file - and is reported too, since writing over it
+ * would destroy whatever it holds.
+ *
+ * Exported so both halves are testable: `readJson` is the only thing that has to be substituted, and
+ * a real filesystem makes a transient read failure awkward to arrange.
+ */
+export async function readPluginStore(file: string) {
+  let raw: unknown
+  try {
+    raw = await Filesystem.readJson(file)
+  } catch (error) {
+    if (isMissingFile(error)) return {} as Store
+    throw new Error(
+      `Failed to read the plugin metadata store at ${file}. Refusing to continue, because the next write would overwrite it with a partial store and permanently lose the plugins it recorded: ${errorMessage(error)}`,
+    )
+  }
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error(
+      `The plugin metadata store at ${file} is not an object${Array.isArray(raw) ? " (it is an array)" : ` (it is ${raw === null ? "null" : typeof raw})`}. Refusing to continue, because the next write would overwrite it.`,
+    )
+  }
+  return raw as Store
 }
+
+/** The one read failure that means "nothing has been written yet". */
+function isMissingFile(error: unknown) {
+  if (typeof error !== "object" || error === null) return false
+  const code = (error as NodeJS.ErrnoException).code
+  return code === "ENOENT"
+}
+
+const read = readPluginStore
 
 async function row(item: Touch): Promise<Row> {
   return {
