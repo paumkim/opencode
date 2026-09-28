@@ -59,6 +59,7 @@ import { SubagentFooter } from "./subagent-footer.tsx"
 import { filetype } from "../../util/filetype"
 import parsers from "../../parsers-config"
 import { errorMessage } from "../../util/error"
+import { mutateRemote } from "../../util/mutate-remote"
 import { Toast, useToast } from "../../ui/toast"
 import { useKV } from "../../context/kv.tsx"
 import stripAnsi from "strip-ansi"
@@ -627,14 +628,20 @@ export function Session() {
         const revert = session()?.revert?.messageID
         const message = messages().findLast((x) => (!revert || x.id < revert) && x.role === "user")
         if (!message) return
-        void sdk.client.session
-          .revert({
-            sessionID: route.sessionID,
-            messageID: message.id,
-          })
-          .then(() => {
-            toBottom()
-          })
+        // Only rewind the prompt once the server has actually rewound the
+        // conversation. `session.revert` answers 409 while a session is running;
+        // refilling the prompt regardless hands the user text to resend against
+        // a transcript that never changed.
+        const reverted = await mutateRemote(
+          () =>
+            sdk.client.session.revert({
+              sessionID: route.sessionID,
+              messageID: message.id,
+            }),
+          (reason) => toast.show({ variant: "error", title: "Could not undo", message: reason }),
+        )
+        if (!reverted) return
+        toBottom()
         const parts = sync.data.part[message.id]
         prompt?.set(
           parts.reduce(
@@ -659,22 +666,23 @@ export function Session() {
       slash: {
         name: "redo",
       },
-      run: () => {
+      run: async () => {
         dialog.clear()
         const messageID = session()?.revert?.messageID
         if (!messageID) return
         const message = messages().find((x) => x.role === "user" && x.id > messageID)
+        const report = (reason: string) => toast.show({ variant: "error", title: "Could not redo", message: reason })
         if (!message) {
-          void sdk.client.session.unrevert({
-            sessionID: route.sessionID,
-          })
-          prompt?.set({ input: "", parts: [] })
+          // Do not clear the prompt unless the redo landed. That input is the
+          // user's unsent work, and the server is free to refuse.
+          const redone = await mutateRemote(() => sdk.client.session.unrevert({ sessionID: route.sessionID }), report)
+          if (redone) prompt?.set({ input: "", parts: [] })
           return
         }
-        void sdk.client.session.revert({
-          sessionID: route.sessionID,
-          messageID: message.id,
-        })
+        await mutateRemote(
+          () => sdk.client.session.revert({ sessionID: route.sessionID, messageID: message.id }),
+          report,
+        )
       },
     },
     {
