@@ -6,6 +6,7 @@ import { TuiConfig } from "@opencode-ai/tui/config"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { Global } from "@opencode-ai/core/global"
 import { Filesystem } from "@/util/filesystem"
+import { errorMessage } from "@/util/error"
 import * as ConfigPaths from "@/config/paths"
 
 const TUI_SCHEMA_URL = "https://opencode.ai/tui.json"
@@ -25,15 +26,59 @@ interface MigrateInput {
  * Migrates tui-specific keys (theme, keybinds, tui) from opencode.json files
  * into dedicated tui.json files. Migration is performed per-directory and
  * skips only locations where a tui.json already exists.
+ *
+ * Every step that can fail reports rather than returning a falsy sentinel, because each of these
+ * failures is invisible and in two cases permanent. The migration is a one-way rewrite of the user's
+ * own config: a read that fails means the theme and keybinds in that file are never carried over, and
+ * a write that fails means the legacy keys stay in `opencode.json` while `tui.json` is never created -
+ * so the next run tries again, but the user has no idea their settings are not migrating.
+ *
+ * The permanent case is the strip. Once `tui.json` exists, `targetExists` skips the directory
+ * forever, so a strip that fails after a successful write leaves the legacy keys in `opencode.json`
+ * permanently, duplicating the migrated values with no record that the cleanup was attempted.
  */
 export async function migrateTuiConfig(input: MigrateInput) {
-  const opencode = await opencodeFiles(input)
-  for (const file of opencode) {
-    const source = await Filesystem.readText(file).catch(() => undefined)
+  return migrateFiles(
+    await opencodeFiles(input),
+    {
+      readText: (file: string) => Filesystem.readText(file),
+      exists: (file: string) => Filesystem.exists(file),
+      write: (file: string, content: string) => Filesystem.write(file, content),
+    },
+    (message) => console.error(message),
+  )
+}
+
+/**
+ * The filesystem surface `migrateFiles` needs. Declared rather than picked from `Filesystem` because
+ * `write` accepts a wider union there, and picking it would make the injected implementation have to
+ * accept buffers it is never given.
+ */
+export interface MigrateFs {
+  readText(file: string): Promise<string>
+  exists(file: string): Promise<boolean>
+  write(file: string, content: string): Promise<void>
+}
+
+/**
+ * The per-file migration, over injected filesystem operations so the failure paths are reachable
+ * from a test without arranging real permission or disk errors.
+ */
+export async function migrateFiles(files: readonly string[], fs: MigrateFs, report: (message: string) => void) {
+  for (const file of files) {
+    const source = await fs.readText(file).catch((error) => {
+      report(`[config] could not read ${file} to migrate tui settings: ${errorMessage(error)}`)
+      return undefined
+    })
     if (!source) continue
     const errors: JsoncParseError[] = []
     const data = parseJsonc(source, errors, { allowTrailingComma: true })
-    if (errors.length || !data || typeof data !== "object" || Array.isArray(data)) continue
+    if (errors.length || !data || typeof data !== "object" || Array.isArray(data)) {
+      report(
+        `[config] skipped migrating tui settings from ${file}: the file is not valid JSON, so its theme, keybinds and tui keys are still read from there and will never move to tui.json`,
+      )
+      continue
+    }
 
     const theme = decodeTheme("theme" in data ? data.theme : undefined)
     const keybinds = decodeRecord("keybinds" in data ? data.keybinds : undefined)
@@ -47,7 +92,7 @@ export async function migrateTuiConfig(input: MigrateInput) {
     if (extracted.theme === undefined && extracted.keybinds === undefined && !tui) continue
 
     const target = path.join(path.dirname(file), "tui.json")
-    const targetExists = await Filesystem.exists(target)
+    const targetExists = await fs.exists(target)
     if (targetExists) continue
 
     const payload: Record<string, unknown> = {
@@ -57,12 +102,16 @@ export async function migrateTuiConfig(input: MigrateInput) {
     if (extracted.keybinds !== undefined) payload.keybinds = extracted.keybinds
     if (tui) Object.assign(payload, tui)
 
-    const wrote = await Filesystem.write(target, JSON.stringify(payload, null, 2))
-      .then(() => true)
-      .catch(() => false)
+    const wrote = await fs.write(target, JSON.stringify(payload, null, 2)).then(
+      () => true,
+      (error) => {
+        report(`[config] could not write ${target}: ${errorMessage(error)}`)
+        return false
+      },
+    )
     if (!wrote) continue
 
-    const stripped = await backupAndStripLegacy(file, source)
+    const stripped = await backupAndStripLegacy(file, source, fs, report)
     if (!stripped) continue
   }
 }
@@ -86,14 +135,28 @@ function normalizeTui(data: Record<string, unknown>):
     : parsed
 }
 
-async function backupAndStripLegacy(file: string, source: string) {
+async function backupAndStripLegacy(
+  file: string,
+  source: string,
+  fs: Pick<MigrateFs, "exists" | "write">,
+  report: (message: string) => void,
+) {
   const backup = file + ".tui-migration.bak"
-  const hasBackup = await Filesystem.exists(backup)
+  const hasBackup = await fs.exists(backup)
   const backed = hasBackup
     ? true
-    : await Filesystem.write(backup, source)
-        .then(() => true)
-        .catch(() => false)
+    : await fs.write(backup, source).then(
+        () => true,
+        (error) => {
+          // Refusing to strip without a backup is correct - the backup is what makes the rewrite
+          // reversible - but it is also the one failure here that cannot be retried later, since
+          // tui.json now exists and `targetExists` skips this directory from now on.
+          report(
+            `[config] could not write ${backup}, so the tui settings in ${file} were left in place. The migration will not retry: ${errorMessage(error)}`,
+          )
+          return false
+        },
+      )
   if (!backed) return false
 
   const text = ["theme", "keybinds", "tui"].reduce((acc, key) => {
@@ -107,9 +170,15 @@ async function backupAndStripLegacy(file: string, source: string) {
     return applyEdits(acc, edits)
   }, source)
 
-  return Filesystem.write(file, text)
-    .then(() => true)
-    .catch(() => false)
+  return fs.write(file, text).then(
+    () => true,
+    (error) => {
+      report(
+        `[config] wrote tui.json but could not remove the migrated keys from ${file}, so they are now duplicated in both files. The cleanup will not be retried: ${errorMessage(error)}`,
+      )
+      return false
+    },
+  )
 }
 
 async function opencodeFiles(input: { directories: string[]; cwd: string }) {
