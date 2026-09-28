@@ -132,6 +132,28 @@ export function replyToPermission(input: {
   return mutateRemote(() => input.send(input.answer), input.report)
 }
 
+export function deliverPermissionReply(input: {
+  answer: { reply: "once" | "always" | "reject"; message?: string }
+  /** The HTTP transport, when there is no shared-workspace socket. */
+  http?: (answer: { reply: "once" | "always" | "reject"; message?: string }) => Promise<{
+    data?: unknown
+    error?: unknown
+  }>
+  /** The shared-workspace transport. Returns false when the socket dropped it. */
+  shared?: (answer: { reply: "once" | "always" | "reject"; message?: string }) => boolean
+  report: (reason: string) => void
+}): void | Promise<boolean> {
+  if (input.shared) {
+    // The socket reconnects on route changes, so an answer written while it was
+    // down used to disappear into a bare `return`. The agent then stayed blocked
+    // on a tool the user could see they had approved.
+    if (!input.shared(input.answer))
+      input.report("the shared workspace connection dropped the answer — the session may no longer be open")
+    return
+  }
+  if (input.http) return replyToPermission({ send: input.http, answer: input.answer, report: input.report })
+}
+
 export function PermissionPrompt(props: { request: PermissionRequest; directory?: string }) {
   const sdk = useSDK()
   const project = useProject()
@@ -146,8 +168,9 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
   const reportReply = (reason: string) =>
     toast.show({ variant: "error", title: "Could not answer the permission request", message: reason })
   const reply = (answer: { reply: "once" | "always" | "reject"; message?: string }) =>
-    replyToPermission({
-      send: (payload) =>
+    deliverPermissionReply({
+      answer,
+      http: (payload) =>
         sdk.client.permission.reply({
           ...payload,
           requestID: props.request.id,
@@ -155,7 +178,10 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
           directory: props.directory,
           workspace: project.workspace.current(),
         }),
-      answer,
+      shared: sharedWs
+        ? (payload) =>
+            sharedWs.sendPermissionReply(props.request.sessionID, props.request.id, payload.reply, payload.message)
+        : undefined,
       report: reportReply,
     })
 
@@ -207,22 +233,14 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
           onSelect={(option) => {
             setStore("stage", "permission")
             if (option === "cancel") return
-            if (sharedWs) {
-              sharedWs.sendPermissionReply(props.request.sessionID, props.request.id, "always")
-            } else {
-              void reply({ reply: "always" })
-            }
+            void reply({ reply: "always" })
           }}
         />
       </Match>
       <Match when={store.stage === "reject"}>
         <RejectPrompt
           onConfirm={(message) => {
-            if (sharedWs) {
-              sharedWs.sendPermissionReply(props.request.sessionID, props.request.id, "reject", message || undefined)
-            } else {
-              void reply({ reply: "reject", message: message || undefined })
-            }
+            void reply({ reply: "reject", message: message || undefined })
           }}
           onCancel={() => {
             setStore("stage", "permission")
@@ -454,18 +472,10 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
                     setStore("stage", "reject")
                     return
                   }
-                  if (sharedWs) {
-                    sharedWs.sendPermissionReply(props.request.sessionID, props.request.id, "reject")
-                  } else {
-                    void reply({ reply: "reject" })
-                  }
+                  void reply({ reply: "reject" })
                   return
                 }
-                if (sharedWs) {
-                  sharedWs.sendPermissionReply(props.request.sessionID, props.request.id, "once")
-                } else {
-                  void reply({ reply: "once" })
-                }
+                void reply({ reply: "once" })
               }}
             />
           )

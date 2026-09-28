@@ -151,9 +151,23 @@ export const { use: useSharedWorkspace, provider: SharedWorkspaceProvider, useOp
       })
     }
 
-    function send(message: SharedWorkspaceMessage) {
-      if (!ws || ws.readyState !== WebSocket.OPEN) return
-      ws.send(JSON.stringify(message))
+    /**
+     * Hands a message to the socket, reporting whether it actually went out.
+     *
+     * The socket reconnects on route changes, so there is a real window where it
+     * is down. Returning quietly meant a permission answer written in that
+     * window was discarded and the agent stayed blocked on a tool the user could
+     * see they had approved, with nothing on screen to explain it. `ws.send`
+     * can also throw when the socket closes between the check and the write.
+     */
+    function send(message: SharedWorkspaceMessage): boolean {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return false
+      try {
+        ws.send(JSON.stringify(message))
+        return true
+      } catch {
+        return false
+      }
     }
 
     // Auto-join when route changes to a session
@@ -196,19 +210,19 @@ export const { use: useSharedWorkspace, provider: SharedWorkspaceProvider, useOp
         }
       },
       sendPrompt(sessionID: string, payload: Record<string, unknown>) {
-        send({ type: "prompt", sessionID, payload })
+        return send({ type: "prompt", sessionID, payload })
       },
       sendCommand(sessionID: string, command: string, args: string, model?: string, agent?: string, variant?: string) {
-        send({ type: "command", sessionID, payload: { command, args, model, agent, variant } })
+        return send({ type: "command", sessionID, payload: { command, args, model, agent, variant } })
       },
       sendShell(sessionID: string, command: string, model?: string, agent?: string) {
-        send({ type: "shell", sessionID, payload: { command, model, agent } })
+        return send({ type: "shell", sessionID, payload: { command, model, agent } })
       },
       sendPermissionReply(sessionID: string, requestID: string, response: string, message?: string) {
-        send({ type: "permissionReply", sessionID, payload: { requestID, response, message } })
+        return send({ type: "permissionReply", sessionID, payload: { requestID, response, message } })
       },
       sendAbort(sessionID: string) {
-        send({ type: "abort", sessionID })
+        return send({ type: "abort", sessionID })
       },
     }
   },

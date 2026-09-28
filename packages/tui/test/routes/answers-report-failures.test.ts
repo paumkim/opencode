@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { replyToPermission } from "../../src/routes/session/permission"
+import { replyToPermission, deliverPermissionReply } from "../../src/routes/session/permission"
 import { sendQuestionAnswer } from "../../src/routes/session/question"
 
 // Both prompts used to fire their reply with `void`. The client resolves a
@@ -86,5 +86,49 @@ describe("sendQuestionAnswer", () => {
     })
     expect(ok).toBe(true)
     expect(reported).toEqual([])
+  })
+})
+
+// The shared-workspace transport is a different path entirely: a websocket
+// rather than the SDK. `send` used to `return` quietly when the socket was not
+// open, and the socket reconnects on route changes — so an answer written in
+// that window was discarded and the agent stayed blocked on a tool the user
+// could see they had approved.
+describe("deliverPermissionReply over the shared workspace socket", () => {
+  test("reports a drop when the socket is not open", () => {
+    const reported: string[] = []
+    deliverPermissionReply({
+      answer: { reply: "always" },
+      shared: () => false,
+      report: (reason) => reported.push(reason),
+    })
+    expect(reported).toHaveLength(1)
+    expect(reported[0]).toContain("dropped the answer")
+  })
+
+  test("says nothing when the socket accepted the answer", () => {
+    const reported: string[] = []
+    const seen: unknown[] = []
+    deliverPermissionReply({
+      answer: { reply: "reject", message: "no" },
+      shared: (answer) => {
+        seen.push(answer)
+        return true
+      },
+      report: (reason) => reported.push(reason),
+    })
+    expect(reported).toEqual([])
+    expect(seen).toEqual([{ reply: "reject", message: "no" }])
+  })
+
+  test("falls back to the http transport when there is no socket", async () => {
+    const reported: string[] = []
+    const ok = await deliverPermissionReply({
+      answer: { reply: "once" },
+      http: async () => ({ data: undefined, error: { data: { message: "refused" } } }),
+      report: (reason) => reported.push(reason),
+    })
+    expect(ok).toBe(false)
+    expect(reported).toEqual(["refused"])
   })
 })
