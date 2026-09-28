@@ -619,9 +619,15 @@ const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Service | C
                   }
                   const out = batch.stdout
 
-                  const fail = (msg: string, extra?: Record<string, string>) => {
+                  // Returning undefined is what sends the caller to the per-file
+                  // `git show` fallback, so this branch is invisible in the diff
+                  // itself -- it has to log, or a repo that reliably trips a
+                  // parse failure here silently pays the per-file cost forever
+                  // with no way to tell why.
+                  const fail = Effect.fnUntraced(function* (msg: string, extra?: Record<string, string>) {
+                    yield* Effect.logInfo(msg, { ...extra, rows: rows.length, refs: refs.length })
                     return undefined
-                  }
+                  })
 
                   const map = new Map<string, { before: string; after: string }>()
                   const dec = new TextDecoder()
@@ -630,7 +636,7 @@ const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Service | C
                     let end = i
                     while (end < out.length && out[end] !== 10) end += 1
                     if (end >= out.length) {
-                      return fail(
+                      return yield* fail(
                         "git cat-file --batch returned a truncated header during snapshot diff, falling back to per-file git show",
                       )
                     }
@@ -645,7 +651,7 @@ const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Service | C
 
                     const match = head.match(/^[0-9a-f]+ blob (\d+)$/)
                     if (!match) {
-                      return fail(
+                      return yield* fail(
                         "git cat-file --batch returned an unexpected header during snapshot diff, falling back to per-file git show",
                         { head },
                       )
@@ -653,7 +659,7 @@ const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Service | C
 
                     const size = Number(match[1])
                     if (!Number.isInteger(size) || size < 0 || i + size >= out.length || out[i + size] !== 10) {
-                      return fail(
+                      return yield* fail(
                         "git cat-file --batch returned truncated content during snapshot diff, falling back to per-file git show",
                         { head },
                       )
@@ -667,7 +673,7 @@ const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Service | C
                   }
 
                   if (i !== out.length) {
-                    return fail(
+                    return yield* fail(
                       "git cat-file --batch returned trailing data during snapshot diff, falling back to per-file git show",
                     )
                   }
