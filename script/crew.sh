@@ -136,6 +136,15 @@ adopted() {
 # going stale the moment the agent commits.
 write_prompt() {
   local dir="$1" label="$2" out="$3"
+  # A caller-supplied prompt replaces the generated one. A display or smoke test needs a window
+  # that does something specific and small, and the rule against hand-writing per-window prompts
+  # exists because a hand-written one goes stale against real repo state - which is not a risk for
+  # a prompt that only creates a goal and stops. Going through `start` still means the env, the
+  # pid file and the startup liveness check are the same ones a real crew uses.
+  if [ -n "${CREW_PROMPT_OVERRIDE:-}" ]; then
+    printf '%s\n' "$CREW_PROMPT_OVERRIDE" > "$out"
+    return 0
+  fi
   local branch head recent
   branch="$(git -C "$dir" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
   head="$(git -C "$dir" rev-parse --short HEAD 2>/dev/null || echo unknown)"
@@ -161,13 +170,17 @@ $recent
 Then create the goal:
 1. Call get_goal().
 2. If there is no active goal, call create_goal with:
-   - objective: "Keep improving the $label codebase on $branch: find real bugs,
-     rough edges, unfinished seams, and missing test coverage; make minimal verified
-     fixes, add a test for each, and commit each finished unit."
+   - objective: "Keep the $label codebase healthy on $branch."
+   - title: "Improve $label"
    - max_no_progress_turns: 8
    - max_prompt_failures: 5
-   These raised tolerances are REQUIRED. The defaults self-pause an unattended run
+   The raised tolerances are REQUIRED. The defaults self-pause an unattended run
    on the first quiet stretch or transient provider failure.
+   The title is REQUIRED. It is the few-word label the session status bar shows;
+   without it the bar falls back to the objective and runs a truncated line of
+   text across the panel. The objective stays one short sentence on purpose - it
+   is re-read on every continuation, and the backlog it used to carry is
+   rediscovered from git log anyway.
 3. Call get_goal() again and confirm status is "active" before implementing.
 
 Then loop, one bounded deliverable at a time:

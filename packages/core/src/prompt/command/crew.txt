@@ -15,8 +15,7 @@ Subcommands:
 | command | effect |
 | --- | --- |
 | `doctor` | preflight only: binary, display, memory, per-project git state. No side effects. |
-| `start [N]` | launch N windows, round-robin over the configured projects. |
-| `start <project> [N]` | launch N windows on one project only. |
+| `start [N] [project]` | launch N windows, round-robin over the configured projects. Pass a project PATH to run every window on that one project. |
 | `status` | every agent window it can see, including ones it did not start. |
 | `stop [name...]` | stop named windows, or every window it can see. |
 | `logs <name> [lines]` | tail a window's launch log. |
