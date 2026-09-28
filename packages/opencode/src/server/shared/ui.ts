@@ -1,8 +1,9 @@
 import { FSUtil } from "@opencode-ai/core/fs-util"
-import { Effect, Stream } from "effect"
+import { Cause, Effect, Stream } from "effect"
 import { HttpBody, HttpClient, HttpClientRequest, HttpServerRequest, HttpServerResponse } from "effect/unstable/http"
 import { createHash } from "node:crypto"
 import { ProxyUtil } from "../proxy-util"
+import { errorMessage } from "@/util/error"
 
 let embeddedUIPromise: Promise<Record<string, string> | null> | undefined
 
@@ -35,6 +36,33 @@ function proxyResponseHeaders(headers: Record<string, string>) {
   result.delete("content-length")
   result.delete("transfer-encoding")
   return result
+}
+
+/**
+ * Forwards a proxied asset body, recording the cause if the upstream stream fails.
+ *
+ * A failed body used to be replaced with an empty stream, which is a false success rather than a
+ * visible error: `proxyResponseHeaders` strips content-length, so the browser sees a clean
+ * end-of-stream on a 200 and gets a half-written JS or CSS bundle. It reports "Unexpected end of
+ * input" with no indication that the server failed, and nothing was logged here, so the only
+ * evidence of the cause was a browser console message naming a line in a file the user did not
+ * write.
+ *
+ * The status cannot be changed once streaming has started, so the record is the part that can be
+ * honest: the reason is reported with the path and status that produced it, which is the difference
+ * between "app.opencode.ai/assets/index.js failed: socket hang up" and an unexplained parse error.
+ */
+export function proxiedAssetStream<E>(stream: Stream.Stream<Uint8Array, E>, path: string, status: number) {
+  return stream.pipe(
+    Stream.tapCause((cause) =>
+      Effect.logWarning("failed to stream proxied asset", {
+        path,
+        status,
+        error: errorMessage(Cause.squash(cause)),
+      }),
+    ),
+    Stream.catchCause(() => Stream.empty),
+  )
 }
 
 export function upstreamURL(path: string) {
@@ -100,7 +128,19 @@ export function serveUIEffect(
     }
 
     headers.set("Content-Security-Policy", csp())
-    return HttpServerResponse.stream(response.stream.pipe(Stream.catchCause(() => Stream.empty)), {
+    // A failed upstream body used to be replaced with an empty stream, which is a false success
+    // rather than a visible error: `proxyResponseHeaders` strips content-length, so the browser
+    // sees a clean end-of-stream on a 200 and gets a half-written JS or CSS bundle. It reports
+    // "Unexpected end of input" with no indication that the server failed, and nothing was logged
+    // here, so the only evidence of the cause was a browser console message naming a line in a
+    // file the user did not write.
+    //
+    // The status cannot be changed once streaming has started, so the record is what we can
+    // honestly offer. The reason is reported with the path and status that produced it, which is
+    // the difference between a report of "app.opencode.ai/assets/index.js failed: socket hang up"
+    // and an unexplained parse error.
+    const body = proxiedAssetStream(response.stream, path, response.status)
+    return HttpServerResponse.stream(body, {
       status: response.status,
       headers,
     })
