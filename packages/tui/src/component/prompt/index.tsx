@@ -1400,9 +1400,6 @@ export function Prompt(props: PromptProps) {
   return (
     <>
       <box ref={(r: BoxRenderable) => (anchor = r)} visible={props.visible !== false} width="100%">
-        <Show when={props.visible !== false && !!props.sessionID}>
-          <GoalBar sessionID={props.sessionID} />
-        </Show>
         <box
           width="100%"
           border={["left"]}
@@ -1412,6 +1409,12 @@ export function Prompt(props: PromptProps) {
             bottomLeft: "╹",
           }}
         >
+          {/* The goal bar sits inside the bordered box so the accent rail runs unbroken from
+              the goal header down through the prompt. Outside it the rail began below the
+              header, and the two read as separate stacked widgets instead of one panel. */}
+          <Show when={props.visible !== false && !!props.sessionID}>
+            <GoalBar sessionID={props.sessionID} />
+          </Show>
           <box
             paddingLeft={2}
             paddingRight={2}
