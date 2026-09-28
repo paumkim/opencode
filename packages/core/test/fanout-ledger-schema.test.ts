@@ -2,28 +2,30 @@ import { describe, expect, test } from "bun:test"
 import { Effect } from "effect"
 import { sql } from "drizzle-orm"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
+import type { SqlClient } from "effect/unstable/sql/SqlClient"
 import { EffectDrizzleSqlite } from "@opencode-ai/effect-drizzle-sqlite"
+import { Database } from "@opencode-ai/core/database/database"
 import { DatabaseMigration } from "@opencode-ai/core/database/migration"
 import fanoutLedgerMigration from "@opencode-ai/core/database/migration/20260928020838_fanout_ledger"
 
-const run = <A, E>(effect: Effect.Effect<A, E, SqliteClient.Service>) =>
+const run = <A, E>(effect: Effect.Effect<A, E, SqlClient>) =>
   Effect.runPromise(
     effect.pipe(Effect.provide(SqliteClient.layer({ filename: ":memory:", disableWAL: true })), Effect.scoped),
   )
 
 const makeDb = EffectDrizzleSqlite.makeWithDefaults()
 
-const columnNames = (db: EffectDrizzleSqlite.EffectSQLiteDatabase, table: string) =>
+const columnNames = (db: Database.Interface["db"], table: string) =>
   db
     .all<{ name: string }>(sql`PRAGMA table_info(${sql.identifier(table)})`)
     .pipe(Effect.map((rows) => rows.map((row) => row.name)))
 
-const indexNames = (db: EffectDrizzleSqlite.EffectSQLiteDatabase, table: string) =>
+const indexNames = (db: Database.Interface["db"], table: string) =>
   db
     .all<{ name: string }>(sql`PRAGMA index_list(${sql.identifier(table)})`)
     .pipe(Effect.map((rows) => rows.map((row) => row.name)))
 
-const seedSession = (db: EffectDrizzleSqlite.EffectSQLiteDatabase, id: string) =>
+const seedSession = (db: Database.Interface["db"], id: string) =>
   db.run(
     sql`INSERT INTO session (id, project_id, slug, directory, title, version, time_created, time_updated) VALUES (${id}, 'global', ${id}, '/project', 'title', 'test', 1, 1)`,
   )
