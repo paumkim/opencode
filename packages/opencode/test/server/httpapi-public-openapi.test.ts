@@ -105,6 +105,53 @@ describe("PublicApi OpenAPI v2 errors", () => {
     const spec = OpenApi.fromApi(PublicApi) as OpenApiSpec
 
     expect(spec.components.schemas.V2Event1).toBeUndefined()
+    // The union must survive the rename under the name the SSE response points
+    // at, or `VStream` documents a string whose payload schema is gone.
+    expect(spec.components.schemas.V2Event?.anyOf?.length).toBeGreaterThan(0)
+  })
+
+  // The invariant that actually matters, and the one whose absence let a
+  // dangling `$ref` ship: `/api/event` writes a reference to `VStream`
+  // unconditionally, and `fixV2EventSchemas` only defined it for one of the two
+  // shapes HttpApi emits. When the other shape arrived the document referenced a
+  // schema that was not there, and `bun run script/build.ts` in packages/sdk/js
+  // died on the dangling pointer — the SDK could not be regenerated at all.
+  // Asserting only that `V2Event1` is undefined (above) passed happily through
+  // exactly that, because the broken shape is the one where it never exists.
+  test("every $ref in the spec resolves to a defined schema", () => {
+    const spec = OpenApi.fromApi(PublicApi) as OpenApiSpec
+    const defined = new Set(Object.keys(spec.components.schemas))
+    const dangling: string[] = []
+
+    const visit = (node: unknown) => {
+      if (Array.isArray(node)) {
+        node.forEach(visit)
+        return
+      }
+      if (!node || typeof node !== "object") return
+      for (const [key, value] of Object.entries(node)) {
+        if (key === "$ref" && typeof value === "string" && value.startsWith("#/components/schemas/")) {
+          const name = value.slice("#/components/schemas/".length)
+          if (!defined.has(name)) dangling.push(name)
+        } else {
+          visit(value)
+        }
+      }
+    }
+    visit({ paths: spec.paths, components: spec.components })
+
+    expect(dangling.toSorted()).toEqual([])
+  })
+
+  test("documents the /api/event stream as a JSON string over the event union", () => {
+    const spec = OpenApi.fromApi(PublicApi) as OpenApiSpec
+    const schema = spec.paths["/api/event"]?.get?.responses?.["200"]?.content?.["text/event-stream"]?.schema
+
+    expect(schema?.$ref).toBe("#/components/schemas/VStream")
+    const stream = spec.components.schemas.VStream
+    expect(stream?.type).toBe("string")
+    expect(stream?.contentMediaType).toBe("application/json")
+    expect(stream?.contentSchema?.$ref).toBe("#/components/schemas/V2Event")
   })
 
   test("preserves /api auth responses", () => {

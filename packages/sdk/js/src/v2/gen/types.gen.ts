@@ -28,6 +28,10 @@ export type Event =
   | EventSessionNextStepStarted
   | EventSessionNextStepEnded
   | EventSessionNextStepFailed
+  | EventSessionExecutionStarted
+  | EventSessionExecutionSucceeded
+  | EventSessionExecutionFailed
+  | EventSessionExecutionInterrupted
   | EventSessionNextTextStarted
   | EventSessionNextTextDelta
   | EventSessionNextTextEnded
@@ -67,6 +71,9 @@ export type Event =
   | EventQuestionV2Asked
   | EventQuestionV2Replied
   | EventQuestionV2Rejected
+  | EventFanoutGroupOpened
+  | EventFanoutWorkerJoined
+  | EventFanoutWorkerSettled
   | EventTodoUpdated
   | EventLspUpdated
   | EventPermissionAsked
@@ -240,6 +247,7 @@ export type UserMessage = {
   id: string
   sessionID: string
   role: "user"
+  replayOf?: string
   time: {
     created: number
   }
@@ -621,6 +629,7 @@ export type CompactionPart = {
   type: "compaction"
   auto: boolean
   overflow?: boolean
+  preflight?: boolean
   tail_start_id?: string
 }
 
@@ -663,11 +672,11 @@ export type Todo = {
   /**
    * Current status of the task: pending, in_progress, completed, cancelled
    */
-  status: string
+  status: "pending" | "in_progress" | "completed" | "cancelled"
   /**
    * Priority level of the task: high, medium, low
    */
-  priority: string
+  priority: "high" | "medium" | "low"
 }
 
 export type SessionStatus =
@@ -953,6 +962,36 @@ export type GlobalEvent = {
           sessionID: string
           assistantMessageID: string
           error: SessionErrorUnknown
+        }
+      }
+    | {
+        id: string
+        type: "session.execution.started"
+        properties: {
+          sessionID: string
+        }
+      }
+    | {
+        id: string
+        type: "session.execution.succeeded"
+        properties: {
+          sessionID: string
+        }
+      }
+    | {
+        id: string
+        type: "session.execution.failed"
+        properties: {
+          sessionID: string
+          error: SessionErrorUnknown
+        }
+      }
+    | {
+        id: string
+        type: "session.execution.interrupted"
+        properties: {
+          sessionID: string
+          reason: "user" | "shutdown" | "superseded"
         }
       }
     | {
@@ -1360,6 +1399,43 @@ export type GlobalEvent = {
       }
     | {
         id: string
+        type: "fanout.group.opened"
+        properties: {
+          groupID: string
+          parentSessionID: string
+          title: string
+          timestamp: number
+        }
+      }
+    | {
+        id: string
+        type: "fanout.worker.joined"
+        properties: {
+          groupID: string
+          parentSessionID: string
+          workerID: string
+          sessionID: string
+          description: string
+          timestamp: number
+        }
+      }
+    | {
+        id: string
+        type: "fanout.worker.settled"
+        properties: {
+          groupID: string
+          parentSessionID: string
+          workerID: string
+          sessionID: string
+          description: string
+          status: "done" | "error"
+          digest?: string
+          error?: string
+          timestamp: number
+        }
+      }
+    | {
+        id: string
         type: "todo.updated"
         properties: {
           sessionID: string
@@ -1620,6 +1696,10 @@ export type GlobalEvent = {
     | SyncEventSessionNextStepStarted
     | SyncEventSessionNextStepEnded
     | SyncEventSessionNextStepFailed
+    | SyncEventSessionExecutionStarted
+    | SyncEventSessionExecutionSucceeded
+    | SyncEventSessionExecutionFailed
+    | SyncEventSessionExecutionInterrupted
     | SyncEventSessionNextTextStarted
     | SyncEventSessionNextTextEnded
     | SyncEventSessionNextReasoningStarted
@@ -1636,6 +1716,9 @@ export type GlobalEvent = {
     | SyncEventSessionNextRevertStaged
     | SyncEventSessionNextRevertCleared
     | SyncEventSessionNextRevertCommitted
+    | SyncEventFanoutGroupOpened
+    | SyncEventFanoutWorkerJoined
+    | SyncEventFanoutWorkerSettled
 }
 
 /**
@@ -1739,6 +1822,16 @@ export type AgentConfig = {
 }
 
 export type ProviderConfig = {
+  /**
+   * Select a signed-in console for this provider, or false to use its direct API instead of the active console.
+   */
+  console?:
+    | false
+    | {
+        url: string
+        accountID?: string
+        orgID?: string
+      }
   api?: string
   name?: string
   env?: Array<string>
@@ -2011,6 +2104,24 @@ export type Config = {
   tools?: {
     [key: string]: boolean
   }
+  plugin_options?: {
+    [key: string]: {
+      auto_continue?: boolean
+      defer_while_tasks_active?: boolean
+      allow_goal_execution_from_plan?: boolean
+      max_auto_turns?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+      default_token_budget?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+      max_goal_duration_seconds?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+      min_continue_interval_seconds?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+      max_turn_time?: string
+      max_stall_before_continue?: string
+      max_prompt_failures?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+      no_progress_token_threshold?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+      max_no_progress_turns?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+      restricted_agents?: Array<string>
+      command_name?: string
+    }
+  }
   attachment?: AttachmentConfig
   enterprise?: {
     url?: string
@@ -2032,6 +2143,11 @@ export type Config = {
     batch_tool?: boolean
     openTelemetry?: boolean
     primary_tools?: Array<string>
+    observable_progress?: {
+      enabled?: boolean
+      repeat_turns?: number
+      recovery_turns?: number
+    }
     continue_loop_on_deny?: boolean
     mcp_timeout?: number
     policies?: Array<ConfigV2ExperimentalPolicy>
@@ -2043,6 +2159,7 @@ export type Config = {
     max_steps?: number
     length_continue?: boolean
     stream_delay?: number
+    stall_threshold?: number
   }
 }
 
@@ -2337,6 +2454,14 @@ export type VcsFileStatus = {
   status: "added" | "deleted" | "modified"
 }
 
+export type VcsReadError = {
+  name: "VcsReadError"
+  data: {
+    message: string
+    command: Array<string>
+  }
+}
+
 export type VcsFileDiff = {
   file: string
   patch?: string
@@ -2437,6 +2562,17 @@ export type McpServerNotFoundError = {
   _tag: "McpServerNotFoundError"
   name: string
   message: string
+}
+
+export type NewsItem = {
+  id: string
+  title: string
+  description: string
+  provider: string
+  model: string
+  releaseDate: string
+  url?: string
+  type: "model_release"
 }
 
 export type Project = {
@@ -2767,6 +2903,10 @@ export type SessionDurableEvent =
   | SessionNextStepStarted
   | SessionNextStepEnded
   | SessionNextStepFailed
+  | SessionExecutionStarted
+  | SessionExecutionSucceeded
+  | SessionExecutionFailed
+  | SessionExecutionInterrupted
   | SessionNextTextStarted
   | SessionNextTextEnded
   | SessionNextToolInputStarted
@@ -2789,7 +2929,7 @@ export type SessionHistory = {
   hasMore: boolean
 }
 
-export type SessionDurableEvent1 = string
+export type SessionDurableEventStream = string
 
 export type SessionMessagesResponse = {
   data: Array<SessionMessage>
@@ -2894,6 +3034,10 @@ export type V2Event =
   | SessionNextStepStarted
   | SessionNextStepEnded
   | SessionNextStepFailed
+  | SessionExecutionStarted
+  | SessionExecutionSucceeded
+  | SessionExecutionFailed
+  | SessionExecutionInterrupted
   | SessionNextTextStarted
   | SessionNextTextDelta
   | SessionNextTextEnded
@@ -2933,6 +3077,9 @@ export type V2Event =
   | QuestionV2Asked
   | QuestionV2Replied
   | QuestionV2Rejected
+  | FanoutGroupOpened
+  | FanoutWorkerJoined
+  | FanoutWorkerSettled
   | TodoUpdated
   | LspUpdated
   | PermissionAsked
@@ -3535,6 +3682,64 @@ export type SyncEventSessionNextStepFailed = {
   }
 }
 
+export type SyncEventSessionExecutionStarted = {
+  type: "sync"
+  id: string
+  syncEvent: {
+    type: "session.execution.started.1"
+    id: string
+    seq: number
+    aggregateID: string
+    data: {
+      sessionID: string
+    }
+  }
+}
+
+export type SyncEventSessionExecutionSucceeded = {
+  type: "sync"
+  id: string
+  syncEvent: {
+    type: "session.execution.succeeded.1"
+    id: string
+    seq: number
+    aggregateID: string
+    data: {
+      sessionID: string
+    }
+  }
+}
+
+export type SyncEventSessionExecutionFailed = {
+  type: "sync"
+  id: string
+  syncEvent: {
+    type: "session.execution.failed.1"
+    id: string
+    seq: number
+    aggregateID: string
+    data: {
+      sessionID: string
+      error: SessionErrorUnknown
+    }
+  }
+}
+
+export type SyncEventSessionExecutionInterrupted = {
+  type: "sync"
+  id: string
+  syncEvent: {
+    type: "session.execution.interrupted.1"
+    id: string
+    seq: number
+    aggregateID: string
+    data: {
+      sessionID: string
+      reason: "user" | "shutdown" | "superseded"
+    }
+  }
+}
+
 export type SyncEventSessionNextTextStarted = {
   type: "sync"
   id: string
@@ -3835,6 +4040,64 @@ export type SyncEventSessionNextRevertCommitted = {
       timestamp: number
       sessionID: string
       messageID: string
+    }
+  }
+}
+
+export type SyncEventFanoutGroupOpened = {
+  type: "sync"
+  id: string
+  syncEvent: {
+    type: "fanout.group.opened.1"
+    id: string
+    seq: number
+    aggregateID: string
+    data: {
+      groupID: string
+      parentSessionID: string
+      title: string
+      timestamp: number
+    }
+  }
+}
+
+export type SyncEventFanoutWorkerJoined = {
+  type: "sync"
+  id: string
+  syncEvent: {
+    type: "fanout.worker.joined.1"
+    id: string
+    seq: number
+    aggregateID: string
+    data: {
+      groupID: string
+      parentSessionID: string
+      workerID: string
+      sessionID: string
+      description: string
+      timestamp: number
+    }
+  }
+}
+
+export type SyncEventFanoutWorkerSettled = {
+  type: "sync"
+  id: string
+  syncEvent: {
+    type: "fanout.worker.settled.1"
+    id: string
+    seq: number
+    aggregateID: string
+    data: {
+      groupID: string
+      parentSessionID: string
+      workerID: string
+      sessionID: string
+      description: string
+      status: "done" | "error"
+      digest?: string
+      error?: string
+      timestamp: number
     }
   }
 }
@@ -4433,6 +4696,76 @@ export type SessionNextStepFailed = {
     sessionID: string
     assistantMessageID: string
     error: SessionErrorUnknown
+  }
+}
+
+export type SessionExecutionStarted = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "session.execution.started"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: number
+  }
+  location?: LocationRef
+  data: {
+    sessionID: string
+  }
+}
+
+export type SessionExecutionSucceeded = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "session.execution.succeeded"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: number
+  }
+  location?: LocationRef
+  data: {
+    sessionID: string
+  }
+}
+
+export type SessionExecutionFailed = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "session.execution.failed"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: number
+  }
+  location?: LocationRef
+  data: {
+    sessionID: string
+    error: SessionErrorUnknown
+  }
+}
+
+export type SessionExecutionInterrupted = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "session.execution.interrupted"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: number
+  }
+  location?: LocationRef
+  data: {
+    sessionID: string
+    reason: "user" | "shutdown" | "superseded"
   }
 }
 
@@ -5675,6 +6008,73 @@ export type QuestionV2Rejected = {
   }
 }
 
+export type FanoutGroupOpened = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "fanout.group.opened"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: number
+  }
+  location?: LocationRef
+  data: {
+    groupID: string
+    parentSessionID: string
+    title: string
+    timestamp: number
+  }
+}
+
+export type FanoutWorkerJoined = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "fanout.worker.joined"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: number
+  }
+  location?: LocationRef
+  data: {
+    groupID: string
+    parentSessionID: string
+    workerID: string
+    sessionID: string
+    description: string
+    timestamp: number
+  }
+}
+
+export type FanoutWorkerSettled = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "fanout.worker.settled"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: number
+  }
+  location?: LocationRef
+  data: {
+    groupID: string
+    parentSessionID: string
+    workerID: string
+    sessionID: string
+    description: string
+    status: "done" | "error"
+    digest?: string
+    error?: string
+    timestamp: number
+  }
+}
+
 export type TodoUpdated = {
   id: string
   metadata?: {
@@ -6414,6 +6814,40 @@ export type EventSessionNextStepFailed = {
   }
 }
 
+export type EventSessionExecutionStarted = {
+  id: string
+  type: "session.execution.started"
+  properties: {
+    sessionID: string
+  }
+}
+
+export type EventSessionExecutionSucceeded = {
+  id: string
+  type: "session.execution.succeeded"
+  properties: {
+    sessionID: string
+  }
+}
+
+export type EventSessionExecutionFailed = {
+  id: string
+  type: "session.execution.failed"
+  properties: {
+    sessionID: string
+    error: SessionErrorUnknown
+  }
+}
+
+export type EventSessionExecutionInterrupted = {
+  id: string
+  type: "session.execution.interrupted"
+  properties: {
+    sessionID: string
+    reason: "user" | "shutdown" | "superseded"
+  }
+}
+
 export type EventSessionNextTextStarted = {
   id: string
   type: "session.next.text.started"
@@ -6853,6 +7287,46 @@ export type EventQuestionV2Rejected = {
   properties: {
     sessionID: string
     requestID: string
+  }
+}
+
+export type EventFanoutGroupOpened = {
+  id: string
+  type: "fanout.group.opened"
+  properties: {
+    groupID: string
+    parentSessionID: string
+    title: string
+    timestamp: number
+  }
+}
+
+export type EventFanoutWorkerJoined = {
+  id: string
+  type: "fanout.worker.joined"
+  properties: {
+    groupID: string
+    parentSessionID: string
+    workerID: string
+    sessionID: string
+    description: string
+    timestamp: number
+  }
+}
+
+export type EventFanoutWorkerSettled = {
+  id: string
+  type: "fanout.worker.settled"
+  properties: {
+    groupID: string
+    parentSessionID: string
+    workerID: string
+    sessionID: string
+    description: string
+    status: "done" | "error"
+    digest?: string
+    error?: string
+    timestamp: number
   }
 }
 
@@ -8199,6 +8673,10 @@ export type VcsStatusErrors = {
    * Bad request
    */
   400: BadRequestError
+  /**
+   * VcsReadError
+   */
+  500: VcsReadError
 }
 
 export type VcsStatusError = VcsStatusErrors[keyof VcsStatusErrors]
@@ -8229,6 +8707,10 @@ export type VcsDiffErrors = {
    * Bad request
    */
   400: BadRequestError
+  /**
+   * VcsReadError
+   */
+  500: VcsReadError
 }
 
 export type VcsDiffError = VcsDiffErrors[keyof VcsDiffErrors]
@@ -8257,6 +8739,10 @@ export type VcsDiffRawErrors = {
    * Bad request
    */
   400: BadRequestError
+  /**
+   * VcsReadError
+   */
+  500: VcsReadError
 }
 
 export type VcsDiffRawError = VcsDiffRawErrors[keyof VcsDiffRawErrors]
@@ -8720,6 +9206,31 @@ export type McpDisconnectResponses = {
 }
 
 export type McpDisconnectResponse = McpDisconnectResponses[keyof McpDisconnectResponses]
+
+export type NewsListData = {
+  body?: never
+  path?: never
+  query?: never
+  url: "/news"
+}
+
+export type NewsListErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+}
+
+export type NewsListError = NewsListErrors[keyof NewsListErrors]
+
+export type NewsListResponses = {
+  /**
+   * List of recent model release news
+   */
+  200: Array<NewsItem>
+}
+
+export type NewsListResponse = NewsListResponses[keyof NewsListResponses]
 
 export type ProjectListData = {
   body?: never
@@ -9289,9 +9800,9 @@ export type PermissionReplyData = {
     requestID: string
   }
   query: {
-    sessionID: string
     directory?: string
     workspace?: string
+    sessionID: string
   }
   url: "/permission/{requestID}/reply"
 }
@@ -10495,6 +11006,34 @@ export type PartUpdateResponses = {
 }
 
 export type PartUpdateResponse = PartUpdateResponses[keyof PartUpdateResponses]
+
+export type SharedWsData = {
+  body?: never
+  path?: never
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/ws"
+}
+
+export type SharedWsErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+}
+
+export type SharedWsError = SharedWsErrors[keyof SharedWsErrors]
+
+export type SharedWsResponses = {
+  /**
+   * <No Content>
+   */
+  204: void
+}
+
+export type SharedWsResponse = SharedWsResponses[keyof SharedWsResponses]
 
 export type SyncStartData = {
   body?: never
@@ -11926,7 +12465,7 @@ export type V2SessionEventsResponses = {
   200: {
     id: string
     event: string
-    data: SessionDurableEvent1
+    data: SessionDurableEventStream
   }
 }
 
