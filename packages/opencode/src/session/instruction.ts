@@ -99,6 +99,61 @@ export const readInstructionFile = Effect.fnUntraced(function* <E>(
   return outcome.content
 })
 
+export interface RemoteInstruction {
+  readonly text: string
+  /** The body is not the whole thing — cut by the size cap or cut short by a failed download. */
+  readonly truncated: boolean
+}
+
+/**
+ * Collects a remote instruction body, capping it and announcing any incompleteness.
+ *
+ * A stream that fails partway through is the case this exists for. The `catch` kept whatever
+ * chunks had arrived and fell through to the same decode as a complete response, with `crossed`
+ * still false — so a connection that dropped halfway produced half a rules file, with no marker,
+ * presented to the agent exactly like the whole thing. The size-cap path already had to announce
+ * its cut (`TRUNCATION_MARKER`); a failed download is the same defect with a different cause, and
+ * it is the more misleading of the two, because the reader has no reason to suspect anything is
+ * missing. So a failure is reported *and* treated as a truncation.
+ */
+export const decodeRemote = Effect.fnUntraced(function* <E>(
+  stream: Stream.Stream<Uint8Array, E>,
+  onFailure: (error: E) => Effect.Effect<void>,
+) {
+  // `res.arrayBuffer` would pull the whole body, so the cap below is on the bytes read and
+  // not merely on the text kept: `Stream.takeWhile` ends the subscription as soon as the
+  // chunk that crossed the cap has been seen, so an oversized or endless response is not
+  // drained into memory just to be thrown away.
+  const chunks: Uint8Array[] = []
+  let size = 0
+  let crossed = false
+  let failed = false
+  yield* stream.pipe(
+    Stream.map((chunk: Uint8Array) => {
+      const room = MAX_INSTRUCTION_BYTES - size
+      const piece = chunk.byteLength >= room ? chunk.subarray(0, Math.max(room, 0)) : chunk
+      size += piece.byteLength
+      if (piece.byteLength < chunk.byteLength) crossed = true
+      return piece
+    }),
+    Stream.takeWhile(() => !crossed),
+    Stream.runForEach((chunk) => Effect.sync(() => chunks.push(chunk))),
+    Effect.catch((error) => onFailure(error).pipe(Effect.andThen(Effect.sync(() => void (failed = true))))),
+  )
+  const truncated = crossed || failed
+  if (chunks.length === 0) return { text: "", truncated }
+  const total = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0)
+  const bytes = new Uint8Array(total)
+  let at = 0
+  for (const chunk of chunks) {
+    bytes.set(chunk, at)
+    at += chunk.byteLength
+  }
+  // `crossed` means the response held more than the cap, so the cut has to be announced even
+  // though the buffer handed to the decode is exactly the cap.
+  return { text: decodeInstruction(bytes, truncated), truncated }
+})
+
 /**
  * Decode at most `MAX_INSTRUCTION_BYTES`, cutting on a UTF-8 sequence boundary.
  *
@@ -184,41 +239,18 @@ const layer: Layer.Layer<
     })
 
     const fetch = Effect.fnUntraced(function* (url: string) {
+      const report = (error: unknown) =>
+        Effect.logWarning("failed to fetch instructions", { url, error: errorMessage(error) })
+      // A refused connection, a timeout or a 500 used to resolve to `null` and then to `""`, and
+      // `system` drops an empty entry — so a remote rules file the user explicitly configured just
+      // stopped existing, with no indication of why.
       const res = yield* http.execute(HttpClientRequest.get(url)).pipe(
         Effect.timeout(5000),
-        Effect.catch(() => Effect.succeed(null)),
+        Effect.catch((error) => report(error).pipe(Effect.andThen(() => Effect.succeed(null)))),
       )
       if (!res) return ""
-      // `res.arrayBuffer` would pull the whole body, so the cap below is on the bytes read and
-      // not merely on the text kept: `Stream.takeWhile` ends the subscription as soon as the
-      // chunk that crossed the cap has been seen, so an oversized or endless response is not
-      // drained into memory just to be thrown away.
-      const chunks: Uint8Array[] = []
-      let size = 0
-      let crossed = false
-      yield* res.stream.pipe(
-        Stream.map((chunk: Uint8Array) => {
-          const room = MAX_INSTRUCTION_BYTES - size
-          const piece = chunk.byteLength >= room ? chunk.subarray(0, Math.max(room, 0)) : chunk
-          size += piece.byteLength
-          if (piece.byteLength < chunk.byteLength) crossed = true
-          return piece
-        }),
-        Stream.takeWhile(() => !crossed),
-        Stream.runForEach((chunk) => Effect.sync(() => chunks.push(chunk))),
-        Effect.catch(() => Effect.void),
-      )
-      if (chunks.length === 0) return ""
-      const total = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0)
-      const bytes = new Uint8Array(total)
-      let at = 0
-      for (const chunk of chunks) {
-        bytes.set(chunk, at)
-        at += chunk.byteLength
-      }
-      // `crossed` means the response held more than the cap, so the cut has to be announced even
-      // though the buffer handed to the decode is exactly the cap.
-      return decodeInstruction(bytes, crossed)
+      const remote = yield* decodeRemote(res.stream, report)
+      return remote.text
     })
 
     const clear = Effect.fn("Instruction.clear")(function* (messageID: MessageID) {

@@ -469,3 +469,64 @@ describe("Instruction.readInstructionFile", () => {
     expect(errorMessage(seen[0]?.error)).not.toBe("{}")
   })
 })
+
+// A stream that failed partway used to keep the chunks it had and fall through to the same decode
+// as a complete response, with `crossed` still false — so a connection that dropped halfway
+// produced half a rules file, unmarked, presented to the agent exactly like the whole thing. The
+// size-cap path already had to announce its cut; a failed download is the same defect with a
+// different cause and the more misleading of the two, because nothing hints that anything is
+// missing.
+describe("Instruction.decodeRemote", () => {
+  const encoder = new TextEncoder()
+  const bytes = (text: string) => encoder.encode(text)
+  const report = () => {
+    const seen: unknown[] = []
+    return { seen, onFailure: (error: unknown) => Effect.sync(() => void seen.push(error)) }
+  }
+  const complete = (...parts: string[]) => Stream.fromIterable(parts.map(bytes))
+
+  test("decodes a complete body verbatim, with no truncation marker", async () => {
+    const { seen, onFailure } = report()
+    const result = await Effect.runPromise(Instruction.decodeRemote(complete("always ", "test first"), onFailure))
+    expect(result.truncated).toBe(false)
+    expect(result.text).toBe("always test first")
+    expect(result.text).not.toContain("truncated")
+    expect(seen).toEqual([])
+  })
+
+  test("marks a body whose download failed partway as truncated, instead of serving it as complete", async () => {
+    const { seen, onFailure } = report()
+    const stream = Stream.concat(
+      Stream.fromIterable([bytes("RULES: always run the tests.")]),
+      Stream.fail(new Error("ECONNRESET")),
+    )
+    const result = await Effect.runPromise(Instruction.decodeRemote(stream, onFailure))
+
+    // The regression: `truncated` was false and no marker was appended, so the agent received a
+    // partial rules file indistinguishable from a complete one.
+    expect(result.truncated).toBe(true)
+    expect(result.text).toContain("RULES: always run the tests.")
+    expect(result.text).toContain("truncated")
+    expect(seen).toHaveLength(1)
+    expect((seen[0] as Error).message).toBe("ECONNRESET")
+  })
+
+  test("reports the reason a download failed rather than dropping it", async () => {
+    const { seen, onFailure } = report()
+    const stream = Stream.concat(Stream.fromIterable([bytes("partial")]), Stream.fail({ code: "ETIMEDOUT" }))
+    await Effect.runPromise(Instruction.decodeRemote(stream, onFailure))
+    expect(seen).toHaveLength(1)
+    // The trap this guards: a non-Error reason must not render as a useless "{}".
+    expect(errorMessage(seen[0])).not.toBe("{}")
+  })
+
+  test("yields nothing when the download fails before any bytes arrive", async () => {
+    const { seen, onFailure } = report()
+    const result = await Effect.runPromise(Instruction.decodeRemote(Stream.fail(new Error("ECONNREFUSED")), onFailure))
+    expect(result.text).toBe("")
+    // The download failed, so what came back is by definition not the whole thing, even though
+    // there is nothing to mark. The reason is what tells the reader, and it is reported.
+    expect(result.truncated).toBe(true)
+    expect(seen).toHaveLength(1)
+  })
+})
