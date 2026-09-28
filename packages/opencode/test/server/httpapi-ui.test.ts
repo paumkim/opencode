@@ -12,12 +12,13 @@ import {
   HttpServerRequest,
   HttpServerResponse,
 } from "effect/unstable/http"
+import { Logger, Stream } from "effect"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { RuntimeFlags } from "../../src/effect/runtime-flags"
 import { ServerAuth } from "../../src/server/auth"
 import { authorizationRouterMiddleware } from "../../src/server/routes/instance/httpapi/middleware/authorization"
 import { HttpApiApp } from "../../src/server/routes/instance/httpapi/server"
-import { serveEmbeddedUIEffect, serveUIEffect } from "../../src/server/shared/ui"
+import { proxiedAssetStream, serveEmbeddedUIEffect, serveUIEffect } from "../../src/server/shared/ui"
 import { testEffect } from "../lib/effect"
 
 const testStateLayer = Layer.effectDiscard(
@@ -452,6 +453,78 @@ describe("HttpApi UI fallback", () => {
 
       expect(response.status).toBe(204)
       expect(response.headers.get("access-control-allow-origin")).toBe("http://localhost:3000")
+    }),
+  )
+})
+
+// The proxy used to swallow a failed upstream body with `Stream.catchCause(() => Stream.empty)`.
+// Because `proxyResponseHeaders` strips content-length, the browser then saw a clean end-of-stream
+// on a 200 and received a half-written JS or CSS bundle — a parse error naming a line in a file the
+// user did not write, with nothing on the server explaining why. The status cannot be changed once
+// streaming has started, so recording the cause is the part that can be honest.
+//
+// These drive `proxiedAssetStream` directly rather than going through `HttpClientResponse.fromWeb`.
+// That is deliberate: this Effect beta's `fromReadableStream` cannot carry an erroring body at all —
+// it throws `TypeError: options.evaluate is not a function`, which I reproduced outside this change —
+// so a test that builds the failure through a web `Response` never reaches the proxy. Whether the
+// production path meets that adapter failure is untested and I am not claiming otherwise.
+describe("proxiedAssetStream", () => {
+  const encoder = new TextEncoder()
+  const decode = (chunks: readonly Uint8Array[]) => chunks.map((c) => new TextDecoder().decode(c)).join("")
+
+  // Captured through Effect's own Logger rather than by intercepting `console`, so this asserts what
+  // the code actually emits instead of depending on which console method the default logger uses.
+  const captureLogs = <A, E, R>(use: Effect.Effect<A, E, R>) =>
+    Effect.gen(function* () {
+      const lines: string[] = []
+      // `logWarning` is variadic, so `options.message` is the array of parts. Interpolating it
+      // directly renders a structured part as `[object Object]`, which is how the first draft of this
+      // test "passed" with no data in it; JSON per part is what actually carries the fields.
+      const logger = Logger.make<unknown, void>((options) => {
+        const parts = Array.isArray(options.message) ? options.message : [options.message]
+        lines.push(
+          `${options.logLevel} ${parts.map((part) => (typeof part === "string" ? part : JSON.stringify(part))).join(" ")}`,
+        )
+      })
+      const result = yield* use.pipe(Effect.provide(Logger.layer([logger])))
+      return { result, lines }
+    })
+
+  it.live("forwards a healthy body untouched and logs nothing", () =>
+    Effect.gen(function* () {
+      const { result, lines } = yield* captureLogs(Stream.runCollect(Stream.fromIterable([encoder.encode("ok")])))
+      expect(decode(result)).toBe("ok")
+      expect(lines.join("\n")).not.toContain("failed to stream proxied asset")
+    }),
+  )
+
+  it.live("records the reason, path and status when the upstream body fails mid-stream", () =>
+    Effect.gen(function* () {
+      const failing = Stream.concat(
+        Stream.fromIterable([encoder.encode("export const a = 1\n")]),
+        Stream.fail(new Error("socket hang up")),
+      )
+      const { result, lines } = yield* captureLogs(
+        Stream.runCollect(proxiedAssetStream(failing, "/assets/index.js", 200)),
+      )
+      // The body is still cut short, as it must be once streaming has started.
+      expect(decode(result)).toBe("export const a = 1\n")
+      const recorded = lines.join("\n")
+      expect(recorded).toContain("failed to stream proxied asset")
+      expect(recorded).toContain("socket hang up")
+      expect(recorded).toContain("/assets/index.js")
+      expect(recorded).toContain("200")
+    }),
+  )
+
+  it.live("reports a non-Error cause rather than dropping it", () =>
+    Effect.gen(function* () {
+      const failing = Stream.concat(Stream.fromIterable([encoder.encode("x")]), Stream.fail({ code: "ECONNRESET" }))
+      const { lines } = yield* captureLogs(Stream.runCollect(proxiedAssetStream(failing, "/assets/app.css", 200)))
+      const recorded = lines.join("\n")
+      expect(recorded).toContain("failed to stream proxied asset")
+      // The trap this guards: a plain-object cause must not stringify into a useless "{}".
+      expect(recorded).not.toContain("error: {}")
     }),
   )
 })
