@@ -9,6 +9,7 @@ import { Config } from "@/config/config"
 import { Process } from "@/util/process"
 import { spawn as lspspawn } from "./launch"
 import { errorMessage } from "@/util/error"
+import { DiagnosticPullFailed } from "./client"
 import { Effect, Layer, Context, Schema } from "effect"
 import { InstanceState } from "@/effect/instance-state"
 import { containsPath } from "@/project/instance-context"
@@ -559,7 +560,12 @@ async function openAndWait(client: LSPClient.Info, file: string, mode: "document
   const after = Date.now()
   const version = await client.notify.open({ path: file })
   if (!mode) return undefined
-  return client.waitForDiagnostics({ path: file, version, mode, after })
+  // A non-undefined return is the list of pulls that could not be completed. It is thrown so the
+  // caller's per-client catch attributes it to the right server: before this, a pull that timed out
+  // resolved as "no diagnostics", the caller read an empty map, and `tool/write.ts` reported
+  // "Wrote file successfully." for a file that had errors in it.
+  const failed = await client.waitForDiagnostics({ path: file, version, mode, after })
+  if (failed && failed.length) throw new DiagnosticPullFailed(failed.join("; "))
 }
 
 /**
@@ -570,7 +576,10 @@ async function openAndWait(client: LSPClient.Info, file: string, mode: "document
  * single client whose `didOpen` failed took down the results of every client that had succeeded. A
  * file watched by three language servers where one is down produced no diagnostics at all, and
  * `tool/write.ts` then reports plain "Wrote file successfully." - the agent is told the file is clean
- * because one server failed to open it. That is the same failure mode as the LSP tool answering "No
+ * because one server could not answer. The wording matters for the same reason: "failed to open" would
+ * misattribute a diagnostics pull that timed out long after the document opened, so the message says
+ * the server could not PRODUCE diagnostics and that they are missing rather than clean. That is the
+ * same failure mode as the LSP tool answering "No
  * results found for ..." on a request it could not make, and the same fix: report, and let the rest
  * through.
  *
@@ -605,7 +614,7 @@ export async function openEveryClient(
   for (const result of results) {
     if (!result) continue
     report(
-      `[lsp] ${result.client.serverID} failed to open ${file}, so its diagnostics for this file are missing: ${errorMessage(result.error)}`,
+      `[lsp] ${result.client.serverID} could not produce diagnostics for ${file}, so they are missing rather than clean: ${errorMessage(result.error)}`,
     )
   }
 }
