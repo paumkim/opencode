@@ -9,6 +9,7 @@ import type {
   ToolPart,
 } from "@opencode-ai/sdk/v2"
 import { Effect } from "effect"
+import { errorMessage } from "@/util/error"
 import { ACPSession } from "./session"
 import { ACPPermission } from "./permission"
 import { partsToContentChunks, type ReplayPart } from "./content"
@@ -30,8 +31,11 @@ type GlobalEventStream = {
   stream: AsyncIterable<GlobalEventEnvelope>
 }
 
-export function start(input: { sdk: OpencodeClient; connection: Connection; session: ACPSession.Interface }) {
-  const subscription = new Subscription(input)
+export function start(
+  input: { sdk: OpencodeClient; connection: Connection; session: ACPSession.Interface },
+  options?: { report?: (message: string) => void },
+) {
+  const subscription = new Subscription(input, options)
   subscription.start()
   return subscription
 }
@@ -43,8 +47,10 @@ export class Subscription {
   private readonly connectionWaiters = new Set<() => void>()
   private readonly idleWaiters = new Map<string, Set<ReturnType<typeof signal>>>()
   private readonly permission: ACPPermission.Handler
+  private readonly report: (message: string) => void
   private connected = false
   private started = false
+  private undelivered = new Map<string, number>()
 
   constructor(
     private readonly input: {
@@ -52,8 +58,10 @@ export class Subscription {
       connection: Connection
       session: ACPSession.Interface
     },
+    options?: { report?: (message: string) => void },
   ) {
     this.permission = new ACPPermission.Handler(input)
+    this.report = options?.report ?? ((message) => console.error(message))
   }
 
   start() {
@@ -142,8 +150,23 @@ export class Subscription {
   }
 
   private async run() {
+    let lastDisconnect: string | undefined
     while (!this.abort.signal.aborted) {
-      await this.consume().catch(() => {})
+      try {
+        await this.consume()
+        lastDisconnect = undefined
+      } catch (error) {
+        // The subscription reconnects, so a dropped stream is recoverable. What was NOT recoverable
+        // is that the reason never reached anyone: the client saw its turn go quiet, the server
+        // busy-looped on a one-second retry, and the log said nothing at all. Report the first
+        // reason of an outage and then only when it changes, or a server whose event endpoint is
+        // permanently gone would write one line per second forever.
+        const reason = errorMessage(error)
+        if (reason !== lastDisconnect) {
+          this.report(`[acp] event stream disconnected, reconnecting: ${reason}`)
+          lastDisconnect = reason
+        }
+      }
       this.disconnected()
       if (!this.abort.signal.aborted) await new Promise((resolve) => setTimeout(resolve, 1000))
     }
@@ -160,8 +183,25 @@ export class Subscription {
     for await (const event of events.stream) {
       if (this.abort.signal.aborted) return
       if (!event.payload) continue
-      await this.handle(event.payload).catch(() => {})
+      try {
+        await this.handle(event.payload)
+      } catch (error) {
+        // This used to end in `.catch(() => {})`, which is the same defect `replayFailures` was
+        // written to fix on the historical path: one event the client could not accept was
+        // indistinguishable from one that was never sent, so a rejected `sessionUpdate` (client
+        // gone mid-turn, protocol error) silently ate a text chunk or a tool state update and the
+        // turn carried on. Keep consuming — one bad event should not cost the rest of the turn —
+        // but say so, and say which one.
+        this.report(deliveryFailure(event.payload, error))
+        this.countUndelivered(event.payload)
+      }
     }
+  }
+
+  private countUndelivered(event: Event) {
+    const key = undeliveredKey(event)
+    if (!key) return
+    this.undelivered.set(key, (this.undelivered.get(key) ?? 0) + 1)
   }
 
   private async waitUntilConnected() {
@@ -182,6 +222,13 @@ export class Subscription {
   }
 
   private idle(sessionId: string) {
+    const undelivered = this.undelivered.get(sessionId) ?? 0
+    if (undelivered > 0) {
+      this.undelivered.delete(sessionId)
+      this.report(
+        `[acp] the client did not receive ${undelivered} update(s) during this turn; its view of session ${sessionId} is incomplete`,
+      )
+    }
     const waiters = this.idleWaiters.get(sessionId)
     if (!waiters) return
     this.idleWaiters.delete(sessionId)
@@ -415,6 +462,54 @@ function signal() {
     promise,
     resolve: () => state.resolve(),
     reject: (reason?: unknown) => state.reject(reason),
+  }
+}
+
+/**
+ * The session a lost event belonged to, so the count can be reported against the turn it broke.
+ * Returns undefined for events with no session - there is nothing to attribute a count to, and the
+ * per-event report already named the event.
+ */
+function undeliveredKey(event: Event): string | undefined {
+  switch (event.type) {
+    case "message.part.delta":
+      return event.properties.sessionID
+    case "message.part.updated":
+      return event.properties.part.sessionID || event.properties.sessionID
+    case "permission.asked":
+    case "session.status":
+      return event.properties.sessionID
+    default: {
+      // `handle` is a no-op for every other event, so none of them can currently fail here. Read
+      // the session off the properties anyway: the alternative is that someone adds a case to
+      // `handle` and the count silently stops without anyone noticing.
+      const properties = event.properties as { sessionID?: unknown }
+      return typeof properties.sessionID === "string" ? properties.sessionID : undefined
+    }
+  }
+}
+
+/**
+ * Names the event that could not be delivered, not just that something failed. A client that
+ * missed one `agent_message_chunk` out of a long answer needs to know which part, because the gap
+ * is a hole in the middle of text the user is reading - the same reason `replayFailure` carries
+ * position and message id.
+ */
+export function deliveryFailure(event: Event, error: unknown): string {
+  const reason = errorMessage(error)
+  switch (event.type) {
+    case "message.part.delta":
+      return `[acp] failed to deliver a ${event.properties.field} delta (${event.properties.messageID}/${event.properties.partID}) to the client: ${reason}`
+    case "message.part.updated": {
+      const part = event.properties.part
+      return `[acp] failed to deliver part ${part.id} (${part.type}, ${part.messageID}) to the client: ${reason}`
+    }
+    case "permission.asked":
+      return `[acp] failed to deliver permission request ${event.properties.id} (${event.properties.permission}) to the client: ${reason}`
+    case "session.status":
+      return `[acp] failed to deliver a session status update (${event.properties.status.type}) to the client: ${reason}`
+    default:
+      return `[acp] failed to deliver a ${event.type} event to the client: ${reason}`
   }
 }
 

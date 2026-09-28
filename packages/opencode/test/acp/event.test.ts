@@ -78,7 +78,10 @@ function createEventStream() {
   return { push, close, stream }
 }
 
-function createHarness(messages: Record<string, SessionMessageResponse> = {}) {
+function createHarness(
+  messages: Record<string, SessionMessageResponse> = {},
+  options: { report?: string[]; failUpdate?: (params: SessionUpdateParams) => boolean } = {},
+) {
   const updates: SessionUpdateParams[] = []
   const calls = {
     eventSubscribe: 0,
@@ -103,12 +106,19 @@ function createHarness(messages: Record<string, SessionMessageResponse> = {}) {
   } as unknown as OpencodeClient
   const connection = {
     sessionUpdate: (params: SessionUpdateParams) => {
+      // Record first, then reject: the client was handed this update, it just refused it. A
+      // failure that threw before recording would let a test pass for the wrong reason.
       updates.push(params)
+      if (options.failUpdate?.(params)) return Promise.reject(new Error("connection closed"))
       return Promise.resolve()
     },
   } satisfies Pick<AgentSideConnection, "sessionUpdate">
   const session = makeSessionService()
-  const subscription = new ACPEvent.Subscription({ sdk, connection, session })
+  const report = options.report
+  const subscription = new ACPEvent.Subscription(
+    { sdk, connection, session },
+    report ? { report: (message) => report.push(message) } : undefined,
+  )
 
   return { calls, connection, events, sdk, session, subscription, updates }
 }
@@ -781,5 +791,124 @@ describe("acp event routing", () => {
         { type: "content", content: { type: "image", mimeType: "image/png", data: image } },
       ],
     ])
+  })
+})
+
+function idleEvent(sessionID: string): Event {
+  return {
+    id: `evt_idle_${sessionID}`,
+    type: "session.status",
+    properties: { sessionID, status: { type: "idle" } },
+  }
+}
+
+describe("acp event delivery failures", () => {
+  it("reports a live event the client refused and keeps consuming the turn", async () => {
+    // The regression: `consume()` ended in `.catch(() => {})`, the same swallow that
+    // `replayFailures` was written to remove from the historical path. A client that dropped one
+    // `sessionUpdate` mid-answer was handed a silent hole in the middle of the agent's text, and
+    // nothing anywhere recorded that the hole existed.
+    const report: string[] = []
+    const harness = createHarness(
+      {},
+      {
+        report,
+        failUpdate: (params) => params.update.sessionUpdate === "agent_message_chunk",
+      },
+    )
+    await createKnownSession(harness.session, "ses_a", { messageId: "msg_a", partId: "part_a", partType: "text" })
+
+    harness.subscription.start()
+    await pollUntil(() => harness.calls.eventSubscribe > 0, "subscription never connected")
+
+    harness.events.push({ payload: textDelta("ses_a", "msg_a", "part_a", "A1") })
+    harness.events.push({ payload: textDelta("ses_a", "msg_a", "part_a", "A2") })
+    harness.events.push({ payload: idleEvent("ses_a") })
+
+    // A tool update the client *can* accept, arriving after the refused delta. This is the half a
+    // report alone cannot prove: a fix that threw out of the loop would also report, and the
+    // client would silently lose the rest of the turn.
+    await pollUntil(() => report.length > 0, "a refused update was not reported")
+    await pollUntil(
+      () => harness.updates.filter((u) => u.update.sessionUpdate === "agent_message_chunk").length >= 2,
+      "the subscription stopped consuming after a refused update",
+    )
+
+    // Names the part and the reason: the gap is a hole in the middle of text the user is reading,
+    // so "something failed" is not enough to find it.
+    expect(report.some((line) => line.includes("failed to deliver a text delta"))).toBe(true)
+    expect(report.some((line) => line.includes("msg_a/part_a"))).toBe(true)
+    expect(report.some((line) => line.includes("connection closed"))).toBe(true)
+
+    // A count against the turn, reported at idle: a reader learns the transcript is incomplete
+    // rather than guessing from a per-event line.
+    await pollUntil(
+      () => report.some((line) => line.includes("did not receive 2 update(s)")),
+      "the turn's undelivered count was not reported at idle",
+    )
+    expect(report.some((line) => line.includes("ses_a"))).toBe(true)
+
+    harness.subscription.stop()
+  })
+
+  it("does not report a turn where every event was delivered", async () => {
+    // The other direction: a report that fires on the happy path is noise, and a test that only
+    // covers the failure cannot tell a correct guard from an absent one.
+    const report: string[] = []
+    const harness = createHarness({}, { report })
+    await createKnownSession(harness.session, "ses_a", { messageId: "msg_a", partId: "part_a", partType: "text" })
+
+    harness.subscription.start()
+    await pollUntil(() => harness.calls.eventSubscribe > 0, "subscription never connected")
+
+    harness.events.push({ payload: textDelta("ses_a", "msg_a", "part_a", "A1") })
+    harness.events.push({ payload: idleEvent("ses_a") })
+
+    await pollUntil(
+      () => harness.updates.some((u) => u.update.sessionUpdate === "agent_message_chunk"),
+      "the delta was never delivered",
+    )
+    await new Promise((resolve) => setTimeout(resolve, 30))
+
+    expect(report).toEqual([])
+    harness.subscription.stop()
+  })
+
+  it("names a refused tool part update and counts it against its session", async () => {
+    // A tool part carries the user's view of progress. Losing one leaves a tool spinning forever
+    // in the client, which is a different symptom from lost text and needs a different name.
+    const report: string[] = []
+    const harness = createHarness({}, { report, failUpdate: (params) => params.update.sessionUpdate === "tool_call" })
+    await Effect.runPromise(harness.session.create({ id: "ses_tool", cwd: "/workspace" }))
+
+    harness.subscription.start()
+    await pollUntil(() => harness.calls.eventSubscribe > 0, "subscription never connected")
+
+    harness.events.push({ payload: toolUpdated(runningTool("ses_tool", "call_1")) })
+    await pollUntil(() => report.length > 0, "a refused tool update was not reported")
+
+    expect(report.some((line) => line.includes("failed to deliver part part_call_1"))).toBe(true)
+    expect(report.some((line) => line.includes("tool"))).toBe(true)
+    expect(report.some((line) => line.includes("connection closed"))).toBe(true)
+
+    harness.subscription.stop()
+  })
+})
+
+describe("deliveryFailure", () => {
+  it("describes each event type with the identity the client needs to find the gap", () => {
+    // A pure-function test, because the message is the deliverable: a caller reading these lines
+    // at 2am has to be able to work out what was lost without the source in front of them.
+    const error = new Error("connection closed")
+    expect(ACPEvent.deliveryFailure(textDelta("ses", "msg", "part", "x"), error)).toContain(
+      "failed to deliver a text delta (msg/part)",
+    )
+    expect(ACPEvent.deliveryFailure(toolUpdated(runningTool("ses", "call")), error)).toContain(
+      "failed to deliver part part_call (tool, msg_call)",
+    )
+    expect(ACPEvent.deliveryFailure(idleEvent("ses"), error)).toContain(
+      "failed to deliver a session status update (idle)",
+    )
+    expect(ACPEvent.deliveryFailure(idleEvent("ses"), error)).toContain("connection closed")
   })
 })
