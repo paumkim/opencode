@@ -60,8 +60,11 @@ export class Subscription {
     },
     options?: { report?: (message: string) => void },
   ) {
-    this.permission = new ACPPermission.Handler(input)
     this.report = options?.report ?? ((message) => console.error(message))
+    // The same report channel as everything else in this file, so a dropped permission reply and a
+    // dropped session update land in one place rather than two. Assigned after `report`, which it
+    // closes over.
+    this.permission = new ACPPermission.Handler(input, { report: this.report })
   }
 
   start() {
