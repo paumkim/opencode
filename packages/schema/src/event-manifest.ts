@@ -3,6 +3,7 @@ export * as EventManifest from "./event-manifest"
 import { Catalog } from "./catalog"
 import { Durable } from "./durable-event-manifest"
 import { Event } from "./event"
+import { FanoutEvent } from "./fanout-event"
 import { FileSystem } from "./filesystem"
 import { FileSystemWatcher } from "./filesystem-watcher"
 import { InstallationEvent } from "./installation-event"
@@ -65,6 +66,10 @@ export const Definitions = Event.inventory(
   ...sessionV1LiveDefinitions,
   ...InstallationEvent.Definitions,
   ...featureDefinitions,
+  // Fan-out is deliberately absent from `ServerDefinitions`: a group's lifecycle
+  // is an internal durability record for a parent and its crew, not part of the
+  // HTTP event contract, so it does not widen the generated client surface.
+  ...FanoutEvent.Definitions,
   ...SessionTodo.Event.Definitions,
   ...LspEvent.Definitions,
   ...PermissionV1.Event.Definitions,
