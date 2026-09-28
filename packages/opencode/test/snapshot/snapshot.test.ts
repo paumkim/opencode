@@ -311,7 +311,12 @@ it.instance(
   { git: true },
 )
 
-it.instance.skip(
+// A tracked file that is MODIFIED and then reverted is the one case the unicode tests elsewhere do
+// not cover: they create a file after tracking and assert it disappears again, which exercises only
+// the delete branch. Here the file existed in the snapshot, so a revert that fails to recognise it
+// does not merely miss a restore -- it deletes a file the user still has, which is how this was
+// skipped in the first place.
+it.instance(
   "unicode filenames modification and restore",
   Effect.gen(function* () {
     const tmp = yield* bootstrap()

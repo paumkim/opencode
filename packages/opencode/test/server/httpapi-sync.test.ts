@@ -122,7 +122,20 @@ describe("sync HttpApi", () => {
     { git: true, config: { formatter: false, lsp: false } },
   )
 
-  it.instance.skip(
+  // A schema rejection is answered by `SchemaErrorMiddleware`, and the body shape is a contract
+  // rather than an implementation detail:
+  //
+  //   - `/api/...` endpoints take the `Effect.fail` branch and the typed `InvalidRequestError` is
+  //     encoded with its own `_tag`.
+  //   - every other path takes the `Effect.succeed` branch and gets `{ name: "BadRequest", data: {...} }`.
+  //     `/sync` is the second kind, and that is deliberate: `packages/sdk/js/src/error-interceptor.ts`
+  //     reads `data.message` out of exactly this shape, so a sync validation failure surfaces in the
+  //     TUI and plugins as a real message instead of `[object Object]`.
+  //
+  // This test asserted a v1-shaped body (`{ success: false, error: [...] }`) that the middleware has
+  // never produced, and it had been skipped rather than corrected, so the only thing standing between
+  // a future edit to that middleware and a silently unreadable client error was this comment.
+  it.instance(
     "returns structured validation errors",
     () =>
       Effect.gen(function* () {
@@ -140,9 +153,18 @@ describe("sync HttpApi", () => {
 
         expect(response.status).toBe(400)
         expect(response.headers.get("content-type") ?? "").toContain("application/json")
-        const body = (yield* Effect.promise(() => response.json())) as Record<string, unknown>
-        expect(body.success).toBe(false)
-        expect(Array.isArray(body.error) || Array.isArray(body.errors)).toBe(true)
+        const body = (yield* Effect.promise(() => response.json())) as {
+          name: string
+          data: { message: string; kind: string }
+        }
+        expect(body.name).toBe("BadRequest")
+        // The message must name the offending FIELD, not just say the payload was invalid: this is
+        // the only thing the SDK's `wrapClientError` has to show a user, and `aggregate: -1` is a
+        // value the caller can act on.
+        expect(body.data.message).toContain("aggregate")
+        // `kind` is what tells a client this was a payload rejection rather than a route or auth
+        // failure; the middleware threads it straight from the schema error.
+        expect(body.data.kind).toBe("Payload")
       }),
     { git: true, config: { formatter: false, lsp: false } },
   )
