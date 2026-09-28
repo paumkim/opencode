@@ -109,12 +109,34 @@ const MIGRATIONS: Migration[] = [
         const result = yield* git.run(["rev-list", "--max-parents=0", "--all"], {
           cwd: worktree,
         })
+        if (result.exitCode !== 0) {
+          // `git.run` does not check exit codes, so a `rev-list` that could not
+          // read the worktree — the .git is gone, the directory was replaced,
+          // git is not installed — comes back as the same empty text as a
+          // repository with an unborn HEAD, and `id` below comes back
+          // undefined. Failing here instead would be worse than skipping: this
+          // loop runs once for every legacy project, so one unreachable
+          // worktree would strand every remaining project behind it and
+          // migration 2 behind that, retrying and logging on every startup
+          // forever. So skip the project, but say so. The marker advances
+          // either way, which is exactly why the reason has to be written down
+          // at the moment we decide to give up — nothing else will revisit it.
+          yield* Effect.logWarning("skipping project: cannot read git root commit", {
+            project: projectDir,
+            worktree,
+            exitCode: result.exitCode,
+            reason: result.stderr.toString("utf8").trim(),
+          })
+          continue
+        }
         const [id] = result
           .text()
           .split("\n")
           .filter(Boolean)
           .map((x) => x.trim())
           .toSorted()
+        // Exit 0 with no output is a genuine "nothing to migrate" answer, not
+        // a failure: a repository whose HEAD is unborn has no root commit.
         if (!id) continue
         projectID = id
 

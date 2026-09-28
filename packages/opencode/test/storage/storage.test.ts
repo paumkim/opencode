@@ -1,7 +1,7 @@
 import { describe, expect } from "bun:test"
 import path from "path"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
-import { Effect, Exit, Layer } from "effect"
+import { Effect, Exit, Layer, Logger } from "effect"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { Git } from "../../src/git"
@@ -292,6 +292,63 @@ describe("Storage", () => {
 
       const exit = yield* fs.access(path.join(storage, "migration")).pipe(Effect.exit)
       expect(Exit.isFailure(exit)).toBe(true)
+    }),
+  )
+
+  // A legacy project whose worktree is no longer a git repository is a real
+  // possibility — the .git was removed, the directory was replaced, git was
+  // never installed on that machine. Skipping it is the right call, because a
+  // permanent failure here would wedge migration 2 for *every* project forever.
+  //
+  // But the skip used to be silent: `git.run` does not check exit codes, so
+  // `rev-list` exiting 128 produced the same empty text as a repo with an
+  // unborn HEAD, `id` came back undefined, and the loop `continue`d. The log
+  // line immediately above says "migrating project dead", the migration then
+  // "succeeded", the marker advanced, and that project's storage was never
+  // migrated and never would be — with nothing anywhere recording why.
+  it.live("migration 1 reports why it skipped a project, and does not wedge later migrations", () =>
+    Effect.gen(function* () {
+      const fs = yield* FSUtil.Service
+      // Deliberately not a git repo, so `git rev-list` exits 128.
+      const tmp = yield* tmpdirScoped()
+      const storage = path.join(tmp, "storage")
+      const legacy = path.join(tmp, "project", "dead")
+      const worktree = path.join(tmp, "gone")
+
+      yield* fs.writeWithDirs(path.join(worktree, ".keep"), "")
+      yield* fs.writeWithDirs(path.join(legacy, "storage", "session", "message", "probe", "0.json"), "[]")
+      yield* fs.writeWithDirs(
+        path.join(legacy, "storage", "session", "message", "probe", "1.json"),
+        JSON.stringify({ path: { root: worktree } }),
+      )
+      yield* fs.writeWithDirs(
+        path.join(legacy, "storage", "session", "info", "ses_legacy.json"),
+        JSON.stringify({ id: "ses_legacy", title: "legacy" }),
+      )
+
+      const messages: unknown[] = []
+      yield* Effect.gen(function* () {
+        const svc = yield* Storage.Service
+        expect(yield* svc.list(["project"])).toEqual([])
+      }).pipe(
+        Effect.provide(remappedStorage(tmp)),
+        Effect.provide(
+          Logger.layer([
+            Logger.make<unknown, void>((options) => {
+              messages.push(options.message)
+            }),
+          ]),
+        ),
+      )
+
+      const text = messages.map((m) => (typeof m === "string" ? m : JSON.stringify(m))).join("\n")
+      // The project it gave up on, and what git actually said.
+      expect(text).toContain("dead")
+      expect(text).toContain("not a git repository")
+
+      // Still no project file, but the marker must reach 2 — reporting the
+      // skip is worthless if it also strands every other migration behind it.
+      expect(yield* fs.readFileString(path.join(storage, "migration"))).toBe("2")
     }),
   )
 })
