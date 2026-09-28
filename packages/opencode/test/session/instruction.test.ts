@@ -530,3 +530,85 @@ describe("Instruction.decodeRemote", () => {
     expect(seen).toHaveLength(1)
   })
 })
+
+// The size cap was supposed to *truncate* a large remote instruction file. It discarded it
+// instead. `Stream.takeWhile` sat downstream of the trim and its predicate read the `crossed`
+// flag that the trim set as a side effect, so the chunk that reached the cap was the one rejected
+// — and in practice the entire body was lost. A 300KB rules file came back as "", `system` drops
+// an empty entry, and the agent got no rules at all: no content, no TRUNCATION_MARKER, no error.
+// The memory guard the cap exists for was still doing its job; it was just throwing the payload
+// away as well.
+describe("Instruction.decodeRemote size cap", () => {
+  const encoder = new TextEncoder()
+  const CAP = 256 * 1024
+  const MARKER = "\n\n[opencode: instruction truncated]"
+  const quiet = () => () => Effect.void
+  const run = (...sizes: number[]) =>
+    Effect.runPromise(
+      Instruction.decodeRemote(Stream.fromIterable(sizes.map((n) => encoder.encode("x".repeat(n)))), quiet()),
+    )
+
+  test("keeps a body that is exactly the cap, whole and unmarked", async () => {
+    const result = await run(CAP)
+    expect(result.truncated).toBe(false)
+    expect(result.text).toBe("x".repeat(CAP))
+    expect(result.text).not.toContain("truncated")
+  })
+
+  test("truncates rather than discards a single oversized chunk", async () => {
+    const result = await run(300 * 1024)
+    // The regression: this was the empty string, with no marker.
+    expect(result.text.length).toBe(CAP + MARKER.length)
+    expect(result.text.endsWith(MARKER)).toBe(true)
+    expect(result.truncated).toBe(true)
+  })
+
+  test("truncates a body that only just exceeds the cap", async () => {
+    const result = await run(CAP + 1024)
+    expect(result.text.endsWith(MARKER)).toBe(true)
+    expect(result.text.slice(0, CAP)).toBe("x".repeat(CAP))
+  })
+
+  test("keeps the leading chunks of a multi-chunk oversized body, trimming the crossing one", async () => {
+    // 200KB + 200KB: the first chunk is whole, the second is cut to the 56KB of room left. Before
+    // the fix this came back empty.
+    const result = await run(200 * 1024, 200 * 1024)
+    expect(result.text.endsWith(MARKER)).toBe(true)
+    expect(result.text.slice(0, CAP)).toBe("x".repeat(CAP))
+    expect(result.truncated).toBe(true)
+  })
+
+  test("keeps content that arrived before a large chunk overflows the cap", async () => {
+    // 10KB + 300KB: the small leading chunk must survive even though the next one blows the cap.
+    const result = await run(10 * 1024, 300 * 1024)
+    expect(result.text.startsWith("x".repeat(10 * 1024))).toBe(true)
+    expect(result.text.endsWith(MARKER)).toBe(true)
+    expect(result.truncated).toBe(true)
+  })
+
+  test("marks the body truncated when the cap lands exactly on a chunk boundary", async () => {
+    // 16 x 16KiB is exactly 256KiB, so nothing is ever trimmed and there is no "crossing chunk" to
+    // notice. The 17th chunk is simply not read. Before the `capped` flag this came back with no
+    // marker at all, which is the case the pre-existing "stops reading a remote body at the cap"
+    // test covers with a real HTTP stream.
+    const result = await run(...Array.from({ length: 17 }, () => 16 * 1024))
+    expect(result.truncated).toBe(true)
+    expect(result.text.endsWith(MARKER)).toBe(true)
+    expect(result.text.slice(0, CAP)).toBe("x".repeat(CAP))
+  })
+
+  test("keeps the marker off a body that is exactly the cap and nothing more", async () => {
+    // The counterpart: 16 x 16KiB with no 17th chunk is the whole file, so it is not truncated.
+    const result = await run(...Array.from({ length: 16 }, () => 16 * 1024))
+    expect(result.truncated).toBe(false)
+    expect(result.text).toBe("x".repeat(CAP))
+  })
+
+  test("never retains more than the cap, whatever the chunk shape", async () => {
+    for (const sizes of [[300 * 1024], [100 * 1024, 100 * 1024, 100 * 1024], [CAP + 1, CAP + 1]]) {
+      const result = await run(...sizes)
+      expect(result.text.slice(0, CAP).length).toBe(CAP)
+      expect(result.text.length).toBeLessThanOrEqual(CAP + MARKER.length)
+    }
+  })
+})

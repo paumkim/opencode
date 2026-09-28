@@ -121,26 +121,47 @@ export const decodeRemote = Effect.fnUntraced(function* <E>(
   onFailure: (error: E) => Effect.Effect<void>,
 ) {
   // `res.arrayBuffer` would pull the whole body, so the cap below is on the bytes read and
-  // not merely on the text kept: `Stream.takeWhile` ends the subscription as soon as the
-  // chunk that crossed the cap has been seen, so an oversized or endless response is not
-  // drained into memory just to be thrown away.
+  // not merely on the text kept: the gate ends the subscription as soon as the cap is full, so
+  // an oversized or endless response is not drained into memory just to be thrown away.
+  //
+  // The gate has to sit *above* the trim for two reasons, and putting it below was the bug: the
+  // predicate read `crossed`, which the trim sets as a side effect, so the very chunk that reached
+  // the cap was the one rejected — and in practice the whole body was lost, not just the tail. A
+  // 300KB instruction file came back as an empty string, `system` drops an empty entry, and the
+  // agent received no rules at all with no marker and no error. Gating on the bytes already
+  // accepted keeps every chunk up to the cap, trims the crossing chunk to the room that is left,
+  // and stops only once there is no room for another.
   const chunks: Uint8Array[] = []
   let size = 0
   let crossed = false
+  let capped = false
   let failed = false
   yield* stream.pipe(
+    Stream.takeWhile(() => {
+      // Reached the cap with the stream still going, so whatever followed is being dropped and
+      // the result is not the whole body. This is separate from `crossed`, which only fires when a
+      // chunk is physically trimmed: a body that lands exactly on the cap has nothing left to trim,
+      // and without this the deliberate early stop would be reported as a complete file.
+      if (size >= MAX_INSTRUCTION_BYTES) {
+        capped = true
+        return false
+      }
+      return true
+    }),
     Stream.map((chunk: Uint8Array) => {
       const room = MAX_INSTRUCTION_BYTES - size
-      const piece = chunk.byteLength >= room ? chunk.subarray(0, Math.max(room, 0)) : chunk
+      const piece = chunk.byteLength > room ? chunk.subarray(0, room) : chunk
       size += piece.byteLength
       if (piece.byteLength < chunk.byteLength) crossed = true
       return piece
     }),
-    Stream.takeWhile(() => !crossed),
+    // A zero-length chunk upstream carries nothing, and keeping it would only add a stray entry
+    // to `chunks` without advancing `size`.
+    Stream.filter((piece) => piece.byteLength > 0),
     Stream.runForEach((chunk) => Effect.sync(() => chunks.push(chunk))),
     Effect.catch((error) => onFailure(error).pipe(Effect.andThen(Effect.sync(() => void (failed = true))))),
   )
-  const truncated = crossed || failed
+  const truncated = crossed || capped || failed
   if (chunks.length === 0) return { text: "", truncated }
   const total = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0)
   const bytes = new Uint8Array(total)
