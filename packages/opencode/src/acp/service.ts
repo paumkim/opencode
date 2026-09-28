@@ -740,7 +740,7 @@ function profiledRequest<T>(name: string, fn: () => Promise<T | SdkResponse<T>>,
   return request(() => ACPProfile.measure(name, fn), service)
 }
 
-async function loadDirectorySnapshot(sdk: OpencodeClient, directory: string) {
+export async function loadDirectorySnapshot(sdk: OpencodeClient, directory: string) {
   return ACPProfile.measure("acp.directory.load", async () => {
     const [providersResponse, agentsResponse, commandsResponse, skillsResponse, configResponse] = await Promise.all([
       ACPProfile.measure("acp.directory.provider.list", () =>
@@ -751,8 +751,14 @@ async function loadDirectorySnapshot(sdk: OpencodeClient, directory: string) {
       ),
       ACPProfile.measure("acp.directory.command.list", () => sdk.command.list({ directory }, { throwOnError: true })),
       ACPProfile.measure("acp.directory.skill.list", () => sdk.app.skills({ directory }, { throwOnError: true })),
+      // No `.catch` here on purpose, and unlike the four reads above this one has a fallback chain
+      // behind it, which is what made the swallow dangerous. A failed config read resolved to
+      // `undefined`, which `defaultModelFromConfig` cannot tell from "this project configures no
+      // model", so it fell through to the opencode provider and then to the best model overall. The
+      // client was handed a guessed default as though the project had specified it, and nothing said
+      // the configured answer had been lost. The siblings reject, so this one does too.
       ACPProfile.measure("acp.directory.defaultModel.config", () =>
-        sdk.config.get({ directory }, { throwOnError: true }).catch(() => undefined),
+        sdk.config.get({ directory }, { throwOnError: true }),
       ),
     ])
     const providersData = providersResponse.data
@@ -764,8 +770,14 @@ async function loadDirectorySnapshot(sdk: OpencodeClient, directory: string) {
       Provider.Info
     >
     const defaultModelStarted = performance.now()
-    const defaultModel = defaultModelFromConfig(configResponse?.data?.model, providers)
-    ACPProfile.duration("acp.directory.defaultModel.resolve", defaultModelStarted, { configured: !!defaultModel })
+    const defaultModel = defaultModelFromConfig(configResponse.data?.model, providers)
+    // `configured` is about config, not about whether a default was resolved. `defaultModelFromConfig`
+    // falls back to the opencode provider and then to the best model, so `!!defaultModel` was true for
+    // a project that configured nothing, and the label could not distinguish the two.
+    ACPProfile.duration("acp.directory.defaultModel.resolve", defaultModelStarted, {
+      configured: !!configResponse.data?.model,
+      resolved: !!defaultModel,
+    })
     const modes = agents
       .filter((agent) => agent.mode !== "subagent" && agent.hidden !== true)
       .map((agent) => ({
@@ -797,7 +809,7 @@ async function loadDirectorySnapshot(sdk: OpencodeClient, directory: string) {
   })
 }
 
-function defaultModelFromConfig(
+export function defaultModelFromConfig(
   configuredModel: string | undefined,
   providers: Record<ProviderV2.ID, Provider.Info>,
 ): Directory.DefaultModel | undefined {
