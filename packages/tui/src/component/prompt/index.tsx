@@ -47,6 +47,7 @@ import { useDialog } from "../../ui/dialog"
 import { DialogProvider as DialogProviderConnect } from "../dialog-provider"
 import { DialogAlert } from "../../ui/dialog-alert"
 import { useToast } from "../../ui/toast"
+import { mutateRemote } from "../../util/mutate-remote"
 import { useKV } from "../../context/kv"
 import { createFadeIn } from "../../util/signal"
 import { DialogSkill } from "../dialog-skill"
@@ -419,7 +420,7 @@ export function Prompt(props: PromptProps) {
         category: "Session",
         hidden: true,
         enabled: status().type !== "idle",
-        run: () => {
+        run: async () => {
           if (auto()?.visible) return
           if (!input.focused) return
           // TODO: this should be its own command
@@ -427,7 +428,10 @@ export function Prompt(props: PromptProps) {
             setStore("mode", "normal")
             return
           }
-          if (!props.sessionID) return
+          // Hoisted because the guard below narrows `props.sessionID`, and TypeScript drops that
+          // narrowing inside the `mutateRemote` callback - which is a closure over a mutable prop.
+          const sessionID = props.sessionID
+          if (!sessionID) return
 
           setStore("interrupt", store.interrupt + 1)
 
@@ -436,10 +440,17 @@ export function Prompt(props: PromptProps) {
           }, 5000)
 
           if (store.interrupt >= 2) {
-            void sdk.client.session.abort({
-              sessionID: props.sessionID,
-            })
-            setStore("interrupt", 0)
+            // `mutateRemote` rather than `void`. The generated client resolves typed HTTP failures through
+            // `.error` instead of rejecting, so this used to resolve and do nothing: the user's explicit
+            // "stop this agent" was discarded, `setStore("interrupt", 0)` made the UI look idle again, and
+            // the agent kept running and billing with nothing said.
+            const stopped = await mutateRemote(
+              () => sdk.client.session.abort({ sessionID }),
+              (reason) => toast.show({ variant: "error", title: "Could not stop the session", message: reason }),
+            )
+            // Left alone when the server refused, so one more tap retries rather than costing the user
+            // another five-second wait for the counter to expire.
+            if (stopped) setStore("interrupt", 0)
           }
           dialog.clear()
         },
