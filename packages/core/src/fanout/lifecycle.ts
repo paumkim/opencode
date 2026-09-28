@@ -148,10 +148,13 @@ const result = (worker: FanoutLedger.Worker) =>
     `Use the result if it answers the user's request, then continue. Do not re-run this worker's task.`,
   ].join("\n")
 
-export const summarise = (group: FanoutLedger.Group, workers: ReadonlyArray<FanoutLedger.Worker>) =>
+export const summarise = (
+  group: { readonly id: string; readonly title: string },
+  workers: ReadonlyArray<{ readonly id: string; readonly description: string; readonly session: string }>,
+) =>
   [
     `Launched fan-out group "${group.title}" (${group.id}) with ${workers.length} worker(s).`,
-    workers.map((worker) => `- ${worker.description} (${worker.id}) in session ${worker.sessionID}`).join("\n"),
+    workers.map((worker) => `- ${worker.description} (${worker.id}) in session ${worker.session}`).join("\n"),
     `The crew is running in the background. You are free to keep working and to answer the user now.`,
     `Do not sleep, poll, or ask for status. Each worker reports its own digest here when it finishes.`,
   ].join("\n")
