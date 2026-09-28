@@ -30,6 +30,7 @@ import {
   type SetSessionModeResponse,
 } from "@agentclientprotocol/sdk"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
+import { errorMessage } from "@/util/error"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import type { AssistantMessage, Message, OpencodeClient, Session, SessionMessageResponse } from "@opencode-ai/sdk/v2"
 import { Context, Effect, Layer, ManagedRuntime } from "effect"
@@ -614,6 +615,32 @@ function makeDirectoryService(sdk: OpencodeClient) {
   ).runSync(Directory.Service.use((service) => Effect.succeed(service)))
 }
 
+/**
+ * The reason a context-limit read failed, for the operator log.
+ *
+ * Exported so the reporting is testable: the value this call site returns is only ever `undefined`,
+ * so the part worth asserting is that the reason survives, and that belongs with the function that
+ * formats it rather than inline at the one place that uses it.
+ */
+export function contextLimitFailure(error: unknown) {
+  return `[acp] failed to read providers for the context limit: ${errorMessage(error)}`
+}
+
+/**
+ * Runs a context-limit read, reporting a failure and yielding `undefined` rather than rejecting.
+ *
+ * Exported so the behaviour that changed is testable. The value is only ever a number or undefined
+ * either way, so asserting the return value would pass with or without the reporting — the part that
+ * carries the fix is that `report` is called with the reason, and that is only reachable by driving a
+ * rejected read through here.
+ */
+export function reportedLimit<T>(read: Promise<T>, report: (message: string) => void): Promise<T | undefined> {
+  return read.catch((error) => {
+    report(contextLimitFailure(error))
+    return undefined
+  })
+}
+
 function makeUsageService(sdk: OpencodeClient) {
   const limits = new Map<string, Promise<number | undefined>>()
   const contextLimit: UsageService.Interface["contextLimit"] = Effect.fn("ACP.promptUsage.contextLimit")(
@@ -622,15 +649,19 @@ function makeUsageService(sdk: OpencodeClient) {
       const current = limits.get(key)
       if (current) return yield* Effect.promise(() => current)
 
-      const next = sdk.config
-        .providers({ directory: params.directory }, { throwOnError: true })
-        .then((response) => {
-          const providers = Object.fromEntries(
-            (response.data?.providers ?? []).map((provider) => [provider.id, provider]),
-          ) as Record<ProviderV2.ID, Provider.Info>
-          return UsageService.findContextLimit(providers, params.providerID, params.modelID)
-        })
-        .catch(() => undefined)
+      // The limit is genuinely optional — `contextLimit` returns `number | undefined` and the caller
+      // skips the usage update when it is missing — so tolerating a failure here is right. Dropping the
+      // reason was not: `sendUpdate` does `if (!size) return`, so a failed read meant the ACP context
+      // indicator simply stopped updating, and because the promise is memoised in `limits` for the
+      // process it never recovered. The `messages` fetch in `usage.ts` logs its failure on the next few
+      // lines for the same reason; this path did not.
+      const read = sdk.config.providers({ directory: params.directory }, { throwOnError: true }).then((response) => {
+        const providers = Object.fromEntries(
+          (response.data?.providers ?? []).map((provider) => [provider.id, provider]),
+        ) as Record<ProviderV2.ID, Provider.Info>
+        return UsageService.findContextLimit(providers, params.providerID, params.modelID)
+      })
+      const next = reportedLimit(read, (message) => console.error(message))
       limits.set(key, next)
       return yield* Effect.promise(() => next)
     },
