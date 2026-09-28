@@ -25,22 +25,24 @@ afterEach(async () => {
  * ever arrived, because their turn ABORTED. Continuation is gated on `session.idle`, so nothing
  * re-armed them and an unattended run idled indefinitely while looking healthy from the outside.
  */
-function client() {
+function client(status: (() => unknown) | undefined = undefined) {
   return {
     session: {
       get: () => ({ data: { id: "s", info: { id: "s" } } }),
       messages: () => ({ data: [] }),
       children: () => ({ data: [] }),
-      status: () => ({ data: {} }),
+      // The default is an empty status map, i.e. "the server reports every session idle" - the
+      // shape the server itself returns when nothing anywhere is busy.
+      status: status ?? (() => ({ data: {} })),
       promptAsync: () => ({ data: undefined }),
     },
     app: { log: () => ({ data: {} }) },
   }
 }
 
-function runtime(options: Record<string, unknown> = {}) {
+function runtime(options: Record<string, unknown> = {}, status?: () => unknown) {
   return createGoalRuntime({
-    client: client() as never,
+    client: client(status) as never,
     options: { auto_continue: true, max_stall_before_continue: 60, ...options } as never,
   })
 }
@@ -50,6 +52,12 @@ async function backdate(sessionID: string, seconds: number) {
   raw.goals[sessionID].updatedAt = Math.floor(Date.now() / 1000) - seconds
   await Bun.write(statePath(), JSON.stringify(raw, null, 2))
 }
+
+/** The event that puts a session into the runtime's local `busySessions` cache. */
+const busyEvent = (sessionID: string) => ({
+  type: "session.status",
+  properties: { sessionID, status: { type: "busy" } },
+})
 
 describe("the stall sweep re-arms a goal whose turn ended without an idle event", () => {
   test("an active goal quiet past the threshold is continued", async () => {
@@ -217,6 +225,79 @@ describe("the stall sweep re-arms a goal whose turn ended without an idle event"
     const goal = await getGoal(sessionID)
     expect(goal?.status).toBe("active")
     expect(goal?.autoTurns).toBe(1)
+    await rt.dispose()
+  })
+})
+
+describe("the sweep asks the server whether a session is busy, not the local event cache", () => {
+  test("a goal the local cache calls busy is re-armed once the server reports the session idle", async () => {
+    const sessionID = "stall-11"
+    await createGoal(sessionID, "keep going", { maxAutoTurns: 100 })
+    await backdate(sessionID, 600)
+
+    // The live failure, pinned. A turn aborted inside session compaction - the session log showed
+    // `agent=compaction`, then `exiting loop`, and no `session.idle` or idle `session.status` event
+    // afterwards, ever. The goal was left `status: active`, `autoTurns: 0`, `lastStatus: "Goal
+    // set."`, `noProgressTurns: 0/8`, `updatedAt` 351s old against a 5m `max_stall_before_continue`:
+    // healthy from the outside, doing nothing, with the one net for exactly this case skipping it.
+    // It skipped it because the sweep asked the local `busySessions` cache, whose only way out is
+    // the idle event that never arrived - so the guard re-created the condition the sweep exists to
+    // detect and the goal could never be re-armed by anything.
+    const rt = runtime()
+    await rt.handleEvent(busyEvent(sessionID))
+    await rt.sweepStalledGoals()
+
+    // `/session/status` carries no entry for this session, so the server - the one authority that
+    // does not depend on an event arriving - reports it idle, and the stale local entry loses.
+    expect((await getGoal(sessionID))?.autoTurns).toBe(1)
+    await rt.dispose()
+  })
+
+  test("a session the server still reports busy is skipped, whatever the local cache says", async () => {
+    // Two goals, so both directions of the disagreement are exercised: one the local cache calls
+    // busy and one it does not. This is the control for the test above - without it a fix that
+    // simply always re-armed would pass, and a session that is genuinely working would get
+    // prompted into from under its own turn, however long it had been quiet.
+    const cached = "stall-12"
+    const uncached = "stall-13"
+    await createGoal(cached, "keep going", { maxAutoTurns: 100 })
+    await createGoal(uncached, "keep going", { maxAutoTurns: 100 })
+    await backdate(cached, 600)
+    await backdate(uncached, 600)
+
+    const rt = runtime({}, () => ({ data: { [cached]: { type: "busy" }, [uncached]: { type: "busy" } } }))
+    await rt.handleEvent(busyEvent(cached))
+    await rt.sweepStalledGoals()
+
+    expect((await getGoal(cached))?.autoTurns).toBe(0)
+    expect((await getGoal(uncached))?.autoTurns).toBe(0)
+    await rt.dispose()
+  })
+
+  test("a status lookup that fails falls back to the local cache and skips", async () => {
+    const sessionID = "stall-14"
+    await createGoal(sessionID, "keep going", { maxAutoTurns: 100 })
+    await backdate(sessionID, 600)
+
+    // The rescue path must not turn into a way to stomp on a working session because the API
+    // blipped. With no readable answer the sweep knows no more than the cache it already had, and
+    // the cache's answer is the conservative one - the same rule the ambiguous session lookup
+    // follows in this file: not knowing must never be read as "go". Both failure shapes the SDK
+    // produces are covered, because a non-2xx resolves as a result tuple carrying `error` rather
+    // than rejecting, so a `catch` alone would miss the common case.
+    let calls = 0
+    const rt = runtime({}, () => {
+      calls += 1
+      if (calls === 1) return { error: { message: "boom" }, response: { status: 500 } }
+      throw new Error("connection reset")
+    })
+    await rt.handleEvent(busyEvent(sessionID))
+    await rt.sweepStalledGoals()
+    await rt.sweepStalledGoals()
+
+    expect((await getGoal(sessionID))?.autoTurns).toBe(0)
+    // So the second sweep demonstrably ran against a rejecting client instead of bailing out early.
+    expect(calls).toBe(2)
     await rt.dispose()
   })
 })
