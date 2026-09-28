@@ -351,7 +351,7 @@ const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Service | C
             Effect.gen(function* () {
               yield* add()
               const result = yield* git(
-                [...quote, ...args(["diff", "--cached", "--no-ext-diff", "--name-only", hash, "--", "."])],
+                [...quote, ...args(["diff", "--cached", "--no-ext-diff", "--name-only", "-z", hash, "--", "."])],
                 {
                   cwd: state.directory,
                 },
@@ -360,11 +360,16 @@ const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Service | C
                 yield* Effect.logWarning("failed to get diff", { hash, exitCode: result.code })
                 return { hash, files: [] }
               }
-              const files = result.text
-                .trim()
-                .split("\n")
-                .map((x) => x.trim())
-                .filter(Boolean)
+              // NUL-delimited, because this is the one list that becomes absolute paths
+              // the user is expected to be able to open. Non-`-z` output makes git C-quote
+              // a name containing a tab, a newline, a quote, or a backslash, and the
+              // `-c core.quotepath=false` above does not stop that -- it only governs
+              // non-ASCII bytes. The quoted display form is not a path, and joining it
+              // turned every "\n" in it into a directory separator, so the reported file
+              // was one that could not exist. A split on "\n" also cannot be fixed by
+              // trimming: a name may legitimately end in a space, and each line was
+              // being trimmed individually.
+              const files = result.text.split("\0").filter(Boolean)
 
               // Hide ignored-file removals from the user-facing patch output.
               const ignored = yield* ignore(files)
@@ -373,7 +378,7 @@ const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Service | C
                 hash,
                 files: files
                   .filter((item) => !ignored.has(item))
-                  .map((x) => path.join(state.worktree, x).replaceAll("\\", "/")),
+                  .map((x) => path.join(state.worktree, ...x.split("/")).replaceAll(path.sep, "/")),
               }
             }),
           )
