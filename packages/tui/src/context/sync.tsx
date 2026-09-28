@@ -699,18 +699,28 @@ export const {
           const task = (async () => {
             const [session, messages, todo, diff] = await Promise.all([
               sdk.client.session.get({ sessionID }, { throwOnError: true }),
-              sdk.client.session.messages({ sessionID, limit: 100 }),
-              sdk.client.session.todo({ sessionID }),
-              sdk.client.session.diff({ sessionID }),
+              readRemote(() => sdk.client.session.messages({ sessionID, limit: 100 }), []),
+              readRemote(() => sdk.client.session.todo({ sessionID }), []),
+              readRemote(() => sdk.client.session.diff({ sessionID }), []),
             ])
             setStore(
               produce((draft) => {
                 const match = search(draft.session, sessionID, (s) => s.id)
                 if (match.found) draft.session[match.index] = session.data!
                 if (!match.found) draft.session.splice(match.index, 0, session.data)
-                draft.todo[sessionID] = todo.data ?? []
+                // These three reads carried no `throwOnError`, unlike the
+                // `session.get` beside them, so each one fell through to `?? []`
+                // and a failed read overwrote real content with an empty list.
+                // A failed `messages` read was worse than an empty list: the
+                // merge below keeps only what the live tracker has seen, so it
+                // dropped every message loaded earlier and the `removed` loop
+                // took their parts with it. A server blip mid-session shortened
+                // the transcript. A failure now leaves what we already have.
+                if (todo.ok) draft.todo[sessionID] = todo.data
+                if (diff.ok) draft.session_diff[sessionID] = diff.data
+                if (!messages.ok) return
                 const currentMessages = draft.message[sessionID] ?? []
-                const infos = (messages.data ?? []).flatMap((message) => {
+                const infos = messages.data.flatMap((message) => {
                   if (!tracker.messages.has(message.info.id)) return [message.info]
                   const current = currentMessages.find((item) => item.id === message.info.id)
                   return current ? [current] : []
@@ -724,7 +734,7 @@ export const {
                 const removed = infos.slice(0, -100)
                 const visible = infos.slice(-100)
                 const visibleIDs = new Set(visible.map((message) => message.id))
-                for (const message of messages.data ?? []) {
+                for (const message of messages.data) {
                   if (!visibleIDs.has(message.info.id)) {
                     delete draft.part[message.info.id]
                     continue
@@ -753,10 +763,12 @@ export const {
                 }
                 for (const message of removed) delete draft.part[message.id]
                 draft.message[sessionID] = visible
-                draft.session_diff[sessionID] = diff.data ?? []
               }),
             )
-            fullSyncedSessions.add(sessionID)
+            // Only a session whose reads all landed counts as fully synced.
+            // Marking it after a failure would make the gap permanent: the next
+            // hydration would return early and never retry.
+            if (messages.ok && todo.ok && diff.ok) fullSyncedSessions.add(sessionID)
           })().finally(() => {
             syncingSessions.delete(sessionID)
             hydratingSessions.delete(sessionID)
