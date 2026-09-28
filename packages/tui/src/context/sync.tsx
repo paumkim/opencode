@@ -120,6 +120,7 @@ type SyncStore = {
     provider_auth?: string
     vcs?: string
     session?: string
+    capabilities?: string
   }
 }
 
@@ -546,10 +547,15 @@ export const {
       // blocking - include session.list when continuing a session
       const providersPromise = sdk.client.config.providers({ workspace }, { throwOnError: true })
       const providerListPromise = sdk.client.provider.list({ workspace }, { throwOnError: true })
-      const capabilitiesPromise = sdk.client.experimental.capabilities
-        .get({ workspace }, { throwOnError: true })
-        .then((x) => x.data)
-        .catch(() => undefined)
+      // Recorded rather than swallowed. This used to end in `.catch(() => undefined)`, and the flag
+      // below is computed as `capabilities?.backgroundSubagents === true` - so a read that never landed
+      // was applied as a confident "this feature is off". Background subagents simply stopped
+      // appearing, with nothing anywhere saying the server could not be asked. An unknown capability is
+      // not the same as a disabled one, so the flag is only written from a read that succeeded.
+      const capabilitiesPromise = readRemote<{ backgroundSubagents?: boolean }>(
+        () => sdk.client.experimental.capabilities.get({ workspace }, { throwOnError: true }),
+        {},
+      )
       const consoleStatePromise = sdk.client.experimental.console
         .get({ workspace }, { throwOnError: true })
         .then((x) => x.data)
@@ -595,7 +601,18 @@ export const {
               setStore("provider", reconcile(providers.providers))
               setStore("provider_default", reconcile(providers.default))
               setStore("provider_next", reconcile(providerList))
-              setStore("capabilities", "experimentalBackgroundSubagents", capabilities?.backgroundSubagents === true)
+              // Only a read that landed may turn the flag on or off. On a failure the previous value is
+              // left alone and the reason is recorded, so "we could not ask" is never applied as "off".
+              if (capabilities.ok) {
+                setStore(
+                  "capabilities",
+                  "experimentalBackgroundSubagents",
+                  capabilities.data.backgroundSubagents === true,
+                )
+                setStore("unreadable", "capabilities", undefined)
+              } else {
+                setStore("unreadable", "capabilities", capabilities.reason)
+              }
               setStore("console_state", reconcile(consoleState))
               setStore("agent", reconcile(agents))
               setStore("config", reconcile(config))
