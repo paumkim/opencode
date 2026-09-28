@@ -296,6 +296,156 @@ describe("Worktree", () => {
     )
   })
 
+  // `Worktree.reset` backs `POST /experimental/worktree/reset` and had no test at all. It is the
+  // most destructive thing in this module: it fetches, then `reset --hard`, `clean -ffdx`, and
+  // three recursive submodule resets/cleans, all inside a caller-supplied directory. The two guards
+  // it does have -- refusing the primary workspace, and requiring git to list the path as a
+  // worktree -- are what keep that from being aimed at the project checkout or an arbitrary
+  // directory, so they are asserted here rather than assumed.
+  describe("reset", () => {
+    it.instance(
+      "refuses to reset the primary workspace",
+      () =>
+        Effect.gen(function* () {
+          const test = yield* TestInstance
+          const svc = yield* Worktree.Service
+          const exit = yield* Effect.exit(svc.reset({ directory: test.directory }))
+
+          expect(Exit.isFailure(exit)).toBe(true)
+          if (!Exit.isFailure(exit)) return
+          const error = Cause.squash(exit.cause)
+          expect(error).toBeInstanceOf(Worktree.ResetFailedError)
+          if (error instanceof Worktree.ResetFailedError) expect(error.message).toContain("primary workspace")
+        }),
+      { git: true },
+    )
+
+    // The primary guard is a string comparison on the canonical path, so a path that merely
+    // contains the primary's path is a different directory and must not be refused for the wrong
+    // reason -- it should be refused because git does not know it.
+    it.instance(
+      "reports a path git does not know as not found, not as the primary workspace",
+      () =>
+        Effect.gen(function* () {
+          const test = yield* TestInstance
+          const svc = yield* Worktree.Service
+          const unknown = path.join(test.directory, "not-a-worktree")
+          const exit = yield* Effect.exit(svc.reset({ directory: unknown }))
+
+          expect(Exit.isFailure(exit)).toBe(true)
+          if (!Exit.isFailure(exit)) return
+          const error = Cause.squash(exit.cause)
+          expect(error).toBeInstanceOf(Worktree.ResetFailedError)
+          if (error instanceof Worktree.ResetFailedError) expect(error.message).toBe("Worktree not found")
+        }),
+      { git: true },
+    )
+
+    // The happy path, and the guarantee the guards exist to protect.
+    //
+    // Two facts about this code shaped the fixture, and both were wrong in my first attempt:
+    //
+    //   - `reset` rewinds to the DEFAULT branch (`reset --hard <default-branch>`), not to the tip of
+    //     the worktree's own branch, so a commit made on the worktree branch is discarded by design.
+    //   - the worktree sits on its own branch, so a file committed only to the default branch is
+    //     UNTRACKED there, not modified. `clean -ffdx` removes it; `reset --hard` is what rewinds a
+    //     file that is genuinely tracked and modified.
+    //
+    // So the tracked-and-modified case needs the file committed on the WORKTREE's own branch, and the
+    // untracked case is a second file. Asserting the wrong one of those two makes the test pass while
+    // pinning the wrong git command -- dropping `reset --hard` left it green until this was split.
+    it.instance(
+      "rewinds a tracked file to the base branch and removes untracked files, leaving the primary alone",
+      () =>
+        Effect.acquireUseRelease(
+          Effect.gen(function* () {
+            const test = yield* TestInstance
+            yield* Effect.promise(() => fs.writeFile(path.join(test.directory, "base.txt"), "base content\n"))
+            yield* git(test.directory, ["add", "base.txt"])
+            yield* git(test.directory, ["commit", "-m", "add base"])
+            const ready = yield* waitReady().pipe(Effect.forkScoped)
+            const svc = yield* Worktree.Service
+            const info = yield* svc.create()
+            yield* Fiber.join(ready)
+            return info
+          }),
+          (info) =>
+            Effect.gen(function* () {
+              const test = yield* TestInstance
+              const svc = yield* Worktree.Service
+
+              // Inherited from the default branch at branch time, so it is tracked AND present at the
+              // base ref. Rewinding it is `reset --hard`'s job.
+              const baseTracked = path.join(info.directory, "base.txt")
+              yield* Effect.promise(() => fs.writeFile(baseTracked, "local edit\n"))
+              // Committed on the WORKTREE's branch, so it is absent from the base tree.
+              const tracked = path.join(info.directory, "wt-tracked.txt")
+              yield* Effect.promise(() => fs.writeFile(tracked, "worktree commit\n"))
+              yield* git(info.directory, ["add", "wt-tracked.txt"])
+              yield* git(info.directory, ["commit", "-m", "worktree commit"])
+              yield* Effect.promise(() => fs.writeFile(tracked, "local edit\n"))
+
+              // Never committed anywhere, so `clean -ffdx` is what removes it.
+              const untracked = path.join(info.directory, "untracked.txt")
+              yield* Effect.promise(() => fs.writeFile(untracked, "junk\n"))
+
+              // Committed on the worktree's branch only, so it is absent from the base tree.
+              const branchOnly = path.join(info.directory, "wt-only.txt")
+              yield* Effect.promise(() => fs.writeFile(branchOnly, "branch only\n"))
+              yield* git(info.directory, ["add", "wt-only.txt"])
+              yield* git(info.directory, ["commit", "-m", "branch only"])
+
+              const primaryFile = path.join(test.directory, "primary.txt")
+              yield* Effect.promise(() => fs.writeFile(primaryFile, "must survive\n"))
+
+              // Precondition: `baseTracked` really is tracked AND locally modified before the reset.
+              // Without this, "it reads back as the base content" could be true simply because the
+              // edit never landed, which is what made an earlier draft of this test vacuous.
+              expect(yield* Effect.promise(() => fs.readFile(baseTracked, "utf8"))).toBe("local edit\n")
+              const statusBefore = yield* gitResult(info.directory, ["status", "--porcelain"])
+              expect(statusBefore.text()).toContain("base.txt")
+
+              const ok = yield* svc.reset({ directory: info.directory })
+              expect(ok).toBe(true)
+
+              // `baseTracked` was committed to the default branch BEFORE the worktree branched off,
+              // so it is present at the base ref and `reset --hard <base>` restores its committed
+              // content. `clean -ffdx` leaves tracked files alone, so only that command can produce
+              // this -- which is what pins it.
+              expect(yield* Effect.promise(() => fs.readFile(baseTracked, "utf8"))).toBe("base content\n")
+              // `wt-tracked.txt` and `branchOnly` were committed only on the worktree branch, so they
+              // are not in the base tree and the reset removes both outright.
+              for (const gone of [tracked, branchOnly]) {
+                expect(
+                  yield* Effect.promise(() =>
+                    fs
+                      .stat(gone)
+                      .then(() => true)
+                      .catch(() => false),
+                  ),
+                ).toBe(false)
+              }
+              expect(
+                yield* Effect.promise(() =>
+                  fs
+                    .stat(untracked)
+                    .then(() => true)
+                    .catch(() => false),
+                ),
+              ).toBe(false)
+              // The primary checkout is not one of its own worktrees and must be untouched.
+              expect(yield* Effect.promise(() => fs.readFile(primaryFile, "utf8"))).toBe("must survive\n")
+            }),
+          (info) =>
+            Effect.gen(function* () {
+              const svc = yield* Worktree.Service
+              yield* svc.remove({ directory: info.directory })
+            }),
+        ),
+      { git: true },
+    )
+  })
+
   describe("remove edge cases", () => {
     // `remove` takes a `directory` off the wire (`DELETE /experimental/worktree`) and, when git does
     // not know that path, used to delete it anyway. `create` only ever places a worktree under
