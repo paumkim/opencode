@@ -121,6 +121,7 @@ type SyncStore = {
     vcs?: string
     session?: string
     capabilities?: string
+    console_state?: string
   }
 }
 
@@ -556,10 +557,17 @@ export const {
         () => sdk.client.experimental.capabilities.get({ workspace }, { throwOnError: true }),
         {},
       )
-      const consoleStatePromise = sdk.client.experimental.console
-        .get({ workspace }, { throwOnError: true })
-        .then((x) => x.data)
-        .catch(() => emptyConsoleState)
+      // Recorded rather than swallowed, for the same reason as `capabilities` above and with a sharper
+      // consequence. This used to end in `.catch(() => emptyConsoleState)`, and `emptyConsoleState`
+      // says no provider is console-managed and there is nothing to switch between. Both are claims the
+      // user acts on: `dialog-provider` then offers an API-key path for a provider whose key is managed
+      // centrally, drops the org name from its footer, and the "Switch org" command disappears from
+      // app.tsx because `switchableOrgCount > 1` is false. None of it is recoverable by looking again -
+      // the provider list simply looks like a local one.
+      const consoleStatePromise = readRemote<ConsoleState>(
+        () => sdk.client.experimental.console.get({ workspace }, { throwOnError: true }),
+        emptyConsoleState,
+      )
       const agentsPromise = sdk.client.app.agents({ workspace }, { throwOnError: true })
       const configPromise = sdk.client.config.get({ workspace }, { throwOnError: true })
       await Promise.all([
@@ -613,7 +621,15 @@ export const {
               } else {
                 setStore("unreadable", "capabilities", capabilities.reason)
               }
-              setStore("console_state", reconcile(consoleState))
+              // Only a read that landed may replace the known console state. On a failure the previous
+              // value is left alone, so a transient error cannot turn a console-managed provider into
+              // one that offers a local API key.
+              if (consoleState.ok) {
+                setStore("console_state", reconcile(consoleState.data))
+                setStore("unreadable", "console_state", undefined)
+              } else {
+                setStore("unreadable", "console_state", consoleState.reason)
+              }
               setStore("agent", reconcile(agents))
               setStore("config", reconcile(config))
               if (sessions !== undefined) applySessions(sessions)
@@ -640,7 +656,12 @@ export const {
           }
           void Promise.all([
             ...(args.continue ? [] : [sessionListPromise.then(applySessions)]),
-            consoleStatePromise.then((consoleState) => setStore("console_state", reconcile(consoleState))),
+            // Re-applied here as well as in the batch above, so the second pass follows the same rule:
+            // apply only a read that landed, and record the one that did not.
+            consoleStatePromise.then((x) => {
+              if (x.ok) setStore("console_state", reconcile(x.data))
+              record("console_state", x)
+            }),
             readRemote(() => sdk.client.command.list({ workspace }), []).then((x) => {
               if (x.ok) setStore("command", reconcile(x.data))
               record("command", x)

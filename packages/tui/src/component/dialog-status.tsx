@@ -58,6 +58,7 @@ const READ_LABELS: Record<string, string> = {
   vcs: "Branch",
   session: "Session list",
   capabilities: "Feature capabilities",
+  console_state: "Console account",
 }
 
 /** Keys already given their own section above, so they are not listed twice. */
