@@ -94,17 +94,22 @@ export function make<
       // schema before failing; unrepairable failures surface as tool errors so
       // the model can self-correct on the next turn instead of executing with
       // wrong arguments.
+      //
+      // The repair is a rewrite of the input, not a substitute for validation.
+      // `correctToolInput` only checks that the value is object-shaped, so a
+      // repaired call still has to go through the real codec: that is what
+      // turns a missing or nulled-out required key into a named decode failure
+      // rather than handing the handler `undefined` for a required field.
       const corrected = correctToolInput(call.input, Schema.toJsonSchemaDocument(config.input).schema)
-      const decoded = corrected.repaired
-        ? Effect.succeed(corrected.input as unknown as Schema.Schema.Type<typeof config.input>)
-        : Schema.decodeUnknownEffect(config.input)(call.input)
+      const decoded = Schema.decodeUnknownEffect(config.input)(corrected.repaired ? corrected.input : call.input)
       return decoded.pipe(
-        Effect.mapError((error) =>
-          new ToolFailure({
-            message: corrected.repaired
-              ? `Invalid tool input (repaired: ${corrected.message ?? "unknown"}): ${error.message}`
-              : `Invalid tool input: ${error.message}`,
-          }),
+        Effect.mapError(
+          (error) =>
+            new ToolFailure({
+              message: corrected.repaired
+                ? `Invalid tool input (repaired: ${corrected.message ?? "unknown"}): ${error.message}`
+                : `Invalid tool input: ${error.message}`,
+            }),
         ),
         Effect.flatMap((input) =>
           config.execute(input, context).pipe(

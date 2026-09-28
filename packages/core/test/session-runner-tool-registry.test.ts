@@ -333,6 +333,84 @@ describe("ToolRegistry", () => {
     }),
   )
 
+  it.effect("re-decodes a repaired input so a missing or nulled required key never reaches the handler", () =>
+    Effect.gen(function* () {
+      const service = yield* ToolRegistry.Service
+      const executed: unknown[] = []
+      const recorder = <A extends Tool.SchemaType<any>>(name: string, input: A) =>
+        Tool.make({
+          description: name,
+          input,
+          output: Schema.Struct({ ok: Schema.Boolean }),
+          execute: (value) =>
+            Effect.sync(() => {
+              executed.push(value)
+              return { ok: true }
+            }),
+        })
+      yield* service.register({
+        located: recorder("located", Schema.Struct({ path: Schema.String, limit: Schema.Number })),
+        named: recorder("named", Schema.Struct({ path: Schema.String })),
+      })
+
+      // A repair only rewrites the input; it is not a substitute for decoding.
+      // Otherwise the handler receives `undefined` for a required field and the
+      // defect it raises there fails the whole stream instead of returning the
+      // model a self-correctable tool error.
+      expect(
+        yield* executeTool(service, {
+          sessionID,
+          ...identity,
+          call: { type: "tool-call", id: "missing-limit", name: "located", input: { path: "/a" } },
+        }),
+      ).toMatchObject({
+        type: "error",
+        value: expect.stringContaining('Invalid tool input (repaired: missing required key "limit")'),
+      })
+      expect(
+        yield* executeTool(service, {
+          sessionID,
+          ...identity,
+          call: { type: "tool-call", id: "null-path", name: "named", input: { path: null } },
+        }),
+      ).toMatchObject({
+        type: "error",
+        value: expect.stringContaining('Invalid tool input (repaired: null where "path" expects string)'),
+      })
+      expect(executed).toEqual([])
+    }),
+  )
+
+  it.effect("still executes a repair that the real schema accepts", () =>
+    Effect.gen(function* () {
+      const service = yield* ToolRegistry.Service
+      const executed: unknown[] = []
+      yield* service.register({
+        located: Tool.make({
+          description: "located",
+          input: Schema.Struct({ path: Schema.String, limit: Schema.optional(Schema.Number) }),
+          output: Schema.Struct({ ok: Schema.Boolean }),
+          execute: (input) =>
+            Effect.sync(() => {
+              executed.push(input)
+              return { ok: true }
+            }),
+        }),
+      })
+
+      // A null for an optional key is a real repair: the codec accepts the
+      // repaired value, so this must run rather than fail.
+      expect(
+        yield* executeTool(service, {
+          sessionID,
+          ...identity,
+          call: { type: "tool-call", id: "optional-null", name: "located", input: { path: "/a", limit: null } },
+        }),
+      ).toEqual({ type: "json", value: { ok: true } })
+      expect(executed).toEqual([{ path: "/a" }])
+    }),
+  )
+
   it.effect("executes the unchanged registration advertised for a provider turn", () =>
     Effect.gen(function* () {
       const service = yield* ToolRegistry.Service
