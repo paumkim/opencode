@@ -41,24 +41,36 @@ export const experimentalHandlers = HttpApiBuilder.group(InstanceHttpApi, "exper
     })
 
     const getConsole = Effect.fn("ExperimentalHttpApi.console")(function* () {
-      const [state, groups] = yield* Effect.all(
+      const [state, result] = yield* Effect.all(
         [
           config.getConsoleState(),
+          // A total failure - the account list itself could not be read - still fails the request.
+          // The partial-failure case is handled below, from `failures`.
           account.orgsByAccount().pipe(Effect.catch(() => Effect.fail(new HttpApiError.InternalServerError({})))),
         ],
         {
           concurrency: "unbounded",
         },
       )
+      // A partial read is a failure, not a count. `orgsByAccount` used to catch a failed read into
+      // an empty list per account, so this handler could never see one: its 500 wrapper was
+      // unreachable, and `switchableOrgCount` came back as 0 - which the TUI reads as "this account
+      // has no orgs to switch between" and drops the Switch org command entirely. The TUI records
+      // an unreadable console read on a failed *HTTP* call, but a fabricated 0 arrives as a
+      // successful response, so the server has to refuse it.
+      if (result.failures.length > 0) {
+        yield* Effect.logError("console org read failed", { failures: result.failures.map((f) => f.accountID) })
+        return yield* Effect.fail(new HttpApiError.InternalServerError({}))
+      }
       return {
         consoleManagedProviders: state.consoleManagedProviders,
         ...(state.activeOrgName ? { activeOrgName: state.activeOrgName } : {}),
-        switchableOrgCount: groups.reduce((count, group) => count + group.orgs.length, 0),
+        switchableOrgCount: result.groups.reduce((count, group) => count + group.orgs.length, 0),
       }
     })
 
     const listConsoleOrgs = Effect.fn("ExperimentalHttpApi.consoleOrgs")(function* () {
-      const [groups, active] = yield* Effect.all(
+      const [result, active] = yield* Effect.all(
         [
           account.orgsByAccount().pipe(Effect.catch(() => Effect.fail(new HttpApiError.InternalServerError({})))),
           account.active().pipe(Effect.catch(() => Effect.fail(new HttpApiError.InternalServerError({})))),
@@ -67,9 +79,15 @@ export const experimentalHandlers = HttpApiBuilder.group(InstanceHttpApi, "exper
           concurrency: "unbounded",
         },
       )
+      // Same reason as `getConsole`: a partial read must not be served as a shorter list, because
+      // the orgs that are missing are exactly the ones the user cannot then switch to.
+      if (result.failures.length > 0) {
+        yield* Effect.logError("console org read failed", { failures: result.failures.map((f) => f.accountID) })
+        return yield* Effect.fail(new HttpApiError.InternalServerError({}))
+      }
       const info = Option.getOrUndefined(active)
       return {
-        orgs: groups.flatMap((group) =>
+        orgs: result.groups.flatMap((group) =>
           group.orgs.map((org) => ({
             accountID: group.account.id,
             accountEmail: group.account.email,
