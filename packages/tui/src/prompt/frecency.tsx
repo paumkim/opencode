@@ -3,7 +3,9 @@ import { onMount } from "solid-js"
 import { createStore } from "solid-js/store"
 import { createSimpleContext } from "../context/helper"
 import { useTuiPaths } from "../context/runtime"
-import { appendText, readText, writeText } from "../util/persistence"
+import { errorMessage } from "../util/error"
+import { appendText, readText, writeTextAtomic } from "../util/persistence"
+import { useToast } from "../ui/toast"
 
 type FrecencyEntry = { path: string; frequency: number; lastOpen: number }
 
@@ -39,17 +41,42 @@ export const { use: useFrecency, provider: FrecencyProvider } = createSimpleCont
   name: "Frecency",
   init: () => {
     const paths = useTuiPaths()
+    const toast = useToast()
     const frecencyPath = path.join(paths.state, "frecency.jsonl")
+
+    /**
+     * Every write below used to end in `.catch(() => {})`, so a failed one left the suggestion
+     * order quietly diverging from what is on disk with nothing on screen. The rewrite goes through
+     * the atomic primitive: `writeText` is `Bun.write`, which truncates the target first, so a
+     * failure part way through a trim would replace up to `MAX_FRECENCY_ENTRIES` - 1000 - good
+     * entries with a partial file.
+     */
+    const persist = (entries: Record<string, { frequency: number; lastOpen: number }>, reason: string) => {
+      const body = Object.entries(entries)
+        .map(([entryPath, entry]) => JSON.stringify({ path: entryPath, ...entry }))
+        .join("\n")
+      const trailing = body.length > 0 ? "\n" : ""
+      return writeTextAtomic(frecencyPath, body + trailing).catch((error) => {
+        toast.show({ variant: "error", title: `Could not save your ${reason}`, message: errorMessage(error) })
+      })
+    }
+
     onMount(async () => {
-      const lines = parseFrecency(await readText(frecencyPath).catch(() => ""))
-      setStore(
-        "data",
-        Object.fromEntries(
-          lines.map((entry) => [entry.path, { frequency: entry.frequency, lastOpen: entry.lastOpen }]),
-        ),
+      // A missing file is a first run and an empty store is the right answer. A file that could not
+      // be *read* is not: the entries are still there, and loading an empty store makes every file
+      // the user has opened look like one they have never opened.
+      const text = await readText(frecencyPath).catch((error) => {
+        if (!isMissingFile(error)) {
+          toast.show({ variant: "error", title: "Could not read your file history", message: errorMessage(error) })
+        }
+        return ""
+      })
+      const lines = parseFrecency(text)
+      const data = Object.fromEntries(
+        lines.map((entry) => [entry.path, { frequency: entry.frequency, lastOpen: entry.lastOpen }]),
       )
-      if (lines.length > 0)
-        writeText(frecencyPath, lines.map((entry) => JSON.stringify(entry)).join("\n") + "\n").catch(() => {})
+      setStore("data", data)
+      if (lines.length > 0) await persist(data, "file history")
     })
 
     const [store, setStore] = createStore({ data: {} as Record<string, { frequency: number; lastOpen: number }> })
@@ -58,17 +85,20 @@ export const { use: useFrecency, provider: FrecencyProvider } = createSimpleCont
       const absolutePath = path.resolve(paths.cwd, filePath)
       const newEntry = { frequency: (store.data[absolutePath]?.frequency || 0) + 1, lastOpen: Date.now() }
       setStore("data", absolutePath, newEntry)
-      appendText(frecencyPath, JSON.stringify({ path: absolutePath, ...newEntry }) + "\n").catch(() => {})
+      // This fires on every file the user opens, so it is the common case: one line appended to a
+      // file that is already there, leaving the existing entries alone. It still reports, because a
+      // file whose usage is never recorded just stops being suggested.
+      void appendText(frecencyPath, JSON.stringify({ path: absolutePath, ...newEntry }) + "\n").catch((error) => {
+        toast.show({ variant: "error", title: "Could not record that file", message: errorMessage(error) })
+      })
 
       if (Object.keys(store.data).length <= MAX_FRECENCY_ENTRIES) return
       const sorted = Object.entries(store.data)
         .sort(([, a], [, b]) => b.lastOpen - a.lastOpen)
         .slice(0, MAX_FRECENCY_ENTRIES)
-      setStore("data", Object.fromEntries(sorted))
-      writeText(
-        frecencyPath,
-        sorted.map(([entryPath, entry]) => JSON.stringify({ path: entryPath, ...entry })).join("\n") + "\n",
-      ).catch(() => {})
+      const trimmed = Object.fromEntries(sorted)
+      setStore("data", trimmed)
+      void persist(trimmed, "file history")
     }
 
     return {
@@ -78,3 +108,8 @@ export const { use: useFrecency, provider: FrecencyProvider } = createSimpleCont
     }
   },
 })
+
+/** `Bun.file().text()` on a path that does not exist is the one failure that is not a failure. */
+function isMissingFile(error: unknown) {
+  return error instanceof Error && (error as NodeJS.ErrnoException).code === "ENOENT"
+}
