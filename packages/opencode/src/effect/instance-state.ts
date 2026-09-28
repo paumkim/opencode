@@ -9,6 +9,12 @@ const TypeId = "~opencode/InstanceState"
 export interface InstanceState<A, E = never, R = never> {
   readonly [TypeId]: typeof TypeId
   readonly cache: ScopedCache.ScopedCache<string, A, E, R>
+  /**
+   * Which cache entry this state reads. Defaults to the current instance's
+   * directory; a service scoped to something else (a Location, say) passes the
+   * same keying explicitly so both graphs share one entry per directory.
+   */
+  readonly key: Effect.Effect<string>
 }
 
 export const context = Effect.gen(function* () {
@@ -25,6 +31,7 @@ export const directory = Effect.map(context, (ctx) => ctx.directory)
 
 export const make = <A, E = never, R = never>(
   init: (ctx: InstanceContext) => Effect.Effect<A, E, R | Scope.Scope>,
+  key: Effect.Effect<string> = directory,
 ): Effect.Effect<InstanceState<A, E, Exclude<R, Scope.Scope>>, never, R | Scope.Scope> =>
   Effect.gen(function* () {
     const cache = yield* ScopedCache.make<string, A, E, R>({
@@ -41,12 +48,13 @@ export const make = <A, E = never, R = never>(
     return {
       [TypeId]: TypeId,
       cache,
+      key,
     }
   })
 
 export const get = <A, E, R>(self: InstanceState<A, E, R>) =>
   Effect.gen(function* () {
-    return yield* ScopedCache.get(self.cache, yield* directory)
+    return yield* ScopedCache.get(self.cache, yield* self.key)
   })
 
 export const use = <A, E, R, B>(self: InstanceState<A, E, R>, select: (value: A) => B) => Effect.map(get(self), select)

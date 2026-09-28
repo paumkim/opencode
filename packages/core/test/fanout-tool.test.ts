@@ -213,6 +213,12 @@ describe("FanoutTool", () => {
       expect(yield* FanoutLedger.cursor(db, sessionID)).toEqual({ groups: 1, live: 2, unclaimed: 0 })
       expect((yield* jobs.list()).map((job) => job.status)).toEqual(["running", "running"])
       expect(yield* inbox()).toEqual([])
+      // Abort paths reach a job by `job.id`, `metadata.sessionId` and
+      // `metadata.parentSessionId`, and nothing else. A crew job's id is the
+      // worker's child Session, so these two keys are the only way aborting the
+      // parent reaches the crew.
+      for (const job of yield* jobs.list())
+        expect(job.metadata).toMatchObject({ sessionId: job.id, parentSessionId: sessionID })
 
       yield* Deferred.succeed(gate, undefined)
       for (const job of yield* jobs.list()) yield* jobs.wait({ id: job.id })

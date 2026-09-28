@@ -268,7 +268,18 @@ const layer = Layer.effectDiscard(
                     id: child.childID,
                     type: name,
                     title: worker.description,
-                    metadata: { groupID: group.id, workerID: record.id, parentSessionID: context.sessionID },
+                    metadata: {
+                      groupID: group.id,
+                      workerID: record.id,
+                      // Abort paths reach a job by `job.id`, `metadata.sessionId`
+                      // and `metadata.parentSessionId` (Session.cancelBackgroundJobs,
+                      // SessionRunState.cancelBackgroundJobs). A fan-out job's id is
+                      // the worker's child Session, so the parent is only reachable
+                      // through `parentSessionId` -- without it, aborting a parent
+                      // left its whole crew running.
+                      sessionId: child.childID,
+                      parentSessionId: context.sessionID,
+                    },
                     run: supervise(record, runner.run({ sessionID: child.childID, force: false })),
                   })
                   return { id: record.id, description: record.description, session: record.sessionID }
