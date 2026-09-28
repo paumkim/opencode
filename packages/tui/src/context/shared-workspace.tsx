@@ -21,6 +21,28 @@ export function sharedAuthToken(headers: RequestInit["headers"]): string | undef
   return match?.[1] ?? value
 }
 
+/**
+ * "Could not send your message" is not the same failure as "could not stop the agent", and the two
+ * call for different amounts of the user's attention. A prompt that failed leaves the user
+ * wondering whether they can retry; a stop that failed means the agent is still working.
+ */
+export function operationFailureTitle(operation: unknown): string {
+  switch (operation) {
+    case "prompt":
+      return "Your message was not sent"
+    case "command":
+      return "The command was not run"
+    case "shell":
+      return "The shell command was not run"
+    case "abort":
+      return "Could not stop the agent"
+    case "permissionReply":
+      return "Your permission answer did not reach the agent"
+    default:
+      return "The server could not do that"
+  }
+}
+
 let bridgeDirectory: string | undefined
 let bridgeWorkspace: string | undefined
 const bridgedEventHandlers = new Set<(event: { id: string; type: string; properties: Record<string, unknown> }) => void>()
@@ -103,6 +125,22 @@ export const { use: useSharedWorkspace, provider: SharedWorkspaceProvider, useOp
                 socket.close()
                 ws = undefined
                 connected = false
+              })
+              return
+            }
+            // The server accepted work from this client and could not carry it out - a prompt
+            // whose session was deleted, a stop that did not stop, a permission answer that never
+            // reached the agent. There is no HTTP fallback for any of them, because the client only
+            // sends over the socket when the socket is up. It has to be handled before the generic
+            // dispatch below, which would otherwise hand it to the SDK event bridge as if it were
+            // a session event.
+            if (data.type === "operationError") {
+              const operation = data.properties?.operation
+              const reason = data.properties?.message
+              toast.show({
+                variant: "error",
+                title: operationFailureTitle(operation),
+                message: typeof reason === "string" && reason ? reason : "The server could not do that",
               })
               return
             }

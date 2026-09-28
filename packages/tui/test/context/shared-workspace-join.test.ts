@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test"
 import { readFileSync } from "node:fs"
+import { operationFailureTitle } from "../../src/context/shared-workspace"
 
 const source = readFileSync(new URL("../../src/context/shared-workspace.tsx", import.meta.url), "utf-8")
 
@@ -56,4 +57,40 @@ test("a join that succeeds after a failure does not leave a stale error toast be
   const toastIndex = branch.indexOf("toast.show")
   expect(guardIndex).toBeGreaterThan(-1)
   expect(toastIndex).toBeGreaterThan(guardIndex)
+})
+
+/**
+ * A shared-workspace operation the server accepted and then could not carry out used to reach the
+ * user as nothing at all. The client only sends over the socket when the socket is up, so there is
+ * no HTTP fallback covering a prompt, a command, a shell, an abort or a permission answer sent
+ * this way - the message simply disappeared, and an agent blocked on a permission stayed blocked.
+ *
+ * The server answers with an `operationError` frame. It has to be handled *before* the generic
+ * dispatch, which would otherwise hand it to the SDK event bridge as if it were a session event.
+ */
+test("an operationError frame is surfaced to the user, not forwarded as a session event", () => {
+  const handlerStart = source.indexOf("socket.onmessage")
+  expect(handlerStart).toBeGreaterThan(-1)
+  const handler = source.slice(handlerStart, source.indexOf("socket.onclose", handlerStart))
+
+  expect(handler).toContain('data.type === "operationError"')
+  expect(handler).toContain("toast.show")
+  // It has to return before the dispatch below, or the SDK event bridge is handed a frame that is
+  // not a session event.
+  const checkIndex = handler.indexOf('data.type === "operationError"')
+  const dispatchIndex = handler.indexOf("for (const listener of listeners)")
+  expect(checkIndex).toBeGreaterThan(-1)
+  expect(dispatchIndex).toBeGreaterThan(checkIndex)
+  expect(handler.slice(checkIndex, dispatchIndex)).toContain("return")
+})
+
+test("names the operation that failed rather than one generic message", () => {
+  // "Could not send your message" and "could not stop the agent" are different failures with
+  // different consequences, and a user who pressed stop needs to know the agent is still working.
+  expect(operationFailureTitle("prompt")).toBe("Your message was not sent")
+  expect(operationFailureTitle("abort")).toBe("Could not stop the agent")
+  expect(operationFailureTitle("permissionReply")).toBe("Your permission answer did not reach the agent")
+  // A name this build does not know about still has to say something.
+  expect(operationFailureTitle("somethingElse")).toBe("The server could not do that")
+  expect(operationFailureTitle(undefined)).toBe("The server could not do that")
 })
