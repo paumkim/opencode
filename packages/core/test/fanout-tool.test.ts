@@ -199,6 +199,13 @@ describe("FanoutTool", () => {
       const settled = yield* settleTool(registry, call(crew(2)))
       expect(settled.result.type).toBe("text")
       expect(assertions).toMatchObject([{ sessionID, action: FanoutTool.name, resources: ["*"] }])
+      // What the parent reads back on its very next step: the crew's identity,
+      // the instruction not to poll, and no fabricated output.
+      expect(settled.result).toMatchObject({ type: "text" })
+      const modelText = settled.result.type === "text" ? settled.result.value : ""
+      expect(modelText).toContain("running in the background")
+      expect(modelText).toContain("Do not sleep, poll, or ask for status")
+      expect(settled.output?.structured).toMatchObject({ title: "audit" })
 
       // THE POINT: the call returned with the crew still mid-flight. A blocking
       // delegation would sit here until the provider answered.
