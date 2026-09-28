@@ -167,7 +167,7 @@ export const deliver = Effect.fn("FanoutLifecycle.deliver")(function* (
     delivery: "steer",
   })
   yield* FanoutLedger.claim(db, {
-    parentSessionID: worker.parentSessionID,
+    workerID: worker.id,
     seq: worker.settledSeq ?? admitted.admittedSeq,
   })
   return admitted

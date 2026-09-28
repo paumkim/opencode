@@ -495,7 +495,7 @@ export const TaskTool = Tool.define(
                     : { error: FanoutDigest.failure(text) }),
                 }).pipe(Effect.orDie)
                 yield* inject(state, text)
-                yield* FanoutLedger.claim(database.db, { parentSessionID: ctx.sessionID }).pipe(Effect.orDie)
+                yield* FanoutLedger.claim(database.db, { workerID: record.id }).pipe(Effect.orDie)
               })
             }
             return Effect.void
@@ -608,7 +608,7 @@ export const TaskTool = Tool.define(
               status: "done",
               digest: FanoutDigest.bound(output) ?? "The subagent finished without leaving a summary.",
             }).pipe(Effect.orDie)
-            yield* FanoutLedger.claim(database.db, { parentSessionID: ctx.sessionID }).pipe(Effect.orDie)
+            yield* FanoutLedger.claim(database.db, { workerID: record.id }).pipe(Effect.orDie)
             return {
               title: params.description,
               metadata,
