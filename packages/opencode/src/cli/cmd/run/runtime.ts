@@ -21,6 +21,48 @@ import { resolveModelInfo, resolveRunTuiConfig, resolveSessionInfo } from "./run
 import { createRuntimeLifecycle } from "./runtime.lifecycle"
 import { trace } from "./trace"
 import { cycleVariant, formatModelLabel, resolveSavedVariant, resolveVariant, saveVariant } from "./variant.shared"
+import { errorMessage } from "@/util/error"
+
+/**
+ * Records that a variant selection could not be persisted.
+ *
+ * The selection still applies to the current turn, so this is not an error the user must act on - but
+ * silently ignoring it means the same choice has to be made again next session, with nothing to say
+ * why. The SDK's `app.log` resolves a non-2xx as a result tuple rather than rejecting, so a
+ * `.catch` alone would miss an HTTP failure, which is the likely one here.
+ */
+function reportVariantSaveFailure(sdk: VariantSaveLog, how: string, error: unknown) {
+  const write = sdk.app?.log as VariantLogFn | undefined
+  if (!write) return
+  void write({
+    body: {
+      service: "opencode-run",
+      level: "error",
+      message: `the selected variant was applied to this turn but could not be saved, so it will be forgotten next session (triggered by: ${how})`,
+      extra: { error: errorMessage(error) },
+    },
+  }).then(
+    (result) => {
+      // A non-2xx resolves as a result tuple carrying `error` rather than rejecting, so a
+      // `.catch` alone would miss the likely failure here.
+      const failure = (result as { error?: unknown } | undefined)?.error
+      if (failure) console.error(`[run] could not record the variant save failure: ${errorMessage(failure)}`)
+    },
+    (failure) => console.error(`[run] could not record the variant save failure: ${errorMessage(failure)}`),
+  )
+}
+
+/**
+ * The slice of the client this helper uses.
+ *
+ * Structural rather than the full `OpencodeClient`: the real client is an `OpencodeClient & {
+ * request }`, so naming that type rejects the very value being passed, and a structural shape is what
+ * lets a test supply a stub - which is the reason for having a helper.
+ */
+type VariantSaveLog = { app?: { log?: unknown } }
+type VariantLogFn = (input: {
+  body: { service: string; level: string; message: string; extra: { error: string } }
+}) => Promise<unknown>
 import type { LocalReplayAnchor, LocalReplayRow, RunInput, RunPrompt, RunProvider, StreamCommit } from "./types"
 
 /** @internal Exported for testing */
@@ -284,7 +326,15 @@ async function runInteractiveRuntime(input: RunRuntimeInput, deps: RunRuntimeDep
       }
 
       state.activeVariant = cycleVariant(state.activeVariant, state.variants)
-      saveVariant(state.model, state.activeVariant)
+      // The variant applies to this turn either way, so the save is reported separately rather than
+      // folded into the status: the status names the variant the user is now on, and the log records
+      // that the choice will not be remembered. Reporting only one of the two leaves a user
+      // believing a choice was saved when it was not. This handler is synchronous - the footer's
+      // `onCycleVariant` contract is `() => CycleResult | void` - so the failure cannot become a
+      // notice here; `onVariantSelect` below, which is async, puts it in the status.
+      void saveVariant(state.model, state.activeVariant).catch((error) => {
+        reportVariantSaveFailure(ctx.sdk, "cycle", error)
+      })
       return {
         status: state.activeVariant ? `variant ${state.activeVariant}` : "variant default",
         modelLabel: formatModelLabel(state.model, state.activeVariant, state.providers),
@@ -349,35 +399,42 @@ async function runInteractiveRuntime(input: RunRuntimeInput, deps: RunRuntimeDep
       }
 
       state.activeVariant = variant
-      saveVariant(state.model, state.activeVariant)
+      const saved = await saveVariant(state.model, state.activeVariant).then(
+        () => undefined,
+        (error) => error,
+      )
       return {
-        status: state.activeVariant ? `variant ${state.activeVariant}` : "variant default",
+        status: saved
+          ? `variant ${state.activeVariant ?? "default"} (not saved: ${errorMessage(saved)})`
+          : state.activeVariant
+            ? `variant ${state.activeVariant}`
+            : "variant default",
         modelLabel: formatModelLabel(state.model, state.activeVariant, state.providers),
         variant: state.activeVariant,
         variants: state.variants,
       }
     },
-      onInterrupt: () => {
-        if (!hasSession(input, state) || state.aborting) {
-          return
-        }
+    onInterrupt: () => {
+      if (!hasSession(input, state) || state.aborting) {
+        return
+      }
 
-        state.aborting = true
-        void ctx.sdk.session
-          .abort({
-            sessionID: state.sessionID,
-          })
-          .catch(() => {})
-          .finally(() => {
-            state.aborting = false
-          })
-      },
-      onBackground: () => {
-        if (!hasSession(input, state)) return
-        void ctx.sdk.experimental.session.background({ sessionID: state.sessionID }).catch(() => {})
-      },
-      onReload: input.onReload,
-      onSubagentSelect: (sessionID) => {
+      state.aborting = true
+      void ctx.sdk.session
+        .abort({
+          sessionID: state.sessionID,
+        })
+        .catch(() => {})
+        .finally(() => {
+          state.aborting = false
+        })
+    },
+    onBackground: () => {
+      if (!hasSession(input, state)) return
+      void ctx.sdk.experimental.session.background({ sessionID: state.sessionID }).catch(() => {})
+    },
+    onReload: input.onReload,
+    onSubagentSelect: (sessionID) => {
       state.selectSubagent?.(sessionID)
       log?.write("subagent.select", {
         sessionID,
