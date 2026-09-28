@@ -23,6 +23,11 @@ async function temporary() {
 }
 
 import pkg from "../package.json"
+// `readPackageVersion` deliberately prefers `packages/opencode/package.json` -- the package the
+// binary is actually published from and the one the daemon's compiled-artifact check compares
+// against -- and only falls back to this package's own version, then to a pinned constant. Import
+// both so the resolution order is asserted rather than assumed.
+import opencodePkg from "../../opencode/package.json"
 
 test("internal bumps reset lower components without changing compatibility version", () => {
   const compatibility = InstallationVersion
@@ -30,7 +35,16 @@ test("internal bumps reset lower components without changing compatibility versi
   expect(bumpInternalVersion("2.3.4", "minor")).toBe("2.4.0")
   expect(bumpInternalVersion("2.3.4", "major")).toBe("3.0.0")
   expect(InstallationVersion).toBe(compatibility)
-  expect(InstallationVersion).toBe(pkg.version)
+  // The compatibility version is the opencode package's, not this package's. Asserting it against
+  // `pkg.version` only passed while the two happened to be equal, and broke the moment a release
+  // bumped `packages/opencode/package.json` alone -- which is what a release does, since only that
+  // package ships the binary. Comparing them here would have kept failing on every release bump
+  // while telling us nothing about the resolver.
+  expect(InstallationVersion).toBe(opencodePkg.version)
+  // Guard the premise: if the two ever stop differing, this test is no longer distinguishing
+  // anything, and the assertion above would pass for the wrong reason again.
+  expect(opencodePkg.version).not.toBe("0.0.0-local")
+  expect(pkg.version).toMatch(/^\d+\.\d+\.\d+/)
 })
 
 test("reject invalid versions, bumps, and overflow", () => {
@@ -61,11 +75,18 @@ test("invalid or missing version source fails instead of inventing a version", a
 test("source-dev metadata belongs to source checkout, not cwd", async () => {
   const dir = await temporary()
   await Bun.write(path.join(dir, "INTERNAL_VERSION"), "9.9.9\n")
-  const proc = Bun.spawn([process.execPath, "-e", `import { internalVersion } from ${JSON.stringify(path.resolve(import.meta.dir, "../src/installation/internal-version.ts"))}; console.log(internalVersion())`], {
-    cwd: dir,
-    stdout: "pipe",
-    stderr: "pipe",
-  })
+  const proc = Bun.spawn(
+    [
+      process.execPath,
+      "-e",
+      `import { internalVersion } from ${JSON.stringify(path.resolve(import.meta.dir, "../src/installation/internal-version.ts"))}; console.log(internalVersion())`,
+    ],
+    {
+      cwd: dir,
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  )
   expect(await proc.exited).toBe(0)
   expect((await new Response(proc.stdout).text()).trim()).toBe(internalVersion())
   const version = validateInternalVersion(await Bun.file(InternalVersionFile).text())
@@ -86,9 +107,12 @@ test("invalid bump CLI arguments never write the tracked source", async () => {
 test("Bun and Node bundles embed internal metadata independently of compatibility literals", async () => {
   const dir = await temporary()
   const entry = path.join(dir, "entry.ts")
-  await Bun.write(entry, `import { internalVersion } from ${JSON.stringify(path.resolve(import.meta.dir, "../src/installation/internal-version.ts"))};
+  await Bun.write(
+    entry,
+    `import { internalVersion } from ${JSON.stringify(path.resolve(import.meta.dir, "../src/installation/internal-version.ts"))};
 import { InstallationVersion } from ${JSON.stringify(path.resolve(import.meta.dir, "../src/installation/version.ts"))};
-console.log(JSON.stringify({ internal: internalVersion(), compatibility: InstallationVersion }));`)
+console.log(JSON.stringify({ internal: internalVersion(), compatibility: InstallationVersion }));`,
+  )
   const captured = readInternalVersion()
   for (const target of ["bun", "node"] as const) {
     const result = await Bun.build({
