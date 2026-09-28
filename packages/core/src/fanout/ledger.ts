@@ -1,6 +1,6 @@
 export * as FanoutLedger from "./ledger"
 
-import { and, count, eq, isNull, ne } from "drizzle-orm"
+import { and, asc, count, eq, isNull, ne } from "drizzle-orm"
 import { Effect } from "effect"
 import { Fanout } from "@opencode-ai/schema/fanout"
 import type { Database } from "../database/database"
@@ -49,6 +49,21 @@ const group = (row: typeof FanoutGroupTable.$inferSelect): Group => ({
   status: row.status,
 })
 
+/**
+ * One worker row plus the two timestamps a row's own text never needs.
+ *
+ * `Worker` carries no clock on purpose: everything that reads the ledger to
+ * decide whether to *do* something is a count or a status, and a caller that
+ * invented its own start time would be reporting a number that a restart
+ * invalidates. A report that shows elapsed time has no choice but to take it
+ * from the row written when the worker was created, so this is the shape that
+ * exposes it and nothing else changes about `Worker`.
+ */
+export interface CrewRow extends Worker {
+  readonly createdAt: number
+  readonly updatedAt: number
+}
+
 const worker = (row: typeof FanoutWorkerTable.$inferSelect): Worker => ({
   id: row.id,
   groupID: row.group_id,
@@ -60,6 +75,34 @@ const worker = (row: typeof FanoutWorkerTable.$inferSelect): Worker => ({
   ...(row.error === null ? {} : { error: row.error }),
   ...(row.settled_seq === null ? {} : { settledSeq: row.settled_seq }),
   ...(row.claimed_seq === null ? {} : { claimedSeq: row.claimed_seq }),
+})
+
+const crewRow = (row: typeof FanoutWorkerTable.$inferSelect): CrewRow => ({
+  ...worker(row),
+  createdAt: row.time_created,
+  updatedAt: row.time_updated,
+})
+
+/**
+ * Every worker a parent has ever delegated, oldest first.
+ *
+ * `live` and `unclaimed` are each half the picture. A parent asking "is my crew
+ * stuck" needs the settled-and-already-delivered rows in the same answer, and
+ * the one reader that has all three is cheaper than three round trips.
+ *
+ * Order here is storage order. Which rows a report shows first is a question
+ * about the caller's context budget, not about how the ledger is stored, so
+ * that decision stays with the caller.
+ */
+export const crew = Effect.fn("FanoutLedger.crew")(function* (db: DatabaseService, parentSessionID: SessionSchema.ID) {
+  const rows = yield* db
+    .select()
+    .from(FanoutWorkerTable)
+    .where(eq(FanoutWorkerTable.parent_session_id, parentSessionID))
+    .orderBy(asc(FanoutWorkerTable.time_created), asc(FanoutWorkerTable.id))
+    .all()
+    .pipe(Effect.orDie)
+  return rows.map(crewRow)
 })
 
 /** Inserts a group only while the parent is under the live-group cap. */
