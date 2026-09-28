@@ -101,12 +101,31 @@ export const frame = (input: {
     ...(input.postamble === undefined ? [] : [input.postamble]),
   ].join("\n")
 
+/**
+ * Clips to a code-unit budget without ever ending on half a character.
+ *
+ * `limit` stays a code-unit budget on purpose -- that is what bounds the
+ * paragraph in the parent's context, and a digest counted in code points could
+ * be twice as long as `maxLength` once the answer is mostly emoji. But
+ * `String.prototype.slice` counts code units, so a cut landing between the
+ * halves of a surrogate pair leaves a LONE SURROGATE at the end of the digest.
+ * That is not cosmetic: it serializes to a `\udXXX` escape, which anything that
+ * renders it reads back as U+FFFD, so a worker's answer would reach the parent
+ * with its last character replaced. Same hazard as `truncateToCodePoints` in
+ * `@/goal/schema` and in the LLM request executor, which cut the same way.
+ */
+const clipToUnits = (text: string, limit: number) => {
+  const clipped = text.slice(0, limit)
+  const last = clipped.charCodeAt(clipped.length - 1)
+  return last >= 0xd800 && last <= 0xdbff ? clipped.slice(0, -1) : clipped
+}
+
 /** Collapses a worker's answer to one bounded paragraph. */
 export const bound = (text: string, limit = maxLength) => {
   const paragraph = text.replaceAll(/\s+/g, " ").trim()
   if (paragraph.length === 0) return undefined
   if (paragraph.length <= limit) return paragraph
-  const clipped = paragraph.slice(0, limit)
+  const clipped = clipToUnits(paragraph, limit)
   const boundary = clipped.lastIndexOf(" ")
   return `${(boundary > limit / 2 ? clipped.slice(0, boundary) : clipped).trimEnd()}…`
 }
