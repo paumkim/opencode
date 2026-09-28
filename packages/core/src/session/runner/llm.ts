@@ -24,6 +24,7 @@ import { SkillGuidance } from "../../skill/guidance"
 import { ReferenceGuidance } from "../../reference/guidance"
 import { ToolRegistry } from "../../tool/registry"
 import { ToolOutputStore } from "../../tool-output-store"
+import { FanoutContext } from "../../fanout/context"
 import { SessionContextEpoch } from "../context-epoch"
 import { SessionCompaction } from "../compaction"
 import { SessionEvent } from "../event"
@@ -170,15 +171,21 @@ const layer = Layer.effect(
       new TurnTransitionError({ _tag: "ContinueAfterOverflowCompaction", step })
 
     const loadSystemContext = (agent: AgentV2.Selection, model: ModelV2.Info, session: SessionSchema.Info) =>
-      Effect.all([
-        session.parentID
-          ? systemContext.loadExcept([SystemContext.Key.make("core/instructions")])
-          : systemContext.load(),
-        skillGuidance.load(agent),
-        referenceGuidance.load(),
-      ], {
-        concurrency: "unbounded",
-      }).pipe(Effect.map(SystemContext.combine))
+      Effect.all(
+        [
+          session.parentID
+            ? systemContext.loadExcept([SystemContext.Key.make("core/instructions")])
+            : systemContext.load(),
+          skillGuidance.load(agent),
+          referenceGuidance.load(),
+          // A parent's crew is a ledger row, never a token in its transcript, so
+          // the parent re-learns "N live, M unclaimed" every turn for free.
+          FanoutContext.load(db, session.id),
+        ],
+        {
+          concurrency: "unbounded",
+        },
+      ).pipe(Effect.map(SystemContext.combine))
 
     const runTurnAttempt = Effect.fn("SessionRunner.runTurn")(function* (
       sessionID: SessionSchema.ID,
