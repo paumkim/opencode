@@ -131,6 +131,114 @@ describe("RequestExecutor", () => {
     }).pipe(Effect.provide(responsesLayer([new Response("invalid parameter", { status: 400 })]))),
   )
 
+  it.effect("classifies a blocked prompt on a 400 body as content policy", () =>
+    Effect.gen(function* () {
+      const executor = yield* RequestExecutor.Service
+      const error = yield* executor.execute(request).pipe(Effect.flip)
+
+      expectLLMError(error)
+      expect(error.reason).toMatchObject({ _tag: "ContentPolicy" })
+      // A rejected prompt is not worth another attempt.
+      expect(error.retryable).toBe(false)
+    }).pipe(
+      Effect.provide(
+        responsesLayer([
+          new Response('{"error":{"code":"content_policy_violation","message":"blocked"}}', { status: 400 }),
+        ]),
+      ),
+    ),
+  )
+
+  // Gemini names the rejection in a quoted status value rather than in prose.
+  it.effect("classifies a quoted SAFETY status as content policy", () =>
+    Effect.gen(function* () {
+      const executor = yield* RequestExecutor.Service
+      const error = yield* executor.execute(request).pipe(Effect.flip)
+
+      expectLLMError(error)
+      expect(error.reason).toMatchObject({ _tag: "ContentPolicy" })
+    }).pipe(
+      Effect.provide(
+        responsesLayer([new Response('{"error":{"code":400,"message":"blocked","status":"SAFETY"}}', { status: 400 })]),
+      ),
+    ),
+  )
+
+  // The word "safety" alone is not a rejection. This 400 is an ordinary bad
+  // request, and filing it as content policy would misreport it.
+  it.effect("does not read a bare safety word on a 400 as content policy", () =>
+    Effect.gen(function* () {
+      const executor = yield* RequestExecutor.Service
+      const error = yield* executor.execute(request).pipe(Effect.flip)
+
+      expectLLMError(error)
+      expect(error.reason).toMatchObject({ _tag: "InvalidRequest" })
+    }).pipe(
+      Effect.provide(
+        responsesLayer([new Response('{"error":{"message":"pass safety_mode=false to enable this"}}', { status: 400 })]),
+      ),
+    ),
+  )
+
+  // A throttle is a throttle even when the prose says "safety": the outage that
+  // produced it is usually the reason the quota drained in the first place.
+  it.effect("classifies a 429 that mentions safety as a rate limit", () =>
+    Effect.gen(function* () {
+      const executor = yield* RequestExecutor.Service
+      const error = yield* executor.execute(request).pipe(Effect.flip)
+
+      expectLLMError(error)
+      expect(error.reason).toMatchObject({ _tag: "RateLimit" })
+      expect(error.retryable).toBe(true)
+    }).pipe(
+      Effect.provide(
+        responsesLayer([
+          new Response(JSON.stringify({ error: { message: "safety review quota exhausted" } }), {
+            status: 429,
+            headers: { "retry-after-ms": "0" },
+          }),
+        ]),
+      ),
+    ),
+  )
+
+  it.effect("classifies a 401 that mentions safety as authentication", () =>
+    Effect.gen(function* () {
+      const executor = yield* RequestExecutor.Service
+      const error = yield* executor.execute(request).pipe(Effect.flip)
+
+      expectLLMError(error)
+      expect(error.reason).toMatchObject({ _tag: "Authentication", kind: "invalid" })
+    }).pipe(Effect.provide(responsesLayer([new Response('{"error":"safety token rejected"}', { status: 401 })]))),
+  )
+
+  // Behaviour, not just the reason tag: a 5xx outage whose body says "safety"
+  // must still be retried. A content-policy verdict here is non-retryable, so
+  // the old ordering dropped the request on the first response.
+  it.effect("retries a 5xx that mentions safety instead of failing on it", () =>
+    Effect.gen(function* () {
+      const attempts = yield* Ref.make(0)
+      return yield* Effect.gen(function* () {
+        const executor = yield* RequestExecutor.Service
+        const response = yield* executor.execute(request)
+
+        expect(response.status).toBe(200)
+        expect(yield* response.text).toBe("ok")
+        expect(yield* Ref.get(attempts)).toBe(2)
+      }).pipe(
+        Effect.provide(
+          countedResponsesLayer(attempts, [
+            new Response('{"error":"upstream safety service unavailable"}', {
+              status: 500,
+              headers: { "retry-after-ms": "0" },
+            }),
+            new Response("ok", { status: 200 }),
+          ]),
+        ),
+      )
+    }),
+  )
+
   it.effect("returns redacted diagnostics for retryable rate limits", () =>
     Effect.gen(function* () {
       const executor = yield* RequestExecutor.Service
