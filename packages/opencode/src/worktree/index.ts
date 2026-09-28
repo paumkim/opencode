@@ -225,7 +225,9 @@ const layer: Layer.Layer<
         })
       }
 
-      yield* project.addSandbox(ctx.project.id, info.directory).pipe(Effect.catch(() => Effect.void))
+      yield* registerWorktreeSandbox(ctx.project.id, info.directory, (projectID, directory) =>
+        project.addSandbox(projectID, directory),
+      )
     })
 
     const boot = Effect.fnUntraced(function* (info: Info, startCommand?: string) {
@@ -646,3 +648,59 @@ export const node = LayerNode.make({
 })
 
 export * as Worktree from "."
+
+/**
+ * Builds the error a create returns when the new worktree could not be registered as a project
+ * sandbox.
+ *
+ * The message leads with the directory, because that is the part the caller needs: the worktree
+ * EXISTS at this point (git created it in the step above), so a bare "registration failed" would
+ * read as "nothing happened" and leave a real directory on disk that the caller does not know about.
+ * It is still removable - `remove` locates worktrees via `git worktree list --porcelain` - but the
+ * caller has to be told it is there.
+ *
+ * Exported so a test can assert the message names the directory and the reason, neither of which is
+ * observable from the fact that the effect failed.
+ */
+export function sandboxRegistrationFailed(directory: string, error: unknown) {
+  return new CreateFailedError({
+    message: `Worktree was created at ${directory} but could not be registered with the project: ${errorMessage(error)}`,
+  })
+}
+
+/**
+ * Registers a freshly created worktree as a project sandbox, failing the create when it cannot.
+ *
+ * The worktree already exists on disk when this runs, and `remove` finds worktrees through
+ * `git worktree list --porcelain` rather than the sandbox list, so it stays removable - but the
+ * `worktree` route that lists `project.sandboxes` will not show it. The old code ended in
+ * `Effect.catch(() => Effect.void)`, so the worktree then booted, ran its start scripts and emitted
+ * `Ready` while being absent from the only list a client has. A create that reported success had
+ * produced something the caller cannot see.
+ *
+ * Failing the create is the safe direction: `createFromInfo` runs `setup` before `boot`, so an
+ * error here stops the worktree from booting at all and the caller learns why. The asymmetry is
+ * worth stating - propagating is cheap here because nothing has started, whereas the same swallow
+ * after `boot` would leave a running directory with no way to explain the gap.
+ *
+ * `register` is a parameter so the behaviour is reachable from a test without standing up the
+ * project, database and store services that `setup` closes over. Its error channel is `unknown` for
+ * the same reason the old code is the defect: the swallow made a failing registration impossible to
+ * represent, so the type never had a slot for the failure this now reports.
+ */
+export function registerWorktreeSandbox(
+  projectID: ProjectV2.ID,
+  directory: string,
+  register: (projectID: ProjectV2.ID, directory: string) => Effect.Effect<void, unknown>,
+) {
+  return register(projectID, directory).pipe(
+    Effect.tapError((error) =>
+      Effect.logError("failed to register worktree as a project sandbox", {
+        directory,
+        project: projectID,
+        cause: error,
+      }),
+    ),
+    Effect.mapError((error) => sandboxRegistrationFailed(directory, error)),
+  )
+}
