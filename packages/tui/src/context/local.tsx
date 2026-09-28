@@ -166,11 +166,22 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
         pending: false,
       }
 
+      // Whether the file's contents are actually in the store. The defaults above are an EMPTY
+      // model store - no recents, no favourites - which is indistinguishable from a store that was
+      // read and genuinely is empty. So a failed read followed by any `save()` writes those defaults
+      // over the file and erases the user's recently-used models and favourites. The catch below was
+      // `.catch(() => {})`, so nothing was reported either.
+      //
+      // This file is also written by the server (`RunVariant.saveVariant` in the opencode package
+      // saves the `variant` key into the same file), which is why losing it twice matters.
+      let loaded = false
+
       function save() {
         if (!modelStore.ready) {
           state.pending = true
           return
         }
+        if (!mayWriteStore(filePath, loaded, "the models and favourites it holds")) return
         state.pending = false
         void writeJsonAtomic(filePath, {
           recent: modelStore.recent,
@@ -181,14 +192,29 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
 
       readJson<unknown>(filePath)
         .then((x) => {
+          // A missing file is a first run. `Bun.file().json()` rejects with ENOENT rather than
+          // resolving undefined, so this case has to be recognised or every save on a clean install
+          // would be refused.
+          if (x === undefined) {
+            loaded = true
+            return
+          }
           if (!x || typeof x !== "object") return
           const value = x as Record<string, unknown>
           if (Array.isArray(value.recent)) setModelStore("recent", value.recent)
           if (Array.isArray(value.favorite)) setModelStore("favorite", value.favorite)
           if (typeof value.variant === "object" && value.variant !== null)
             setModelStore("variant", value.variant as Record<string, string | undefined>)
+          loaded = true
         })
-        .catch(() => {})
+        .catch((error) => {
+          if (isMissingFile(error)) {
+            // First run, not a failure: there is nothing to erase.
+            loaded = true
+            return
+          }
+          console.error(`Failed to read ${filePath}; writes are disabled until it can be read`, { error })
+        })
         .finally(() => {
           setModelStore("ready", true)
           if (state.pending) save()
@@ -422,11 +448,17 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
         pending: false,
       }
 
+      // Same shape as the model store above, and the same reason: the default is an empty `pinned`
+      // list, so a failed read followed by any save writes `[]` over the file and the user loses their
+      // pinned sessions with nothing reported.
+      let loaded = false
+
       function save() {
         if (!sessionStore.ready) {
           state.pending = true
           return
         }
+        if (!mayWriteStore(filePath, loaded, "the pinned sessions it holds")) return
         state.pending = false
         void writeJsonAtomic(filePath, {
           pinned: sessionStore.pinned,
@@ -435,6 +467,10 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
 
       readJson<unknown>(filePath)
         .then((x) => {
+          if (x === undefined) {
+            loaded = true
+            return
+          }
           if (!x || typeof x !== "object") return
           const pinned = (x as Record<string, unknown>).pinned
           if (Array.isArray(pinned))
@@ -442,8 +478,15 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
               "pinned",
               pinned.filter((item): item is string => typeof item === "string"),
             )
+          loaded = true
         })
-        .catch(() => {})
+        .catch((error) => {
+          if (isMissingFile(error)) {
+            loaded = true
+            return
+          }
+          console.error(`Failed to read ${filePath}; writes are disabled until it can be read`, { error })
+        })
         .finally(() => {
           setSessionStore("ready", true)
           if (state.pending) save()
@@ -540,3 +583,40 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
     return result
   },
 })
+
+/**
+ * True when the file simply is not there.
+ *
+ * `Bun.file(...).json()` rejects with ENOENT rather than resolving `undefined`, so "no state yet" and
+ * "the state could not be read" arrive as the same kind of rejection. This module owns two stores
+ * and both need the distinction; putting it in `persistence.readJson` would impose one meaning on
+ * callers where "absent" legitimately means different things.
+ */
+function isMissingFile(error: unknown) {
+  if (typeof error !== "object" || error === null) return false
+  return (error as NodeJS.ErrnoException).code === "ENOENT"
+}
+/**
+ * Whether a store may be written, given whether its file was successfully read.
+ *
+ * Both stores in this module have the same hazard and now the same guard. Each one's default state is
+ * EMPTY - no recent models, no favourites, no pinned sessions - which is indistinguishable from a
+ * store that was read and genuinely is empty. So a failed read followed by any save writes the
+ * defaults over a file holding real data, and the user loses it with nothing reported. The write
+ * itself succeeds, which is what made this so quiet.
+ *
+ * Refusing rather than applying-and-dropping is deliberate: applying the change in memory would leave
+ * the TUI showing a model the file does not have, and the next successful save would persist that
+ * phantom over the real value.
+ *
+ * `holds` is the subject, so the message names what was at stake rather than saying only "the file".
+ *
+ * Exported so the rule is testable without mounting the whole context: the stores are Solid signals
+ * behind eleven providers, and a test of this function is a test of the decision rather than of the
+ * wiring around it.
+ */
+export function mayWriteStore(file: string, loaded: boolean, holds: string) {
+  if (loaded) return true
+  console.error(`Refusing to write ${file}: it could not be read, so writing it would erase ${holds}`)
+  return false
+}
