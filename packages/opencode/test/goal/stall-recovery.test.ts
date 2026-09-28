@@ -301,3 +301,59 @@ describe("the sweep asks the server whether a session is busy, not the local eve
     await rt.dispose()
   })
 })
+
+/**
+ * The stall sweep staying opt-in is the right call - a deployment must not get a timer it did not
+ * ask for - but it leaves a goal created through the `create_goal` tool with no resume mechanism at
+ * all in a deployment that never configured one. That happened live: an unattended run ended a turn
+ * and nothing resumed it, and it sat for minutes reporting `status: active`, `autoTurns: 0`,
+ * `lastStatus: "Goal set."` - indistinguishable from healthy - until a human noticed.
+ *
+ * The sweep's behaviour is not changed here. What was missing is that the goal reminder, the ONE
+ * prompt an unattended turn actually reads, said nothing about it. So a turn that was about to end
+ * and could not be resumed had no way to know that, and no way to tell the user instead of waiting
+ * forever. These tests pin the disclosure.
+ *
+ * They drive `experimental.chat.system.transform` because that is the path that actually reaches a
+ * turn in the hazardous configuration. The sweep-dispatched continuations cannot: with no
+ * `max_stall_before_continue` there is no sweep, so no continuation is ever dispatched through that
+ * path, and a test asserting on it would be asserting on a branch the configuration never takes.
+ */
+describe("an unattended turn is told when its deployment cannot resume it", () => {
+  async function reminderFor(options: Record<string, unknown>) {
+    const sessionID = `legibility-${Math.random().toString(36).slice(2, 8)}`
+    await createGoal(sessionID, "keep going", { maxAutoTurns: 100 })
+    const rt = createGoalRuntime({ client: client() as never, options: options as never })
+    const output = { system: [] as string[] }
+    await rt.hooks["experimental.chat.system.transform"]?.({ sessionID } as never, output as never)
+    await rt.dispose()
+    return output.system.join("\n")
+  }
+
+  test("with no stall threshold configured the prompt says a lost idle event is terminal", async () => {
+    // Exactly the reported deployment: auto-continuation on, no `max_stall_before_continue`.
+    const reminder = await reminderFor({ auto_continue: true })
+
+    // The disclosure has to name the cause and the remedy, or the turn cannot act on it: it needs
+    // to know the idle event is the only trigger, that losing it is unrecoverable, which setting
+    // restores a resume path, and that the resulting state looks healthy while doing nothing.
+    expect(reminder).toContain("max_stall_before_continue")
+    expect(reminder).toContain("session.idle")
+    expect(reminder).toContain("autoTurns: 0")
+  })
+
+  test("with a stall threshold configured the prompt carries no such warning", async () => {
+    // A deployment that CAN be resumed must not pay this paragraph every turn to learn nothing.
+    const reminder = await reminderFor({ auto_continue: true, max_stall_before_continue: 60 })
+    expect(reminder).not.toContain("max_stall_before_continue")
+  })
+
+  test("a deployment that turned auto-continuation off is not warned about a net it declined", async () => {
+    // This case is why the flag cannot simply be `stallSweepMs != null`: turning auto-continuation
+    // off ALSO leaves the sweep undefined, but nothing is expected to resume such a goal, so
+    // pointing it at `max_stall_before_continue` would be noise about a setting the deployment
+    // deliberately declined. Conflating the two would put the paragraph in front of every goal in
+    // every opted-out deployment.
+    expect(await reminderFor({ auto_continue: false })).not.toContain("max_stall_before_continue")
+  })
+})

@@ -822,6 +822,13 @@ export function createGoalRuntime(input: { client: Client; options?: Options }):
   // only ever do nothing - each tick otherwise reads and decodes the whole global state file just
   // to discover it is not allowed to act.
   const stallSweepMs = autoContinue ? maxStallMs : undefined
+  // Whether an unattended turn in this deployment can be resumed after a turn ends WITHOUT an idle
+  // event. The hazardous case is specifically "auto-continuation is ON and there is no sweep":
+  // `status: active` then reads as "this will be resumed", and that is the lie that left a run
+  // parked until a human noticed. `auto_continue: false` is NOT hazardous - nothing is expected to
+  // resume it, so the disclosure would be noise pointing at a setting the deployment deliberately
+  // declined. Folding the opt-out in here is what keeps the two from collapsing into one another.
+  const stallRecoveryArmed = !autoContinue || stallSweepMs != null
   const maxPromptFailures = positiveIntegerOrNull(options.max_prompt_failures) ?? GOAL_DEFAULT_MAX_PROMPT_FAILURES
   const taskTracker = new TaskTracker()
   const taskDeferredSessions = new Set<string>()
@@ -1008,7 +1015,7 @@ export function createGoalRuntime(input: { client: Client; options?: Options }):
       await sendContinuation(
         client,
         sessionID,
-        continuationPrompt(current),
+        continuationPrompt(current, { stallRecoveryArmed }),
         current.lastPromptAgent ?? latestTurnAgent ?? null,
       )
       // A watchdog continuation is a real continuation: it must feed the same failure accounting
@@ -1095,7 +1102,7 @@ export function createGoalRuntime(input: { client: Client; options?: Options }):
       await sendContinuation(
         client,
         sessionID,
-        goal.status === "active" ? continuationPrompt(goal) : limitPrompt(goal),
+        goal.status === "active" ? continuationPrompt(goal, { stallRecoveryArmed }) : limitPrompt(goal),
         goal.lastPromptAgent ?? latestTurnAgent ?? null,
       )
       await recordContinuationResult(sessionID, "success", maxPromptFailures)
@@ -1226,7 +1233,10 @@ export function createGoalRuntime(input: { client: Client; options?: Options }):
       // The compaction summarizer is a synthetic LLM request. Injecting goal-continuation
       // instructions into it degrades the summary exactly when context is scarcest.
       if (isCompactionRequest(output.system)) return
-      mergeSystemReminder(output, systemReminder(goal, { planningOnly: isPlanAgent(goal?.lastPromptAgent) }))
+      mergeSystemReminder(
+        output,
+        systemReminder(goal, { planningOnly: isPlanAgent(goal?.lastPromptAgent), stallRecoveryArmed }),
+      )
     },
     async "experimental.session.compacting"(input, output) {
       const goal = await goalBookkeeping("getGoal", () => getGoal(input.sessionID))
