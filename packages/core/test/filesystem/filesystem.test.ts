@@ -288,6 +288,65 @@ describe("FSUtil", () => {
     )
   })
 
+  describe("walk-up resilience", () => {
+    it(
+      "keeps the directories it already found when a later probe cannot be read",
+      Effect.gen(function* () {
+        const fs = yield* FSUtil.Service
+        const filesys = yield* FileSystem.FileSystem
+        const tmp = yield* filesys.makeTempDirectoryScoped()
+        yield* filesys.writeFileString(path.join(tmp, "a.txt"), "a")
+        // A regular file where a directory component is expected: `stat` on `blocker/inner.txt`
+        // fails with ENOTDIR, which `fs.exists` surfaces as a failure rather than as `false`.
+        // That is enough to abort the walk - and the walk accumulates, so the abort threw away
+        // `a.txt` too, which had already been found.
+        yield* filesys.writeFileString(path.join(tmp, "blocker"), "not a directory")
+
+        const result = yield* fs.up({
+          targets: ["a.txt", "blocker/inner.txt"],
+          start: tmp,
+          stop: tmp,
+        })
+
+        expect(result).toEqual([path.join(tmp, "a.txt")])
+      }),
+    )
+
+    it(
+      "treats a directory it cannot read as one with nothing in it, rather than failing the walk",
+      Effect.gen(function* () {
+        const fs = yield* FSUtil.Service
+        const filesys = yield* FileSystem.FileSystem
+        const tmp = yield* filesys.makeTempDirectoryScoped()
+        yield* filesys.writeFileString(path.join(tmp, "afile"), "x")
+        const under = path.join(tmp, "afile", "sub")
+
+        // Same ENOTDIR, but on the first probe: there is genuinely nothing to find here, and the
+        // honest answer is an empty list. Failing the whole call made the caller treat "I could not
+        // look" as "there is nothing there" - or, in the skill scanner, discard every other answer
+        // it had already collected.
+        const result = yield* fs.findUp("marker", under, tmp)
+        expect(result).toEqual([])
+      }),
+    )
+
+    it(
+      "still reports a genuine failure rather than swallowing it",
+      Effect.gen(function* () {
+        const fs = yield* FSUtil.Service
+        const filesys = yield* FileSystem.FileSystem
+        const tmp = yield* filesys.makeTempDirectoryScoped()
+        yield* filesys.writeFileString(path.join(tmp, "a.txt"), "a")
+
+        // The other direction. A walk that silently returns [] for *every* reason is a walk that
+        // cannot be trusted, and the two helpers are used to decide whether a directory is a git
+        // repo and which instructions apply to it. A healthy walk must still find things.
+        const result = yield* fs.up({ targets: ["a.txt"], start: tmp, stop: tmp })
+        expect(result).toEqual([path.join(tmp, "a.txt")])
+      }),
+    )
+  })
+
   describe("glob", () => {
     it(
       "finds files matching pattern",
