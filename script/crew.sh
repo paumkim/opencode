@@ -221,7 +221,7 @@ $recent
 Then create the goal:
 1. Call get_goal().
 2. If there is no active goal, call create_goal with:
-   - objective: "Keep the $label codebase healthy on $branch."
+   - objective: "Improve the $label codebase on $branch: each turn take the highest-value unfinished change, and when a vein of similar work runs dry, deliberately pick a different kind."
    - title: "Improve $label"
    - max_no_progress_turns: 8
    - max_prompt_failures: 5
@@ -232,6 +232,18 @@ Then create the goal:
    text across the panel. The objective stays one short sentence on purpose - it
    is re-read on every continuation, and the backlog it used to carry is
    rediscovered from git log anyway.
+
+   That last clause of the objective is load-bearing, not decoration. The
+   previous wording ("keep the codebase healthy") was open enough that a crew
+   spent six hours and 40 commits inside a single vein - every one of them a
+   real, verified fix, so no amount of reviewing the commits would have shown
+   the problem. Quality per commit was never the failure; coverage across kinds
+   of work was. An unattended agent with no human to redirect it will keep
+   finding instances of whatever it started with, because the cheapest next
+   task is always the one next to the last. So the instruction to switch kinds
+   when a vein runs dry lives in the objective, which is the one text re-read
+   on every continuation, rather than in a prompt paragraph that is read once
+   and then only remembered in fragments.
 3. Call get_goal() again and confirm status is "active" before implementing.
 
 Then loop, one bounded deliverable at a time:
