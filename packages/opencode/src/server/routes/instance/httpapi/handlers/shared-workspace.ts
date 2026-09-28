@@ -7,6 +7,8 @@ import { Permission } from "@/permission"
 import { SessionPrompt } from "@/session/prompt"
 import { Session } from "@/session/session"
 import { SessionID } from "@/session/schema"
+import { NotFoundError } from "@/storage/storage"
+import { errorMessage } from "@/util/error"
 import { Effect, Fiber, Option, Queue, Schema, Scope } from "effect"
 import { HttpServerRequest, HttpServerResponse } from "effect/unstable/http"
 import { HttpApiBuilder } from "effect/unstable/httpapi"
@@ -151,6 +153,55 @@ export function isMessageForRoom(msg: ClientMessage, currentSessionID: string | 
   return msg.type === "join" || (currentSessionID !== undefined && currentSessionID === msg.sessionID)
 }
 
+export type JoinRefusal = "unknown-session" | "read-failed" | "wrong-workspace"
+
+/** What came back from looking the session up, with a missing session kept distinct from a failed read. */
+export type JoinLookup =
+  | { readonly ok: true; readonly session: Session.Info }
+  | { readonly ok: false; readonly notFound: true }
+  | { readonly ok: false; readonly notFound: false; readonly error: unknown }
+
+export type JoinOutcome =
+  | { readonly ok: true; readonly session: Session.Info }
+  | { readonly ok: false; readonly reason: JoinRefusal; readonly detail: string }
+
+/**
+ * Decides whether a join may be honoured, and says out loud why not.
+ *
+ * The three refusals used to be three bare `return`s, so they were indistinguishable from one
+ * another AND from a join that is merely still being processed: no `joined` frame was sent, the
+ * client sat on its ten-second join timeout, and the failure surfaced as nothing at all. Worse, a
+ * failed read is the server's own fault, not a client error, and it was filed under the same
+ * silence as "that session does not exist".
+ *
+ * Split out as a pure function so the decision is testable without a socket, which is the same
+ * reason `isMessageForRoom` and `sessionBelongsToRoute` live next to it.
+ */
+export function decideJoin(
+  lookup: JoinLookup,
+  route: { readonly context: { project: { id: string }; directory: string }; readonly workspaceID: string | undefined },
+): JoinOutcome {
+  if (!lookup.ok) {
+    if (lookup.notFound) return { ok: false, reason: "unknown-session", detail: "no such session" }
+    return { ok: false, reason: "read-failed", detail: `the session could not be read: ${errorMessage(lookup.error)}` }
+  }
+  if (!sessionBelongsToRoute(lookup.session, route.context, route.workspaceID)) {
+    return {
+      ok: false,
+      reason: "wrong-workspace",
+      detail: "that session does not belong to this project or workspace",
+    }
+  }
+  return { ok: true, session: lookup.session }
+}
+
+/**
+ * The close reason a refusal is answered with, phrased for whoever is waiting on the other end.
+ */
+export function joinRefusalReason(sessionID: string, refusal: Exclude<JoinOutcome, { ok: true }>): string {
+  return `could not join ${sessionID}: ${refusal.detail}`
+}
+
 // ---------------------------------------------------------------------------
 // Handler
 // ---------------------------------------------------------------------------
@@ -257,12 +308,41 @@ export const sharedHandlers = HttpApiBuilder.group(InstanceHttpApi, "shared", (h
             if (!isMessageForRoom(msg, currentSessionID)) return
             switch (msg.type) {
               case "join": {
-                const session = yield* sessionSvc.get(msg.sessionID).pipe(Effect.catchCause(() => Effect.succeed(undefined)))
-                if (!session) return
-
+                // A failed read and a refusal are not the same thing, and neither is a success
+                // that has not happened yet. All three used to be a bare `return`, which sent the
+                // client nothing and left it to time out with no idea what had happened.
                 const instance = yield* InstanceState.context
                 const workspaceID = yield* InstanceState.workspaceID
-                if (!sessionBelongsToRoute(session, instance, workspaceID)) return
+                const lookup = yield* sessionSvc.get(msg.sessionID).pipe(
+                  Effect.map((session): JoinLookup => ({ ok: true, session })),
+                  Effect.catch(
+                    (error): Effect.Effect<JoinLookup> =>
+                      Effect.succeed(
+                        NotFoundError.isInstance(error)
+                          ? { ok: false, notFound: true }
+                          : { ok: false, notFound: false, error },
+                      ),
+                  ),
+                  // `Effect.catch` does not see a defect, and a session read that dies rather
+                  // than fails used to be caught by the same blanket `catchCause` as everything
+                  // else. Route it to the same refusal instead of losing it.
+                  Effect.catchCause((cause) => Effect.succeed({ ok: false, notFound: false, error: cause } as const)),
+                )
+                const outcome = decideJoin(lookup, { context: instance, workspaceID })
+                if (!outcome.ok) {
+                  if (outcome.reason === "read-failed") {
+                    // The server's own fault, so it belongs in the log and not only in the close
+                    // reason the client sees. A wrong-workspace refusal is an ordinary client
+                    // error and would only be noise here.
+                    yield* Effect.logError("shared workspace join read failed", {
+                      sessionID: msg.sessionID,
+                      reason: outcome.detail,
+                    })
+                  }
+                  yield* closeSocket(joinRefusalReason(msg.sessionID, outcome))
+                  break
+                }
+                const session = outcome.session
                 const sessionID = msg.sessionID
                 yield* leaveCurrentRoom
                 const queue = yield* Queue.bounded<{
