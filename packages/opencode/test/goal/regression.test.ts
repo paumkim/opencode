@@ -1894,3 +1894,38 @@ describe("H24: the character limits mean one thing at every boundary", () => {
     )
   })
 })
+
+describe("H37: a state field added after a process started must survive that process's writes", () => {
+  // Observed live, not theorised: the `title` field was written to the shared state file by a crew
+  // window, was still there on the next read, and was gone within a minute - with no history entry
+  // and no error anywhere. The culprit was a long-running opencode session that had started 46
+  // minutes BEFORE the field was added. `Schema.decodeUnknownEffect` defaults to
+  // `onExcessProperty: "ignore"`, which strips keys the schema does not declare, so that process
+  // decoded the stored goal, dropped the field it had never heard of, and - because the no-op
+  // comparison in `mutate` then saw a difference - wrote the stripped copy straight back.
+  //
+  // This is a class of bug, not a one-off: ANY field added to the goal schema is destroyed by the
+  // first older process to write, silently, and the state file is shared by every opencode process
+  // on the machine. It is covered by injecting a field the schema does not know at all, which is
+  // exactly what an older process looks like to the current one.
+  test("a field this schema does not declare is still there after a mutation rewrites the file", async () => {
+    const sessionID = "h37-excess"
+    await createGoal(sessionID, "keep improving", { maxAutoTurns: 100, title: "Improve it" })
+
+    // Stand in for a field added by a newer build than the one under test.
+    const raw = JSON.parse(await Bun.file(statePath()).text())
+    raw.goals[sessionID].fieldFromANewerBuild = { nested: true }
+    await writeFile(statePath(), JSON.stringify(raw, null, 2))
+
+    // Any mutation re-reads the file, decodes it, and writes it back.
+    await recordGoalCompletion(sessionID, "fixed the retry backoff")
+
+    const onDisk = JSON.parse(await Bun.file(statePath()).text())
+    // The point of the test: the unknown field was not treated as garbage to discard.
+    expect(onDisk.goals[sessionID].fieldFromANewerBuild).toEqual({ nested: true })
+    // And the mutation itself really happened, so this is not passing because nothing was written.
+    expect(onDisk.goals[sessionID].completed).toEqual(["fixed the retry backoff"])
+    // A field this build DOES know must still round-trip normally.
+    expect(onDisk.goals[sessionID].title).toBe("Improve it")
+  })
+})
