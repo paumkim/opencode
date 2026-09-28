@@ -153,10 +153,17 @@ export function createSession(messages: SessionMessages): RunSession {
 }
 
 export async function resolveSession(sdk: RunInput["sdk"], sessionID: string, limit = LIMIT): Promise<RunSession> {
-  const response = await sdk.session.messages({
-    sessionID,
-    limit,
-  })
+  const response = await sdk.session.messages(
+    { sessionID, limit },
+    // The generated client resolves typed HTTP failures through `.error`
+    // rather than rejecting, so `throwOnError` is what makes a failure a
+    // failure at all. Without it a 404, a 500 or a timeout came back as
+    // `data: undefined`, and the `?? []` below turned that into a
+    // legitimately empty session — indistinguishable from a brand-new one.
+    // `opencode run --resume` then showed no history and carried on with no
+    // context, which reads as a fresh session rather than as a lost read.
+    { throwOnError: true },
+  )
   return createSession(response.data ?? [])
 }
 

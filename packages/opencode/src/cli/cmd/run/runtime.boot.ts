@@ -143,11 +143,14 @@ const layer = Layer.effect(
       sessionID: string,
       model: RunInput["model"],
     ) {
-      const session = yield* Effect.promise(() => resolveSession(sdk, sessionID).catch(() => undefined))
-      if (!session) {
-        return emptySessionInfo()
-      }
-
+      // No catch: a session that could not be read is not an empty session.
+      // Collapsing it to `emptySessionInfo()` claimed `first: true`, and
+      // `shown: !session.first` then hid the history entirely, so a transient
+      // read error made `--resume` present a blank conversation that looked
+      // exactly like a new one. The caller's `catch` already turns a rejection
+      // into a clean `dieInteractive`, which is the right outcome for a user
+      // who explicitly asked to resume a particular session.
+      const session = yield* Effect.promise(() => resolveSession(sdk, sessionID))
       return {
         first: session.first,
         history: sessionHistory(session),
@@ -189,7 +192,11 @@ export async function resolveSessionInfo(
   sessionID: string,
   model: RunInput["model"],
 ): Promise<SessionInfo> {
-  return runtime.runPromise((svc) => svc.resolveSessionInfo(sdk, sessionID, model)).catch(() => emptySessionInfo())
+  // Same reasoning as the Effect-side resolver: unlike `resolveRunTuiConfig`
+  // and `resolveDiffStyle`, whose fallbacks are display preferences where
+  // losing the value costs nothing, this fallback is a factual claim that the
+  // session is new and has no history. It must not be made up on failure.
+  return runtime.runPromise((svc) => svc.resolveSessionInfo(sdk, sessionID, model))
 }
 
 // Reads TUI config once for direct mode keymap setup and display preferences.
