@@ -669,3 +669,42 @@ it.live("one broken account does not empty the others' orgs, and is named in fai
     expect(result.failures[0]?.error._tag).toBe("AccountServiceError")
   }),
 )
+
+it.live("removing the only account does not select an org belonging to the account it removed", () =>
+  Effect.gen(function* () {
+    const only = AccountID.make("user-1")
+    yield* AccountRepo.Service.use((r) =>
+      r.persistAccount({
+        id: only,
+        email: "one@example.com",
+        url: "https://one.example.com",
+        accessToken: AccessToken.make("at_1"),
+        refreshToken: RefreshToken.make("rt_1"),
+        expiry: Date.now() + outsideEagerRefreshWindow,
+        orgID: Option.some(OrgID.make("org-1")),
+      }),
+    )
+    yield* AccountRepo.Service.use((r) => r.use(only, Option.some(OrgID.make("org-1"))))
+
+    // The regression: the fallback was taken from *all* readable accounts, including the one being
+    // removed. With a single account that meant the only candidate was an org of the account about
+    // to be deleted, so `remove` deleted the account and then pointed the active selection at it.
+    // The user is left with an active account that does not exist, and every later read of the
+    // active org quietly resolves to nothing - no error, because the read is correct about a
+    // dangling reference.
+    const client = HttpClient.make((req) => Effect.succeed(json(req, [org("org-1", "One")])))
+
+    yield* Account.use.remove(only).pipe(Effect.provide(live(client)))
+
+    const remaining = yield* AccountRepo.Service.use((r) => r.list())
+    expect(remaining).toEqual([])
+
+    // The assertion that matters: nothing is left pointing at a row that no longer exists. Written
+    // without a guard, because a guarded version - `if (Option.isSome(active)) assert(...)` - passes
+    // vacuously when there is no active account at all, which is one of the two acceptable
+    // end states here. That is the same mistake as a `catch` that catches nothing: it cannot fail.
+    const active = yield* AccountRepo.use.active()
+    const activeID = Option.getOrUndefined(active)?.id
+    if (activeID !== undefined) expect(remaining.map((a) => a.id)).toContain(activeID)
+  }),
+)
