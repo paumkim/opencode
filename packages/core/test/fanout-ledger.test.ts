@@ -120,12 +120,40 @@ describe("FanoutLedger", () => {
         expect(yield* FanoutLedger.cursor(db, parent)).toEqual({ groups: 1, live: 1, unclaimed: 1 })
         expect((yield* FanoutLedger.findGroup(db, created.id))?.status).toBe("live")
 
-        expect(yield* FanoutLedger.claim(db, { parentSessionID: parent, seq: 9 })).toEqual([done.id])
+        expect(yield* FanoutLedger.claim(db, { workerID: done.id, seq: 9 })).toEqual([done.id])
         expect(yield* FanoutLedger.unclaimed(db, parent)).toEqual([])
         expect(yield* FanoutLedger.cursor(db, parent)).toEqual({ groups: 1, live: 1, unclaimed: 0 })
-        // A live worker is never claimable: claiming must not retire running work.
-        expect(yield* FanoutLedger.claim(db, { parentSessionID: parent, seq: 10 })).toEqual([])
+        // A second claim of the same row is a no-op, and a live worker is never
+        // claimable: claiming must not retire running work.
+        expect(yield* FanoutLedger.claim(db, { workerID: done.id, seq: 10 })).toEqual([])
+        expect(yield* FanoutLedger.claim(db, { workerID: stillRunning.id, seq: 11 })).toEqual([])
         expect((yield* FanoutLedger.findWorker(db, stillRunning.id))?.status).toBe("live")
+      }),
+    )
+  })
+
+  test("claiming one worker's result leaves a settled sibling claimable", async () => {
+    await withLedger((db) =>
+      Effect.gen(function* () {
+        const created = yield* spawnGroup(db, "crew")
+        const first = yield* addWorker(db, created.id, 0)
+        const second = yield* addWorker(db, created.id, 1)
+
+        yield* FanoutLedger.settle(db, { workerID: first.id, status: "done", digest: "first", seq: 1 })
+        yield* FanoutLedger.settle(db, { workerID: second.id, status: "done", digest: "second", seq: 2 })
+
+        // Every caller hands over one digest at a time. Retiring the whole
+        // parent's unclaimed set here would drop the sibling from `unclaimed`,
+        // from the cursor, and from `parentsWithUnclaimed` -- so a crash before
+        // its own delivery would lose the result with nothing left to find it.
+        expect(yield* FanoutLedger.claim(db, { workerID: first.id, seq: 3 })).toEqual([first.id])
+        expect(yield* FanoutLedger.unclaimed(db, parent)).toMatchObject([{ id: second.id, digest: "second" }])
+        expect(yield* FanoutLedger.cursor(db, parent)).toEqual({ groups: 1, live: 0, unclaimed: 1 })
+        expect(yield* FanoutLedger.parentsWithUnclaimed(db)).toEqual([parent])
+
+        expect(yield* FanoutLedger.claim(db, { workerID: second.id, seq: 4 })).toEqual([second.id])
+        expect(yield* FanoutLedger.unclaimed(db, parent)).toEqual([])
+        expect(yield* FanoutLedger.parentsWithUnclaimed(db)).toEqual([])
       }),
     )
   })

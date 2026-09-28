@@ -298,14 +298,18 @@ export const unclaimed = Effect.fn("FanoutLedger.unclaimed")(function* (
 })
 
 /**
- * Marks a result as delivered to the parent. Called only after the digest has
- * been durably admitted into the parent's input inbox, so a crash between the
- * admit and the claim re-admits the same message id rather than dropping it.
- */
-/**
- * Marks a result as delivered to the parent. Called only after the digest has
- * been durably admitted into the parent's input inbox, so a crash between the
- * admit and the claim re-admits the same message id rather than dropping it.
+ * Marks ONE worker's result as delivered to its parent. Called only after that
+ * digest has been durably admitted into the parent's input inbox, so a crash
+ * between the admit and the claim re-admits the same message id rather than
+ * dropping it.
+ *
+ * Scoped to a single worker on purpose. Every caller hands over exactly one
+ * digest at a time, so a claim that swept up the parent's whole unclaimed set
+ * would retire siblings whose digests had not been handed over at all: they
+ * would drop out of `unclaimed`, out of the cursor, and out of
+ * `parentsWithUnclaimed`, and nothing left would ever deliver them. The update
+ * is still guarded by `isNull` so a second claim of the same row is a no-op,
+ * and by `status != live` so a claim can never retire running work.
  *
  * `seq` is the durable sequence of that admission when there is one. The v1
  * subagent path hands its result to the parent through a prompt rather than an
@@ -317,14 +321,14 @@ export const CLAIMED = 0
 
 export const claim = Effect.fn("FanoutLedger.claim")(function* (
   db: DatabaseService,
-  input: { readonly parentSessionID: SessionSchema.ID; readonly seq?: number },
+  input: { readonly workerID: Fanout.WorkerID; readonly seq?: number },
 ) {
   const updated = yield* db
     .update(FanoutWorkerTable)
     .set({ claimed_seq: input.seq ?? CLAIMED })
     .where(
       and(
-        eq(FanoutWorkerTable.parent_session_id, input.parentSessionID),
+        eq(FanoutWorkerTable.id, input.workerID),
         isNull(FanoutWorkerTable.claimed_seq),
         ne(FanoutWorkerTable.status, "live"),
       ),
