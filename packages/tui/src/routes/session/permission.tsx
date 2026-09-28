@@ -17,6 +17,8 @@ import { getScrollAcceleration } from "../../util/scroll"
 import { useTuiConfig } from "../../config"
 import { OPENCODE_BASE_MODE, useBindings, useCommandShortcut } from "../../keymap"
 import { usePathFormatter } from "../../context/path-format"
+import { useToast } from "../../ui/toast"
+import { mutateRemote } from "../../util/mutate-remote"
 
 type PermissionStage = "permission" | "always" | "reject"
 
@@ -109,15 +111,53 @@ function TextBody(props: { title: string; description?: string; icon?: string })
   )
 }
 
+/**
+ * Answers a permission request, saying so when the server refuses.
+ *
+ * `permission.reply` declares 400, 404 and 500 and the client resolves those as
+ * `{data: undefined, error}` rather than rejecting, so a refused answer was
+ * indistinguishable from an accepted one. The request stays on screen either way
+ * — only `permission.replied` removes it — so nothing was lost, but the agent
+ * stays blocked and the user is left with an answer that appeared to have been
+ * given and no way to tell it was not.
+ */
+export function replyToPermission(input: {
+  send: (payload: { reply: "once" | "always" | "reject"; message?: string }) => Promise<{
+    data?: unknown
+    error?: unknown
+  }>
+  answer: { reply: "once" | "always" | "reject"; message?: string }
+  report: (reason: string) => void
+}) {
+  return mutateRemote(() => input.send(input.answer), input.report)
+}
+
 export function PermissionPrompt(props: { request: PermissionRequest; directory?: string }) {
   const sdk = useSDK()
   const project = useProject()
   const sync = useSync()
+  const toast = useToast()
   const sharedWs = useOptionalSharedWorkspace()
   const [store, setStore] = createStore({
     stage: "permission" as PermissionStage,
   })
   const pathFormatter = usePathFormatter()
+
+  const reportReply = (reason: string) =>
+    toast.show({ variant: "error", title: "Could not answer the permission request", message: reason })
+  const reply = (answer: { reply: "once" | "always" | "reject"; message?: string }) =>
+    replyToPermission({
+      send: (payload) =>
+        sdk.client.permission.reply({
+          ...payload,
+          requestID: props.request.id,
+          sessionID: props.request.sessionID,
+          directory: props.directory,
+          workspace: project.workspace.current(),
+        }),
+      answer,
+      report: reportReply,
+    })
 
   const session = createMemo(() => sync.data.session.find((s) => s.id === props.request.sessionID))
 
@@ -170,13 +210,7 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
             if (sharedWs) {
               sharedWs.sendPermissionReply(props.request.sessionID, props.request.id, "always")
             } else {
-              void sdk.client.permission.reply({
-                reply: "always",
-                requestID: props.request.id,
-                sessionID: props.request.sessionID,
-                directory: props.directory,
-                workspace: project.workspace.current(),
-              })
+              void reply({ reply: "always" })
             }
           }}
         />
@@ -187,14 +221,7 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
             if (sharedWs) {
               sharedWs.sendPermissionReply(props.request.sessionID, props.request.id, "reject", message || undefined)
             } else {
-              void sdk.client.permission.reply({
-                reply: "reject",
-                requestID: props.request.id,
-                sessionID: props.request.sessionID,
-                directory: props.directory,
-                message: message || undefined,
-                workspace: project.workspace.current(),
-              })
+              void reply({ reply: "reject", message: message || undefined })
             }
           }}
           onCancel={() => {
@@ -430,26 +457,14 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
                   if (sharedWs) {
                     sharedWs.sendPermissionReply(props.request.sessionID, props.request.id, "reject")
                   } else {
-                    void sdk.client.permission.reply({
-                      reply: "reject",
-                      requestID: props.request.id,
-                      sessionID: props.request.sessionID,
-                      directory: props.directory,
-                      workspace: project.workspace.current(),
-                    })
+                    void reply({ reply: "reject" })
                   }
                   return
                 }
                 if (sharedWs) {
                   sharedWs.sendPermissionReply(props.request.sessionID, props.request.id, "once")
                 } else {
-                  void sdk.client.permission.reply({
-                    reply: "once",
-                    requestID: props.request.id,
-                    sessionID: props.request.sessionID,
-                    directory: props.directory,
-                    workspace: project.workspace.current(),
-                  })
+                  void reply({ reply: "once" })
                 }
               }}
             />

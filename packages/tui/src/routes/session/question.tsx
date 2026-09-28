@@ -8,11 +8,31 @@ import { useSDK } from "../../context/sdk"
 import { SplitBorder } from "../../ui/border"
 import { useTuiConfig } from "../../config"
 import { useBindings, useOpencodeModeStack } from "../../keymap"
+import { useToast } from "../../ui/toast"
+import { mutateRemote } from "../../util/mutate-remote"
 
 const QUESTION_MODE = "question"
 
+/**
+ * Sends an answer to a question, saying so when the server refuses.
+ *
+ * `question.reply` and `question.reject` declare 400, 404 and 500, and the
+ * client resolves those as `{data: undefined, error}` rather than rejecting.
+ * The prompt survives a refusal — only `question.replied` removes it — so the
+ * answers are still there to retry, but the agent stayed blocked on a question
+ * the user could see they had answered.
+ */
+export function sendQuestionAnswer(input: {
+  run: () => Promise<{ data?: unknown; error?: unknown }>
+  action: string
+  report: (reason: string) => void
+}) {
+  return mutateRemote(input.run, input.report)
+}
+
 export function QuestionPrompt(props: { request: QuestionRequest; directory?: string }) {
   const sdk = useSDK()
+  const toast = useToast()
   const { theme } = useTheme()
   const renderer = useRenderer()
   const tuiConfig = useTuiConfig()
@@ -45,20 +65,32 @@ export function QuestionPrompt(props: { request: QuestionRequest; directory?: st
     return store.answers[store.tab]?.includes(value) ?? false
   })
 
+  /**
+   * Sends an answer, saying so when the server refuses.
+   *
+   * `question.reply` and `question.reject` declare 400, 404 and 500, and the
+   * client resolves those as `{data: undefined, error}` rather than rejecting.
+   * The prompt survives a refusal — only `question.replied` removes it — so the
+   * answers are still there to retry, but the agent stayed blocked on a
+   * question the user could see they had answered.
+   */
+  const send = (run: () => Promise<{ data?: unknown; error?: unknown }>, action: string) =>
+    sendQuestionAnswer({
+      run,
+      action,
+      report: (reason) => toast.show({ variant: "error", title: `Could not ${action} the question`, message: reason }),
+    })
+
   function submit() {
     const answers = questions().map((_, i) => store.answers[i] ?? [])
-    void sdk.client.question.reply({
-      requestID: props.request.id,
-      directory: props.directory,
-      answers,
-    })
+    void send(
+      () => sdk.client.question.reply({ requestID: props.request.id, directory: props.directory, answers }),
+      "answer",
+    )
   }
 
   function reject() {
-    void sdk.client.question.reject({
-      requestID: props.request.id,
-      directory: props.directory,
-    })
+    void send(() => sdk.client.question.reject({ requestID: props.request.id, directory: props.directory }), "decline")
   }
 
   function pick(answer: string, custom: boolean = false) {
@@ -71,11 +103,15 @@ export function QuestionPrompt(props: { request: QuestionRequest; directory?: st
       setStore("custom", inputs)
     }
     if (single()) {
-      void sdk.client.question.reply({
-        requestID: props.request.id,
-        directory: props.directory,
-        answers: [[answer]],
-      })
+      void send(
+        () =>
+          sdk.client.question.reply({
+            requestID: props.request.id,
+            directory: props.directory,
+            answers: [[answer]],
+          }),
+        "answer",
+      )
       return
     }
     setStore("tab", store.tab + 1)
