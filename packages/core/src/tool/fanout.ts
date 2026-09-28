@@ -15,6 +15,9 @@ import { FanoutLifecycle } from "../fanout/lifecycle"
 import { FanoutLimits } from "../fanout/limits"
 import { ModelV2 } from "../model"
 import { PermissionV2 } from "../permission"
+import { Location } from "../location"
+import { AbsolutePath } from "../schema"
+import { WorkspaceV2 } from "../workspace"
 import { ProviderV2 } from "../provider"
 import { SessionInput } from "../session/input"
 import { SessionMessage } from "../session/message"
@@ -117,6 +120,9 @@ const layer = Layer.effectDiscard(
               }
             : { digest }),
         }).pipe(
+          // The parent is already gone; losing its crew's record to a transient
+          // failure here is the one unrecoverable outcome, so this is logged and
+          // swallowed rather than left to kill an unobserved background fiber.
           Effect.catchCause((cause) =>
             Effect.logError("Fan-out result could not be recorded", cause).pipe(Effect.asVoid),
           ),
@@ -162,10 +168,10 @@ const layer = Layer.effectDiscard(
           }),
         },
         {
-          location: {
-            directory: parent.directory as never,
-            ...(parent.workspace_id === null ? {} : { workspaceID: parent.workspace_id as never }),
-          },
+          location: Location.Ref.make({
+            directory: AbsolutePath.make(parent.directory),
+            ...(parent.workspace_id === null ? {} : { workspaceID: WorkspaceV2.ID.make(parent.workspace_id) }),
+          }),
         },
       )
       // Admitted but not woken: the background job below owns this session's
@@ -177,7 +183,7 @@ const layer = Layer.effectDiscard(
         prompt: { text: worker.prompt },
         delivery: "queue",
       })
-      return { childID, agentID: agent.id }
+      return { childID }
     })
 
     yield* tools

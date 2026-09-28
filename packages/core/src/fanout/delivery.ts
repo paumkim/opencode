@@ -43,7 +43,7 @@ const layer = Layer.effectDiscard(
       Stream.mapEffect((event) => push(event.data.workerID)),
       Stream.runDrain,
       Effect.forkScoped,
-      Effect.ignore,
+      Effect.catchCause((cause) => Effect.logError("Fan-out delivery subscription stopped", cause)),
     )
 
     // A restart loses live subscribers but not the ledger, so anything the
