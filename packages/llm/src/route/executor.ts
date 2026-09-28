@@ -95,6 +95,25 @@ const requestId = (headers: Record<string, string>) => {
 
 const retryableStatus = (status: number) => status === 429 || status === 503 || status === 504 || status === 529
 
+// Statuses that do not explain themselves. A blocked prompt comes back as a
+// 4xx on every provider we speak to, and only the body names it — so the body
+// is worth reading exactly here, and never as an override of a status that is
+// already unambiguous. A 429 is a throttle and a 401 is bad credentials even
+// when the prose says "safety", and reclassifying either as a content-policy
+// rejection is not cosmetic: `ContentPolicyReason` is non-retryable, so a body
+// that merely mentions safety would kill a request the retry loop could have
+// saved.
+const AMBIGUOUS_CLIENT_STATUS = new Set([400, 404, 409, 413, 422])
+
+// OpenAI sends `content_policy_violation`, Azure sends `content_filter`,
+// Anthropic says the output was blocked by a content filtering policy, Gemini
+// sends `"status": "SAFETY"`. A bare `safety` word is too loose to trust on its
+// own — "upstream safety service unavailable" is an outage and "safety review
+// quota exhausted" is a throttle — so it only counts as a quoted value or
+// beside a word that makes it about filtering.
+const CONTENT_POLICY_BODY =
+  /content[-_\s]?(?:policy|filter|moderation)|"safety"|\bsafety\b[^"]{0,40}\b(?:filter|block|violat|policy|check|setting|system)/i
+
 const retryAfterMs = (headers: Record<string, string>) => {
   const millis = Number(headers["retry-after-ms"])
   if (Number.isFinite(millis)) return Math.max(0, millis)
@@ -260,9 +279,6 @@ const statusReason = (input: {
   readonly http: HttpContext
 }) => {
   const body = input.http.body ?? ""
-  if (/content[-_\s]?policy|content_filter|safety/i.test(body)) {
-    return new ContentPolicyReason({ message: input.message, http: input.http })
-  }
   if (input.status === 401) {
     return new AuthenticationReason({ message: input.message, kind: "invalid", http: input.http })
   }
@@ -280,13 +296,10 @@ const statusReason = (input: {
       http: input.http,
     })
   }
-  if (
-    input.status === 400 ||
-    input.status === 404 ||
-    input.status === 409 ||
-    input.status === 413 ||
-    input.status === 422
-  ) {
+  if (AMBIGUOUS_CLIENT_STATUS.has(input.status)) {
+    if (CONTENT_POLICY_BODY.test(body)) {
+      return new ContentPolicyReason({ message: input.message, http: input.http })
+    }
     return new InvalidRequestReason({
       message: input.message,
       classification: isContextOverflow(body) ? "context-overflow" : undefined,
