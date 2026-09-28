@@ -128,8 +128,13 @@ export const addWorker = Effect.fn("FanoutLedger.addWorker")(function* (
 
 /**
  * Records a worker's terminal state. Safe to run inside a durable event's
- * `commit` hook, which is where the fan-out completion path calls it so the row
- * and the event that announces it can never disagree.
+ * `commit` hook, which is where the v2 fan-out completion path calls it so the
+ * row and the event that announces it can never disagree.
+ *
+ * `seq` is the durable sequence of the announcement. It is optional because
+ * not every protocol settles a worker through an event stream: the v1
+ * subagent path records the same row without a fan-out event, and `unclaimed`
+ * is what makes that result still reach the parent.
  */
 export const settle = Effect.fn("FanoutLedger.settle")(function* (
   db: DatabaseService,
@@ -138,14 +143,14 @@ export const settle = Effect.fn("FanoutLedger.settle")(function* (
     readonly status: Exclude<Fanout.WorkerStatus, "live">
     readonly digest?: string
     readonly error?: string
-    readonly seq: number
+    readonly seq?: number
   },
 ) {
   const updated = yield* db
     .update(FanoutWorkerTable)
     .set({
       status: input.status,
-      settled_seq: input.seq,
+      ...(input.seq === undefined ? {} : { settled_seq: input.seq }),
       ...(input.digest === undefined ? {} : { digest: input.digest }),
       ...(input.error === undefined ? {} : { error: input.error }),
     })
@@ -254,13 +259,26 @@ export const unclaimed = Effect.fn("FanoutLedger.unclaimed")(function* (
  * been durably admitted into the parent's input inbox, so a crash between the
  * admit and the claim re-admits the same message id rather than dropping it.
  */
+/**
+ * Marks a result as delivered to the parent. Called only after the digest has
+ * been durably admitted into the parent's input inbox, so a crash between the
+ * admit and the claim re-admits the same message id rather than dropping it.
+ *
+ * `seq` is the durable sequence of that admission when there is one. The v1
+ * subagent path hands its result to the parent through a prompt rather than an
+ * inbox admission and has no such sequence, so it claims with `CLAIMED`: the
+ * column's only job is to be non-null, and every reader tests it with
+ * `isNull`, never for its value.
+ */
+export const CLAIMED = 0
+
 export const claim = Effect.fn("FanoutLedger.claim")(function* (
   db: DatabaseService,
-  input: { readonly parentSessionID: SessionSchema.ID; readonly seq: number },
+  input: { readonly parentSessionID: SessionSchema.ID; readonly seq?: number },
 ) {
   const updated = yield* db
     .update(FanoutWorkerTable)
-    .set({ claimed_seq: input.seq })
+    .set({ claimed_seq: input.seq ?? CLAIMED })
     .where(
       and(
         eq(FanoutWorkerTable.parent_session_id, input.parentSessionID),

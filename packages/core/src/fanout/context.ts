@@ -26,10 +26,19 @@ export const load = Effect.fn("FanoutContext.load")(function* (db: DatabaseServi
     key,
     codec: Schema.toCodecJson(Fanout.Cursor),
     load: Effect.succeed(cursor),
-    baseline: (cursor) => `Your fan-out ledger is durable and survives compaction. Right now: ${describe(cursor)}.`,
+    baseline: (cursor) => baseline(cursor),
     update: (_previous, cursor) => `Your fan-out ledger changed. Right now: ${describe(cursor)}.`,
   })
 })
 
-const describe = (cursor: Fanout.Cursor) =>
+/**
+ * The one sentence that tells a parent what its crew is doing.
+ *
+ * Shared by the v2 system-context source and the v1 system prompt so the two
+ * protocols cannot drift into describing the same ledger differently.
+ */
+export const describe = (cursor: Fanout.Cursor) =>
   `${cursor.live} worker(s) live across ${cursor.groups} group(s), ${cursor.unclaimed} finished result(s) not yet delivered`
+
+export const baseline = (cursor: Fanout.Cursor) =>
+  `Your fan-out ledger is durable and survives compaction. Right now: ${describe(cursor)}.`
