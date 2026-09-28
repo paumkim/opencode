@@ -29,6 +29,22 @@ export const VcsDiffQuery = Schema.Struct({
   context: Schema.optional(Schema.NumberFromString.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0))),
 })
 
+/**
+ * A read that answers "what changed in the worktree" could not run git.
+ * Distinct from an empty result: an empty list means the tree is clean, and the
+ * client must not render that when the truth is that git failed.
+ */
+export class ApiVcsReadError extends Schema.ErrorClass<ApiVcsReadError>("VcsReadError")(
+  {
+    name: Schema.Literal("VcsReadError"),
+    data: Schema.Struct({
+      message: Schema.String,
+      command: Schema.Array(Schema.String),
+    }),
+  },
+  { httpApiStatus: 500 },
+) {}
+
 export class ApiVcsApplyError extends Schema.ErrorClass<ApiVcsApplyError>("VcsApplyError")(
   {
     name: Schema.Literal("VcsApplyError"),
@@ -94,6 +110,7 @@ export const InstanceApi = HttpApi.make("instance")
         HttpApiEndpoint.get("vcsStatus", InstancePaths.vcsStatus, {
           query: WorkspaceRoutingQuery,
           success: described(Schema.Array(Vcs.FileStatus), "VCS status"),
+          error: ApiVcsReadError,
         }).annotateMerge(
           OpenApi.annotations({
             identifier: "vcs.status",
@@ -104,6 +121,7 @@ export const InstanceApi = HttpApi.make("instance")
         HttpApiEndpoint.get("vcsDiff", InstancePaths.vcsDiff, {
           query: VcsDiffQuery,
           success: described(Schema.Array(Vcs.FileDiff), "VCS diff"),
+          error: ApiVcsReadError,
         }).annotateMerge(
           OpenApi.annotations({
             identifier: "vcs.diff",
@@ -117,6 +135,7 @@ export const InstanceApi = HttpApi.make("instance")
             Schema.String.pipe(HttpApiSchema.asText({ contentType: "text/x-diff; charset=utf-8" })),
             "Raw VCS diff",
           ),
+          error: ApiVcsReadError,
         }).annotateMerge(
           OpenApi.annotations({
             identifier: "vcs.diff.raw",

@@ -1,6 +1,6 @@
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { AppProcess } from "@opencode-ai/core/process"
-import { Effect, Layer, Context, Stream } from "effect"
+import { Effect, Layer, Context, Schema, Stream } from "effect"
 import { ChildProcess } from "effect/unstable/process"
 
 const cfg = [
@@ -57,6 +57,24 @@ export interface PatchOptions {
   readonly maxOutputBytes?: number
 }
 
+/**
+ * A git command that was expected to succeed and did not.
+ *
+ * The reads that answer "what changed in the worktree" must not degrade to an
+ * empty list on failure. An empty list is a *claim* — that the worktree is
+ * clean — and callers act on it: the UI reports no changes, and `diffRaw` feeds
+ * "here is the current patch" straight into a workspace copy. A corrupt index, a
+ * hostile `GIT_DIR`, or a missing `git` binary all used to produce exactly that
+ * claim, with git's own explanation sitting unread in `stderr`.
+ */
+export class CommandError extends Schema.TaggedErrorClass<CommandError>()("GitCommandError", {
+  /** The git subcommand and arguments, for reproduction. */
+  args: Schema.Array(Schema.String),
+  exitCode: Schema.Number,
+  /** git's own diagnostic, with stdout as a fallback for git versions that use it. */
+  message: Schema.String,
+}) {}
+
 export interface Result {
   readonly exitCode: number
   readonly text: () => string
@@ -80,9 +98,9 @@ export interface Interface {
   readonly hasHead: (cwd: string) => Effect.Effect<boolean>
   readonly mergeBase: (cwd: string, base: string, head?: string) => Effect.Effect<string | undefined>
   readonly show: (cwd: string, ref: string, file: string, prefix?: string) => Effect.Effect<string>
-  readonly status: (cwd: string) => Effect.Effect<Item[]>
-  readonly diff: (cwd: string, ref: string) => Effect.Effect<Item[]>
-  readonly stats: (cwd: string, ref: string) => Effect.Effect<Stat[]>
+  readonly status: (cwd: string) => Effect.Effect<Item[], CommandError>
+  readonly diff: (cwd: string, ref: string) => Effect.Effect<Item[], CommandError>
+  readonly stats: (cwd: string, ref: string) => Effect.Effect<Stat[], CommandError>
   readonly patch: (cwd: string, ref: string, file: string, options?: PatchOptions) => Effect.Effect<Patch>
   readonly patchAll: (cwd: string, ref: string, options?: PatchOptions) => Effect.Effect<Patch>
   readonly patchUntracked: (cwd: string, file: string, options?: PatchOptions) => Effect.Effect<Patch>
@@ -133,6 +151,24 @@ const layer = Layer.effect(
 
     const text = Effect.fn("Git.text")(function* (args: string[], opts: Options) {
       return (yield* run(args, opts)).text()
+    })
+
+    // Same spawn as `run`, but a non-zero exit is raised rather than reduced to
+    // an empty string. Use this for reads whose empty result is indistinguishable
+    // from "nothing to report"; use `run`/`text` only for probes where a silent
+    // undefined is a real answer (an unborn HEAD, a repo with no remotes).
+    const checked = Effect.fn("Git.checked")(function* (args: string[], opts: Options) {
+      const result = yield* run(args, opts)
+      if (result.exitCode === 0) return result
+      return yield* new CommandError({
+        args,
+        exitCode: result.exitCode,
+        message: result.stderr.toString("utf8").trim() || result.text().trim() || `git ${args[0]} failed`,
+      })
+    })
+
+    const checkedText = Effect.fnUntraced(function* (args: string[], opts: Options) {
+      return (yield* checked(args, opts)).text()
     })
 
     const lines = Effect.fn("Git.lines")(function* (args: string[], opts: Options) {
@@ -214,7 +250,7 @@ const layer = Layer.effect(
 
     const status = Effect.fn("Git.status")(function* (cwd: string) {
       return nuls(
-        yield* text(["status", "--porcelain=v1", "--untracked-files=all", "--no-renames", "-z", "--", "."], {
+        yield* checkedText(["status", "--porcelain=v1", "--untracked-files=all", "--no-renames", "-z", "--", "."], {
           cwd,
         }),
       ).flatMap((item) => {
@@ -227,7 +263,7 @@ const layer = Layer.effect(
 
     const diff = Effect.fn("Git.diff")(function* (cwd: string, ref: string) {
       const list = nuls(
-        yield* text(["diff", "--no-ext-diff", "--no-renames", "--name-status", "-z", ref, "--", "."], { cwd }),
+        yield* checkedText(["diff", "--no-ext-diff", "--no-renames", "--name-status", "-z", ref, "--", "."], { cwd }),
       )
       return list.flatMap((code, idx) => {
         if (idx % 2 !== 0) return []
@@ -239,7 +275,7 @@ const layer = Layer.effect(
 
     const stats = Effect.fn("Git.stats")(function* (cwd: string, ref: string) {
       return nuls(
-        yield* text(["diff", "--no-ext-diff", "--no-renames", "--numstat", "-z", ref, "--", "."], { cwd }),
+        yield* checkedText(["diff", "--no-ext-diff", "--no-renames", "--numstat", "-z", ref, "--", "."], { cwd }),
       ).flatMap((item) => {
         const a = item.indexOf("\t")
         const b = item.indexOf("\t", a + 1)

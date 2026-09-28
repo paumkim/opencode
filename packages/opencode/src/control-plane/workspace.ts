@@ -7,6 +7,7 @@ import { Database } from "@opencode-ai/core/database/database"
 import { asc } from "drizzle-orm"
 import { eq } from "drizzle-orm"
 import { inArray } from "drizzle-orm"
+import { Git } from "@/git"
 import { Project } from "@/project/project"
 import { GlobalBus } from "@/bus/global"
 import { Auth } from "@/auth"
@@ -130,7 +131,11 @@ type SyncLoopError = SyncHttpError | HttpClientError.HttpClientError
 
 export interface Interface {
   readonly create: (input: CreateInput) => Effect.Effect<Info, CreateError>
-  readonly sessionWarp: (input: SessionWarpInput) => Effect.Effect<void, SessionWarpError>
+  // Also `Git.CommandError`: warping copies the local `diffRaw` into the new
+  // workspace, and on a git failure that is an empty patch. Proceeding would
+  // move the session into a workspace missing every uncommitted change and
+  // report success, so the warp must fail instead.
+  readonly sessionWarp: (input: SessionWarpInput) => Effect.Effect<void, SessionWarpError | Git.CommandError>
   readonly list: (project: Project.Info) => Effect.Effect<Info[]>
   readonly syncList: (project: Project.Info) => Effect.Effect<void>
   readonly get: (id: WorkspaceV2.ID) => Effect.Effect<Info | undefined>
