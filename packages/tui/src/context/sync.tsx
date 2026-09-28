@@ -458,7 +458,19 @@ export const {
 
         case "lsp.updated": {
           const workspace = project.workspace.current()
-          void sdk.client.lsp.status({ workspace }).then((x) => setStore("lsp", x.data ?? []))
+          // This is a push path, so it runs mid-session while the user is
+          // working. It used to end in `x.data ?? []`, which made a failed
+          // refresh — a blip, a server restart — indistinguishable from every
+          // language server shutting down, and it emptied the list the user was
+          // looking at. Keep the last known set and record the reason.
+          void readRemote(() => sdk.client.lsp.status({ workspace }), []).then((result) => {
+            if (result.ok) {
+              setStore("lsp", reconcile(result.data))
+              setStore("unreadable", "lsp", undefined)
+              return
+            }
+            setStore("unreadable", "lsp", result.reason)
+          })
           break
         }
 
