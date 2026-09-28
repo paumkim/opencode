@@ -2,7 +2,7 @@ import { useDialog } from "../ui/dialog"
 import { DialogSelect } from "../ui/dialog-select"
 import { useRoute } from "../context/route"
 import { useSync } from "../context/sync"
-import { createMemo, createResource, createSignal, onCleanup, onMount } from "solid-js"
+import { createMemo, createResource, createSignal, onCleanup, onMount, Show } from "solid-js"
 import path from "path"
 import { Locale } from "../util/locale"
 import { useProject } from "../context/project"
@@ -40,6 +40,30 @@ export function loadDialogSessionList<T>(input: {
     (result) => result.data,
     () => undefined,
   )
+}
+
+/**
+ * Says the list may be incomplete, and why.
+ *
+ * Both reads behind this list are recorded when they fail — `session.list` in
+ * sync, and the project/path read the list is scoped to. Neither was shown
+ * anywhere, so a list that was stale after a blip was indistinguishable from a
+ * complete one, and the user had no way to know a session they were looking for
+ * might simply not have loaded. The list itself is still rendered: the point is
+ * to mark it as possibly incomplete, not to hide work.
+ */
+export function SessionListStaleness() {
+  const sync = useSync()
+  const project = useProject()
+  const { theme } = useTheme()
+  const reason = createMemo(() => {
+    const session = sync.data.unreadable.session
+    if (session) return `Session list may be out of date: ${session}`
+    const projectReason = project.data.unreadable?.ok === false ? project.data.unreadable.reason : undefined
+    if (projectReason) return `Project could not be read, so this list may be incomplete: ${projectReason}`
+    return undefined
+  })
+  return <Show when={reason()}>{(text) => <text fg={theme.warning}>{text()}</text>}</Show>
 }
 
 export function DialogSessionList() {
@@ -272,6 +296,7 @@ export function DialogSessionList() {
   return (
     <DialogSelect
       title="Sessions"
+      footer={<SessionListStaleness />}
       options={options()}
       skipFilter={true}
       preserveSelection={true}
