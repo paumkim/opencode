@@ -202,6 +202,32 @@ export function joinRefusalReason(sessionID: string, refusal: Exclude<JoinOutcom
   return `could not join ${sessionID}: ${refusal.detail}`
 }
 
+/** The client-message kinds that start work the server accepted but may not be able to finish. */
+export type OperationName = "prompt" | "command" | "shell" | "abort" | "permissionReply"
+
+const operationNames: readonly OperationName[] = ["prompt", "command", "shell", "abort", "permissionReply"]
+
+export function isOperationName(value: string): value is OperationName {
+  return (operationNames as readonly string[]).includes(value)
+}
+
+/**
+ * The frame a client receives when work it asked for could not be carried out.
+ *
+ * This is deliberately *not* a socket close, unlike `joinRefusalReason`. A failed join means the
+ * client is watching the wrong session and every later frame would be dropped anyway. A failed
+ * operation is scoped to one message: the room is still valid, the next prompt still works, and
+ * the client is sitting there with a message it typed that will never produce a reply. Closing the
+ * socket would turn one lost turn into a lost session.
+ */
+export function operationErrorFrame(sessionID: string, operation: OperationName, error: unknown): string {
+  return encodeEvent({
+    id: "",
+    type: "operationError",
+    properties: { sessionID, operation, message: errorMessage(error) },
+  })
+}
+
 // ---------------------------------------------------------------------------
 // Handler
 // ---------------------------------------------------------------------------
@@ -247,6 +273,31 @@ export const sharedHandlers = HttpApiBuilder.group(InstanceHttpApi, "shared", (h
           Queue.offerUnsafe(outbox, new Socket.CloseEvent(1011, reason))
         })
 
+        /**
+         * Runs work the client asked for, and tells the client if it could not be done.
+         *
+         * Every operation case used to end in `Effect.catch(() => Effect.void)`, and the
+         * `Fiber.join` inside `startOperation` caught the cause as well, so there were two
+         * independent silences on the same path. That is not a defensive choice: the client only
+         * sends a prompt over this socket when the socket is up, so there is no HTTP fallback
+         * covering it, and the message simply disappears. A prompt against a session that was
+         * deleted underneath it is the sharpest case - `SessionPrompt.prompt` resolves the
+         * session with `Effect.orDie`, so it is a defect rather than a typed failure, and a
+         * `Effect.catch` alone would not even have caught it.
+         *
+         * `catchCause` rather than `catch` is therefore deliberate: the operation is already
+         * accepted and the client is waiting, so *every* way it can fail has to be answered.
+         */
+        const guardOperation = (operation: OperationName, effect: Effect.Effect<unknown, unknown>) =>
+          effect.pipe(
+            Effect.catchCause((cause) =>
+              send(operationErrorFrame(currentSessionID as string, operation, cause)).pipe(
+                // Reporting the failure must not itself be the thing that tears the room down.
+                Effect.catch(() => Effect.void),
+              ),
+            ),
+          )
+
         // Writer: drain outbox
         const drain = Effect.gen(function* () {
           while (true) {
@@ -290,15 +341,18 @@ export const sharedHandlers = HttpApiBuilder.group(InstanceHttpApi, "shared", (h
           currentSessionID = undefined
         }) as Effect.Effect<void>
 
-        const startOperation = (generation: number, operation: Effect.Effect<unknown, unknown>) =>
+        const startOperation = (generation: number, name: OperationName, effect: Effect.Effect<unknown, unknown>) =>
           Effect.gen(function* () {
             if (generation !== roomGeneration) return
-            const fiber = yield* Effect.forkScoped(operation)
+            const fiber = yield* Effect.forkScoped(guardOperation(name, effect))
             operationFibers.add(fiber)
             yield* Effect.forkScoped(
               Fiber.join(fiber).pipe(
                 Effect.ensuring(Effect.sync(() => operationFibers.delete(fiber))),
-                Effect.catchCause(() => Effect.void),
+                // A guarded operation cannot fail, so this only catches the guard itself breaking -
+                // and swallowing that would be the same defect one level up, so it is reported with
+                // the same operation name the client sent.
+                Effect.catchCause((cause) => send(operationErrorFrame(currentSessionID as string, name, cause))),
               ),
             )
           })
@@ -376,8 +430,10 @@ export const sharedHandlers = HttpApiBuilder.group(InstanceHttpApi, "shared", (h
               case "prompt": {
                 const generation = roomGeneration
                 const message = msg.payload.message
-                yield* startOperation(generation, promptSvc
-                  .prompt({
+                yield* startOperation(
+                  generation,
+                  "prompt",
+                  promptSvc.prompt({
                     sessionID: currentSessionID as SessionID,
                     agent: msg.payload.agent,
                     variant: msg.payload.variant,
@@ -387,51 +443,62 @@ export const sharedHandlers = HttpApiBuilder.group(InstanceHttpApi, "shared", (h
                         : undefined,
                     ),
                      parts: (msg.payload.parts as any[] | undefined) ?? (message ? [{ type: "text", text: message }] : []),
-                  })
-                  .pipe(Effect.catch(() => Effect.void)))
+                  }),
+                )
                 break
               }
 
               case "command":
-                yield* startOperation(roomGeneration, promptSvc
-                  .command({
+                yield* startOperation(
+                  roomGeneration,
+                  "command",
+                  promptSvc.command({
                     sessionID: currentSessionID as SessionID,
                     command: msg.payload.command,
                     arguments: msg.payload.args,
                     agent: msg.payload.agent,
                     model: msg.payload.model,
                     variant: msg.payload.variant,
-                  })
-                  .pipe(Effect.catch(() => Effect.void)))
+                  }),
+                )
                 break
 
               case "permissionReply": {
                 const requestID = Schema.decodeUnknownOption(PermissionV1.ID)(msg.payload.requestID)
                 if (Option.isNone(requestID)) return
-                yield* permissionSvc
-                  .reply({
-                    requestID: requestID.value,
-                    reply: msg.payload.response,
-                    sessionID: currentSessionID as SessionID,
-                    message: msg.payload.message,
-                  })
-                  .pipe(Effect.catchTag("Permission.NotFoundError", () => Effect.void))
+                // A permission that no longer exists is an ordinary race - the user answered a
+                // dialog that had already gone - so it stays quiet. Anything else leaves the agent
+                // blocked on a tool the user believes they approved, which is not tolerable to be
+                // silent about.
+                yield* guardOperation(
+                  "permissionReply",
+                  permissionSvc
+                    .reply({
+                      requestID: requestID.value,
+                      reply: msg.payload.response,
+                      sessionID: currentSessionID as SessionID,
+                      message: msg.payload.message,
+                    })
+                    .pipe(Effect.catchTag("Permission.NotFoundError", () => Effect.void)),
+                )
                 break
               }
 
               case "abort":
-                yield* promptSvc.cancel(currentSessionID as SessionID).pipe(Effect.catch(() => Effect.void))
+                yield* guardOperation("abort", promptSvc.cancel(currentSessionID as SessionID))
                 break
 
               case "shell":
-                yield* startOperation(roomGeneration, promptSvc
-                  .shell({
+                yield* startOperation(
+                  roomGeneration,
+                  "shell",
+                  promptSvc.shell({
                     sessionID: currentSessionID as SessionID,
                     command: "payload" in msg ? msg.payload.command : msg.command,
                     agent: ("payload" in msg ? msg.payload.agent : msg.agent) ?? "",
                     model: modelRef("payload" in msg ? msg.payload.model : msg.model),
-                  })
-                  .pipe(Effect.catch(() => Effect.void)))
+                  }),
+                )
                 break
             }
           }) as Effect.Effect<void>

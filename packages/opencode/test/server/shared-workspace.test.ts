@@ -4,7 +4,9 @@ import { readFileSync } from "node:fs"
 import {
   decideJoin,
   isMessageForRoom,
+  isOperationName,
   joinRefusalReason,
+  operationErrorFrame,
   sessionBelongsToRoute,
   parseClientMessage,
   type JoinLookup,
@@ -179,12 +181,14 @@ describe("shared workspace join decisions", () => {
   })
 })
 
-describe("shared workspace join wiring", () => {
-  const source = readFileSync(
-    new URL("../../src/server/routes/instance/httpapi/handlers/shared-workspace.ts", import.meta.url),
-    "utf-8",
-  )
+// Module scope, not inside a describe: more than one describe reads the handler, and a source read
+// scoped to the first block reads as a missing variable in the second.
+const source = readFileSync(
+  new URL("../../src/server/routes/instance/httpapi/handlers/shared-workspace.ts", import.meta.url),
+  "utf-8",
+)
 
+describe("shared workspace join wiring", () => {
   test("the join branch answers a refusal instead of returning silently", () => {
     // `decideJoin` is a pure function, so every test above still passes if the handler quietly
     // stopped calling it. Mounting this handler needs a live WebSocket and an instance context,
@@ -210,5 +214,70 @@ describe("shared workspace join wiring", () => {
     // The old shape, verbatim. Both were `return`s that told the client nothing.
     expect(branch).not.toContain("if (!session) return")
     expect(branch).not.toContain("Effect.catchCause(() => Effect.succeed(undefined))")
+  })
+})
+
+describe("shared workspace operation failures", () => {
+  test("answers a failed operation with a frame naming the operation and the cause", () => {
+    // The regression: all five operation cases ended in `Effect.catch(() => Effect.void)`, and
+    // `startOperation`'s `Fiber.join` caught the cause a second time. Two silences on one path.
+    // The client only sends over the socket when the socket is up, so there is no HTTP fallback
+    // covering any of it - the message the user typed simply disappeared.
+    const frame = JSON.parse(operationErrorFrame("ses_a", "prompt", new Error("session not found: ses_a")))
+    expect(frame.type).toBe("operationError")
+    expect(frame.properties.sessionID).toBe("ses_a")
+    expect(frame.properties.operation).toBe("prompt")
+    // The cause travels with it: "it did not work" is not a diagnosis.
+    expect(frame.properties.message).toContain("session not found")
+  })
+
+  test("is a frame and not a socket close, so one lost turn does not become a lost session", () => {
+    // A refused join closes, because the room is wrong and every later frame would be dropped
+    // anyway. A failed operation must not: the room is still valid and the next prompt still
+    // works. A close here would turn one lost turn into a lost session.
+    expect(() => JSON.parse(operationErrorFrame("ses_a", "shell", new Error("boom")))).not.toThrow()
+    expect(operationErrorFrame("ses_a", "shell", new Error("boom"))).not.toContain("1011")
+  })
+
+  test("carries a reason for every operation the switch accepts", () => {
+    // An unrecognised operation name would fall through to a generic title on the client and tell
+    // the user nothing about which of the five things they asked for went wrong.
+    for (const operation of ["prompt", "command", "shell", "abort", "permissionReply"] as const) {
+      expect(isOperationName(operation)).toBe(true)
+      const frame = JSON.parse(operationErrorFrame("ses_a", operation, new Error("boom")))
+      expect(frame.properties.operation).toBe(operation)
+    }
+    expect(isOperationName("somethingElse")).toBe(false)
+  })
+
+  test("every operation reaches a guard, and the old silent catches are gone", () => {
+    // `decideJoin`, `operationErrorFrame` and `isOperationName` are pure, so a handler that stopped
+    // calling them would still pass every test above. This reads the switch directly.
+    //
+    // The three long-running operations go through `startOperation`, which applies the guard
+    // itself; the two immediate ones call `guardOperation` directly. Asserting one single call
+    // shape would be asserting an implementation detail - what matters is that each of the five
+    // names reaches a reporting site.
+    //
+    // Anchored at `handleClientMessage`, not at the first `case` in the file: `parseClientMessage`
+    // has its own cases for all five names, and a search from byte zero finds the parser and
+    // reports a green test that has proved nothing.
+    const handler = source.indexOf("const handleClientMessage")
+    expect(handler).toBeGreaterThan(-1)
+    const branch = source.slice(handler)
+
+    for (const operation of ["prompt", "command", "shell", "abort", "permissionReply"]) {
+      expect(branch).toMatch(new RegExp(`(guardOperation|startOperation)\\([^)]*["']${operation}["']`))
+    }
+    // The forked path applies the guard internally, so the long-running operations are covered too.
+    // Read from the top of the file rather than from the switch: `startOperation` and
+    // `guardOperation` are defined *above* `handleClientMessage`, so a slice starting at the
+    // switch cannot see them.
+    expect(source).toContain("Effect.forkScoped(guardOperation(name, effect))")
+
+    // The old shape, verbatim: a silent catch on work the client is waiting for. The window is
+    // wide because the call and the catch were chained across a multi-line argument object.
+    expect(source).not.toMatch(/\.(prompt|command|shell)\([\s\S]{0,900}?Effect\.catch\(\(\) => Effect\.void\)/)
+    expect(branch).not.toContain("Effect.catchCause(() => Effect.void),")
   })
 })
