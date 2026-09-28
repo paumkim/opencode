@@ -8,6 +8,7 @@ import type {
 } from "@agentclientprotocol/sdk"
 import type { Event, OpencodeClient } from "@opencode-ai/sdk/v2"
 import { applyPatch } from "diff"
+import { errorMessage } from "@/util/error"
 import { exists, readText } from "@/util/filesystem"
 import type { ACPSession } from "./session"
 import { pendingToolCall, toLocations, type ToolInput } from "./tool"
@@ -25,6 +26,7 @@ const permissionOptions: PermissionOption[] = [
 
 export class Handler {
   private readonly queues = new Map<string, Promise<void>>()
+  private readonly report: (message: string) => void
 
   constructor(
     private readonly input: {
@@ -32,14 +34,26 @@ export class Handler {
       connection: Connection
       session: ACPSession.Interface
     },
-  ) {}
+    options?: { report?: (message: string) => void },
+  ) {
+    this.report = options?.report ?? ((message) => console.error(message))
+  }
 
   handle(event: PermissionEvent) {
     const permission = event.properties
     const previous = this.queues.get(permission.sessionID) ?? Promise.resolve()
     const next = previous
       .then(() => this.process(event))
-      .catch(() => {})
+      // This used to be `.catch(() => {})`, and a permission that is never answered is the worst
+      // failure in this class: not rejected, not approved, never answered. The agent stays blocked
+      // on the tool for the rest of the turn, the client's dialog never resolves, and nothing says
+      // why. Almost every throw inside `process` happens in `reply`, which is the one call the
+      // agent is blocked on.
+      .catch((error) => {
+        this.report(
+          `[acp] failed to deliver permission request ${permission.id} (${permission.permission}) to the agent: ${errorMessage(error)}`,
+        )
+      })
       .finally(() => {
         if (this.queues.get(permission.sessionID) === next) {
           this.queues.delete(permission.sessionID)
@@ -87,7 +101,10 @@ export class Handler {
     }
 
     if (permission.permission === "edit") {
-      await this.writeProposedEdit(session.id, permission.metadata).catch(() => {})
+      // Not `.catch(() => {})` any more. Writing the proposed edit is how the user sees the diff they
+      // are approving, so a failure here means the approval goes ahead for content nobody was shown.
+      // The failure propagates to `handle`, which reports it against this permission.
+      await this.writeProposedEdit(session.id, permission.metadata)
     }
 
       await this.reply(permission.id, permission.sessionID, reply, session.cwd)
@@ -110,10 +127,17 @@ export class Handler {
     const content = (await exists(filepath)) ? await readText(filepath) : ""
     const next = applyPatch(content, diff)
     if (next === false) {
-      return
+      // Returning quietly here sent the reply out as if the user had reviewed something. They
+      // approved a diff that was neither shown nor written, and the agent proceeded to make the
+      // edit on its own. There is nothing to write, so this is a failure of the proposal, not a
+      // reason to let the approval through unexamined.
+      throw new Error(`the proposed edit to ${filepath} does not apply to the file's current contents`)
     }
 
-    void this.input.connection.writeTextFile({
+    // Awaited, not `void`. A floating promise here means a client that refuses the write produces
+    // an unhandled rejection, and the user has approved an edit that is never applied to their
+    // buffer - the one file this call exists to keep in step with what they reviewed.
+    await this.input.connection.writeTextFile({
       sessionId,
       path: filepath,
       content: next,

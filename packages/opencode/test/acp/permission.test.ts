@@ -13,6 +13,7 @@ import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { ACPEvent } from "@/acp/event"
+import { Handler as PermissionHandler } from "@/acp/permission"
 import { ACPSession } from "@/acp/session"
 
 type PermissionEvent = Extract<Event, { type: "permission.asked" }>
@@ -399,5 +400,127 @@ describe("acp permissions", () => {
       ["perm_1", "once"],
       ["perm_2", "always"],
     ])
+  })
+})
+
+describe("permission path failures", () => {
+  it("answers the agent when the reply it was asked to deliver could not be delivered", async () => {
+    // The regression: `handle` chained `.catch(() => {})` around `process`, so a throw anywhere
+    // inside meant the permission was simply never answered. Not rejected, not approved - never
+    // answered. The agent stays blocked on the tool for the rest of the turn, the client's dialog
+    // never resolves, and nothing anywhere says why. A hang with no cause is the worst outcome in
+    // this whole class of defect.
+    const reports: string[] = []
+    const sdk = {
+      permission: {
+        reply: () => Promise.reject(new Error("upstream gone")),
+      },
+      session: { message: () => Promise.resolve({ data: undefined }) },
+    } as unknown as OpencodeClient
+    const session = makeSessionService()
+    await createSession(session, "ses_x")
+    const connection = {
+      requestPermission: () => Promise.resolve({ outcome: { outcome: "selected", optionId: "once" } }),
+      sessionUpdate: () => Promise.resolve(),
+    } as unknown as Pick<AgentSideConnection, "requestPermission" | "sessionUpdate">
+    const handler = new PermissionHandler(
+      { sdk, connection, session },
+      { report: (message: string) => reports.push(message) },
+    )
+
+    handler.handle(permissionAsked("ses_x", "per_1"))
+
+    // The user is told, and the failure names the permission so it can be found.
+    await pollUntil(() => reports.length > 0, "a failed permission reply was not reported")
+    expect(reports[0]).toContain("per_1")
+    expect(reports[0]).toContain("upstream gone")
+  })
+
+  it("does not leave an edit approved but never written, when the client rejects the write", async () => {
+    // `void this.input.connection.writeTextFile({...})` is a floating promise. When the client
+    // refuses it the rejection is unhandled, and the user has already approved an edit that is
+    // never applied to their buffer - they saw the diff, said yes, and the file on their side is
+    // untouched.
+    const reports: string[] = []
+    const writes: Array<{ path: string; content: string }> = []
+    const dir = await mkdtemp(path.join(tmpdir(), "acp-perm-"))
+    cleanupDirs.push(dir)
+    const file = path.join(dir, "target.ts")
+    await Bun.write(file, "const a = 1\n")
+
+    const sdk = {
+      permission: { reply: () => Promise.resolve({ data: true }) },
+      session: { message: () => Promise.resolve({ data: undefined }) },
+    } as unknown as OpencodeClient
+    const session = makeSessionService()
+    await createSession(session, "ses_y")
+    const connection = {
+      requestPermission: () => Promise.resolve({ outcome: { outcome: "selected", optionId: "once" } }),
+      sessionUpdate: () => Promise.resolve(),
+      writeTextFile: (params: { path: string; content: string }) => {
+        writes.push({ path: params.path, content: params.content })
+        return Promise.reject(new Error("client refused the write"))
+      },
+    } as unknown as Pick<AgentSideConnection, "requestPermission" | "sessionUpdate" | "writeTextFile">
+    const handler = new PermissionHandler(
+      { sdk, connection, session },
+      { report: (message: string) => reports.push(message) },
+    )
+
+    handler.handle(
+      permissionAsked("ses_y", "per_2", {
+        permission: "edit",
+        metadata: { filepath: file, diff: createTwoFilesPatch("a", "b", "const a = 1\n", "const a = 2\n") },
+      }),
+    )
+
+    await pollUntil(() => reports.length > 0, "a failed write of the proposed edit was not reported")
+    expect(reports[0]).toContain("per_2")
+    // The write was genuinely attempted, so this is a report of a refusal and not of a no-op.
+    expect(writes).toHaveLength(1)
+  })
+
+  it("reports a proposed edit whose diff could not be applied, rather than approving it blind", async () => {
+    // `applyPatch` returning false meant `writeProposedEdit` returned quietly and the reply went
+    // out as if the user had reviewed something. They approved a diff that was never shown and
+    // never written.
+    const reports: string[] = []
+    const writes: Array<{ path: string; content: string }> = []
+    const dir = await mkdtemp(path.join(tmpdir(), "acp-perm-"))
+    cleanupDirs.push(dir)
+    const file = path.join(dir, "target.ts")
+    // Content that does not match the diff's context, so applyPatch cannot apply it.
+    await Bun.write(file, "const somethingElse = 0\n")
+
+    const sdk = {
+      permission: { reply: () => Promise.resolve({ data: true }) },
+      session: { message: () => Promise.resolve({ data: undefined }) },
+    } as unknown as OpencodeClient
+    const session = makeSessionService()
+    await createSession(session, "ses_z")
+    const connection = {
+      requestPermission: () => Promise.resolve({ outcome: { outcome: "selected", optionId: "once" } }),
+      sessionUpdate: () => Promise.resolve(),
+      writeTextFile: (params: { path: string; content: string }) => {
+        writes.push(params)
+        return Promise.resolve()
+      },
+    } as unknown as Pick<AgentSideConnection, "requestPermission" | "sessionUpdate" | "writeTextFile">
+    const handler = new PermissionHandler(
+      { sdk, connection, session },
+      { report: (message: string) => reports.push(message) },
+    )
+
+    handler.handle(
+      permissionAsked("ses_z", "per_3", {
+        permission: "edit",
+        metadata: { filepath: file, diff: createTwoFilesPatch("a", "b", "const a = 1\n", "const a = 2\n") },
+      }),
+    )
+
+    await pollUntil(() => reports.length > 0, "an unapplicable proposed edit was not reported")
+    expect(reports[0]).toContain("per_3")
+    // Nothing was written: an edit that could not be computed must not be half-applied.
+    expect(writes).toEqual([])
   })
 })
