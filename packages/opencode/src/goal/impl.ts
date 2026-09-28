@@ -105,8 +105,28 @@ function mutableState(state: Schema.Schema.Type<typeof StateSchema>): State {
   return JSON.parse(JSON.stringify(state)) as State
 }
 
+/**
+ * The ONE decoder for the goal state file, and the reason it preserves unknown keys.
+ *
+ * `Schema.decodeUnknownEffect` defaults to `onExcessProperty: "ignore"`, which STRIPS any key the
+ * schema does not declare. The state file is shared by every opencode process on the machine and is
+ * re-read from disk on each mutation, so that default turns any field added after a process started
+ * into a field that process silently deletes: a long-running server decodes a goal that has the new
+ * field, drops it because its own loaded schema predates it, and the no-op comparison in `mutate`
+ * then sees a difference and writes the stripped copy back. The field is gone, permanently, with no
+ * error anywhere.
+ *
+ * That is not hypothetical - it is how the `title` field was being erased within a minute of being
+ * written, by a process that had been running since before the field existed. `preserve` means a
+ * process can only ever drop a field it understands and has decided to drop, so a field added later
+ * survives every older reader instead of being destroyed by the first one to write.
+ *
+ * It cannot rescue a process that is ALREADY running code without this option - that one keeps
+ * stripping until it is restarted. A goal-state schema change therefore requires restarting
+ * long-lived opencode sessions, which is a real operational cost of adding a field here.
+ */
 function decodeState(value: unknown) {
-  return Schema.decodeUnknownEffect(StateSchema)(value).pipe(
+  return Schema.decodeUnknownEffect(StateSchema, { onExcessProperty: "preserve" })(value).pipe(
     Effect.map(mutableState),
     Effect.map(normalizeState),
     Effect.mapError((cause) => new StateDecodeError({ cause })),
