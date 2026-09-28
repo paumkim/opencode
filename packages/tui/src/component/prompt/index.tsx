@@ -40,6 +40,7 @@ import { useRenderer, useTerminalDimensions, type JSX } from "@opentui/solid"
 import type { AssistantMessage, FilePart, UserMessage } from "@opencode-ai/sdk/v2"
 import { Locale } from "../../util/locale"
 import { errorMessage } from "../../util/error"
+import { deliverPrompt } from "./deliver"
 import { formatDuration } from "../../util/format"
 import { createColors, createFrames } from "../../ui/spinner"
 import { useDialog } from "../../ui/dialog"
@@ -1046,6 +1047,10 @@ export function Prompt(props: PromptProps) {
       sessionID = res.data.id
     }
 
+    const reportSendFailure = (title: string, message: string) => {
+      toast.show({ title, message, variant: "error" })
+    }
+
     const inputText = expandTrackedPastedText(
       store.prompt.input,
       input.extmarks.getAllForTypeId(promptPartTypeId).flatMap((extmark) => {
@@ -1079,21 +1084,33 @@ export function Prompt(props: PromptProps) {
           ]
         : []
 
+    let delivered = true
+
     if (store.mode === "shell") {
       move.startSubmit()
-      if (sharedWs) {
-        sharedWs.sendShell(sessionID, inputText, `${selectedModel.providerID}/${selectedModel.modelID}`, agent.name)
-      } else {
-        void sdk.client.session.shell({
-          sessionID,
-          agent: agent.name,
-          model: {
-            providerID: selectedModel.providerID,
-            modelID: selectedModel.modelID,
-          },
-          command: inputText,
-        })
-      }
+      delivered = deliverPrompt({
+        kind: "shell",
+        shared: sharedWs
+          ? () =>
+              sharedWs.sendShell(
+                sessionID,
+                inputText,
+                `${selectedModel.providerID}/${selectedModel.modelID}`,
+                agent.name,
+              )
+          : undefined,
+        http: () =>
+          sdk.client.session.shell({
+            sessionID,
+            agent: agent.name,
+            model: {
+              providerID: selectedModel.providerID,
+              modelID: selectedModel.modelID,
+            },
+            command: inputText,
+          }),
+        report: reportSendFailure,
+      })
       setStore("mode", "normal")
     } else if (
       inputText.startsWith("/") &&
@@ -1107,19 +1124,31 @@ export function Prompt(props: PromptProps) {
       const restOfInput = firstLineEnd === -1 ? "" : inputText.slice(firstLineEnd + 1)
       const args = firstLineArgs.join(" ") + (restOfInput ? "\n" + restOfInput : "")
 
-      if (sharedWs) {
-        sharedWs.sendCommand(sessionID, command.slice(1), args, `${selectedModel.providerID}/${selectedModel.modelID}`, agent.name, variant)
-      } else {
-        void sdk.client.session.command({
-          sessionID,
-          command: command.slice(1),
-          arguments: args,
-          agent: agent.name,
-          model: `${selectedModel.providerID}/${selectedModel.modelID}`,
-          variant,
-          parts: nonTextParts.filter((x) => x.type === "file"),
-        })
-      }
+      delivered = deliverPrompt({
+        kind: "command",
+        shared: sharedWs
+          ? () =>
+              sharedWs.sendCommand(
+                sessionID,
+                command.slice(1),
+                args,
+                `${selectedModel.providerID}/${selectedModel.modelID}`,
+                agent.name,
+                variant,
+              )
+          : undefined,
+        http: () =>
+          sdk.client.session.command({
+            sessionID,
+            command: command.slice(1),
+            arguments: args,
+            agent: agent.name,
+            model: `${selectedModel.providerID}/${selectedModel.modelID}`,
+            variant,
+            parts: nonTextParts.filter((x) => x.type === "file"),
+          }),
+        report: reportSendFailure,
+      })
     } else {
       move.startSubmit()
       if (sharedWs) {
@@ -1133,13 +1162,18 @@ export function Prompt(props: PromptProps) {
           .filter((p) => p.type === "text")
           .map((p) => p.text)
           .join("\n")
-        sharedWs.sendPrompt(sessionID, {
-          message,
-          agent: agent.name,
-          modelID: selectedModel.modelID,
-          providerID: selectedModel.providerID,
-          variant,
-          parts: textParts,
+        delivered = deliverPrompt({
+          kind: "prompt",
+          shared: () =>
+            sharedWs.sendPrompt(sessionID, {
+              message,
+              agent: agent.name,
+              modelID: selectedModel.modelID,
+              providerID: selectedModel.providerID,
+              variant,
+              parts: textParts,
+            }),
+          report: reportSendFailure,
         })
       } else {
         sdk.client.session
@@ -1169,8 +1203,25 @@ export function Prompt(props: PromptProps) {
             })
           })
       }
+      // Stays inside the prompt branch: only a prompt consumes the editor
+      // selection, so shell and command must not mark it sent.
       if (editorParts.length > 0) editor.markSelectionSent()
     }
+
+    if (!delivered) {
+      // The socket was not open, so the message went nowhere. Everything below
+      // this point clears the editor and the prompt state — doing that on a
+      // dropped send erases the text the user just typed with no way back and
+      // no sign it failed, because finishSubmit then reports a normal submit.
+      toast.show({
+        title: "Failed to send",
+        message: "the shared workspace connection dropped the message — it is still in the prompt, try again",
+        variant: "error",
+      })
+      if (finishMoveProgress) move.finishSubmit()
+      return false
+    }
+
     history.append({
       ...store.prompt,
       mode: currentMode,
