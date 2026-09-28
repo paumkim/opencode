@@ -34,6 +34,8 @@ import { useKV } from "./kv"
 import { usePermission } from "./permission"
 import { useOptionalSharedWorkspace } from "./shared-workspace"
 import { readRemote, type Read } from "../util/read-remote"
+import { mutateRemote } from "../util/mutate-remote"
+import { useToast } from "../ui/toast"
 
 const emptyConsoleState: ConsoleState = {
   consoleManagedProviders: [],
@@ -168,6 +170,7 @@ export const {
     const project = useProject()
     const sdk = useSDK()
     const sharedWs = useOptionalSharedWorkspace()
+    const toast = useToast()
 
     const fullSyncedSessions = new Set<string>()
     const syncingSessions = new Map<string, Promise<void>>()
@@ -247,13 +250,25 @@ export const {
             if (sharedWs) {
               sharedWs.sendPermissionReply(request.sessionID, request.id, "once")
             } else {
-              void sdk.client.permission.reply({
-                requestID: request.id,
-                sessionID: request.sessionID,
-                reply: "once",
-                directory,
-                workspace,
-              })
+              // Auto-approve still deserves a voice when it fails: the agent is
+              // blocked on a tool the user never sees asked for, and silence
+              // here looks like a hung session rather than a refused answer.
+              void mutateRemote(
+                () =>
+                  sdk.client.permission.reply({
+                    requestID: request.id,
+                    sessionID: request.sessionID,
+                    reply: "once",
+                    directory,
+                    workspace,
+                  }),
+                (reason) =>
+                  toast.show({
+                    variant: "error",
+                    title: "Auto-approve failed",
+                    message: `${reason} — the tool is waiting for you.`,
+                  }),
+              )
             }
             break
           }
