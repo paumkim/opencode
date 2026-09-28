@@ -289,6 +289,42 @@ describe("FanoutLifecycle", () => {
     }),
   )
 
+  // `maxLength` is a code-unit budget, but `slice` counting code units can cut
+  // between the halves of a surrogate pair and leave a LONE SURROGATE at the end
+  // of the digest, which a renderer reads back as U+FFFD.
+  it.effect("cuts a bounded digest on a character boundary", () =>
+    Effect.sync(() => {
+      const hasLoneSurrogate = (value: string) => {
+        for (let index = 0; index < value.length; index++) {
+          const code = value.charCodeAt(index)
+          const high = code >= 0xd800 && code <= 0xdbff
+          const low = code >= 0xdc00 && code <= 0xdfff
+          if (!high && !low) continue
+          if (high) {
+            const next = value.charCodeAt(index + 1)
+            if (next < 0xdc00 || next > 0xdfff) return true
+          } else return true
+          index++
+        }
+        return false
+      }
+
+      // The only space sits below limit/2, so the whole slice is kept and the
+      // emoji's high surrogate lands exactly on the cut at index 599.
+      const straddling = `short ${"y".repeat(593)}\u{1F600} tail`
+      expect(straddling.charCodeAt(599)).toBe(0xd83d)
+
+      const digest = FanoutDigest.bound(straddling, 600)
+      expect(digest).toBeDefined()
+      expect(hasLoneSurrogate(digest!)).toBe(false)
+      // The JSON round trip is what turns a lone surrogate into U+FFFD.
+      expect(JSON.parse(JSON.stringify(digest!))).toBe(digest)
+      expect(digest).not.toContain("�")
+      // An answer that fits the budget is returned whole, emoji intact.
+      expect(FanoutDigest.bound(`short ${"y".repeat(592)}\u{1F600}`, 600)).toContain("\u{1F600}")
+    }),
+  )
+
   it.effect("a worker that closes the result tag cannot write into the frame around it", () =>
     Effect.gen(function* () {
       yield* seed
