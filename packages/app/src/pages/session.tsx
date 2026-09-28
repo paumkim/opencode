@@ -103,6 +103,7 @@ import { legacySessionHref, requireServerKey, sessionHref } from "@/utils/sessio
 import { useUsageExceededDialogs } from "./session/usage-exceeded-dialogs"
 import { createSessionOwnership } from "./session/session-ownership"
 import { createSessionLineage } from "./session/session-lineage"
+import { followupDrainable } from "./session/followup-drain"
 
 type FollowupItem = FollowupDraft & { id: string }
 type FollowupEdit = Pick<FollowupItem, "id" | "prompt" | "context">
@@ -1726,9 +1727,7 @@ export default function Page() {
       const ok = await sendFollowupDraft({
         api: sdk().api.session,
         sync: sync(),
-        serverSync: serverSync(),
         draft: item,
-        optimisticBusy: item.sessionDirectory === sdk().directory,
       }).catch((err) => {
         setFollowup("failed", input.sessionID, input.id)
         fail(err)
@@ -1931,12 +1930,17 @@ export default function Page() {
 
     const item = queuedFollowups()[0]
     if (!item) return
-    if (followupBusy(sessionID)) return
-    if (followup.failed[sessionID] === item.id) return
-    if (followup.paused[sessionID]) return
-    if (isChildSession()) return
-    if (composer.blocked()) return
-    if (busy(sessionID)) return
+    if (
+      !followupDrainable({
+        working: busy(sessionID),
+        blocked: composer.blocked(),
+        child: isChildSession(),
+        paused: followup.paused[sessionID] === true,
+        failed: followup.failed[sessionID] === item.id,
+        sending: followupBusy(sessionID),
+      })
+    )
+      return
 
     void sendFollowup(sessionID, item.id)
   })
