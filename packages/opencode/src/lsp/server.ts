@@ -6,7 +6,7 @@ import { text } from "node:stream/consumers"
 import fs from "fs/promises"
 import { Filesystem } from "@/util/filesystem"
 import { errorMessage } from "@/util/error"
-import { downloadRefusal, locateViaXcrun, serverInstallFailed } from "./install-failure"
+import { downloadRefusal, locateViaXcrun, packageInstallFailed, serverInstallFailed } from "./install-failure"
 import type { InstanceContext } from "../project/instance-context"
 import { Archive } from "@/util/archive"
 import { Process } from "@/util/process"
@@ -371,14 +371,13 @@ export const Gopls: Info = {
       if (!which("go")) return
       if (flags.disableLspDownload) return
 
-      const proc = Process.spawn(["go", "install", "golang.org/x/tools/gopls@latest"], {
+      const command = "go install golang.org/x/tools/gopls@latest"
+      const install = await Process.text(["go", "install", "golang.org/x/tools/gopls@latest"], {
         env: { ...process.env, GOBIN: Global.Path.bin },
-        stdout: "pipe",
-        stderr: "pipe",
-        stdin: "pipe",
+        nothrow: true,
       })
-      const exit = await proc.exited
-      if (exit !== 0) {
+      if (install.code !== 0) {
+        packageInstallFailed("gopls", command, install.code, install.stdout, install.stderr)
         return
       }
       bin = path.join(Global.Path.bin, "gopls" + (process.platform === "win32" ? ".exe" : ""))
@@ -404,13 +403,12 @@ export const Rubocop: Info = {
         return
       }
       if (flags.disableLspDownload) return
-      const proc = Process.spawn(["gem", "install", "rubocop", "--bindir", Global.Path.bin], {
-        stdout: "pipe",
-        stderr: "pipe",
-        stdin: "pipe",
+      const command = "gem install rubocop --bindir <bin>"
+      const install = await Process.text(["gem", "install", "rubocop", "--bindir", Global.Path.bin], {
+        nothrow: true,
       })
-      const exit = await proc.exited
-      if (exit !== 0) {
+      if (install.code !== 0) {
+        packageInstallFailed("ruby-lsp", command, install.code, install.stdout, install.stderr)
         return
       }
       bin = path.join(Global.Path.bin, "rubocop" + (process.platform === "win32" ? ".exe" : ""))
@@ -755,13 +753,13 @@ async function installRoslynLanguageServer(disableLspDownload: boolean) {
   }
 
   if (disableLspDownload) return
-  const proc = Process.spawn(["dotnet", "tool", "install", "--global", "roslyn-language-server", "--prerelease"], {
-    stdout: "pipe",
-    stderr: "pipe",
-    stdin: "pipe",
-  })
-  const exit = await proc.exited
-  if (exit !== 0) {
+  const command = "dotnet tool install --global roslyn-language-server --prerelease"
+  const install = await Process.text(
+    ["dotnet", "tool", "install", "--global", "roslyn-language-server", "--prerelease"],
+    { nothrow: true },
+  )
+  if (install.code !== 0) {
+    packageInstallFailed("roslyn-language-server", command, install.code, install.stdout, install.stderr)
     return
   }
 
@@ -834,13 +832,15 @@ export const FSharp: Info = {
       }
 
       if (flags.disableLspDownload) return
-      const proc = Process.spawn(["dotnet", "tool", "install", "fsautocomplete", "--tool-path", Global.Path.bin], {
-        stdout: "pipe",
-        stderr: "pipe",
-        stdin: "pipe",
-      })
-      const exit = await proc.exited
-      if (exit !== 0) {
+      const command = "dotnet tool install fsautocomplete --tool-path <bin>"
+      const install = await Process.text(
+        ["dotnet", "tool", "install", "fsautocomplete", "--tool-path", Global.Path.bin],
+        {
+          nothrow: true,
+        },
+      )
+      if (install.code !== 0) {
+        packageInstallFailed("fsautocomplete", command, install.code, install.stdout, install.stderr)
         return
       }
 

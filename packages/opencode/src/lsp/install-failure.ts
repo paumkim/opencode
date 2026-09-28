@@ -71,3 +71,38 @@ export async function locateViaXcrun(
   }
   return bin
 }
+
+/**
+ * Reports a package-manager install that failed, and describes what the tool actually said.
+ *
+ * The four `spawn` paths that shell out to `go install`, `gem install` and `dotnet tool install` all
+ * set `stderr: "pipe"` and then never read it, returning on a non-zero exit with the reason still
+ * sitting in the pipe. `spawn` returning undefined is what `getClients` reads as "this language is
+ * not handled here", so a Go module that would not resolve because of a proxy, a missing compiler, or
+ * a `dotnet` SDK too old for a `--prerelease` package all read as "no Go in this project" - and the
+ * tool's own diagnosis, which it printed in full specifically so somebody could act on it, was thrown
+ * away.
+ *
+ * The exit code is kept alongside the output because the two say different things: a `1` with
+ * "unable to resolve module" is a network or proxy problem, and a `1` with "requires .NET 8" is a
+ * toolchain problem. Neither is visible from the other.
+ *
+ * `stdout` and `stderr` are included because which stream a tool uses for its diagnosis is not
+ * consistent: `go install` writes to stderr, some `dotnet` output lands on stdout, and reporting only
+ * one of them is how the other half of the explanation gets lost.
+ */
+export function packageInstallFailed(server: string, command: string, exit: number, out: unknown, err: unknown) {
+  // Only the empty ones are dropped. My first version also compared each extracted string against
+  // `errorMessage(text)` to catch "[object Object]", and that comparison is always false for a real
+  // message - `errorMessage` returns a string unchanged - so it filtered out every message the tool
+  // had actually printed. The guard belongs in `asText`, not in a filter over its output.
+  const detail = [asText(err), asText(out)].filter((text) => text.length > 0).join(" | ")
+  serverInstallFailed(server, `installing with \`${command}\``, detail || `exited ${exit}`)
+}
+
+function asText(value: unknown) {
+  if (value === undefined || value === null) return ""
+  if (Buffer.isBuffer(value)) return value.toString("utf8").trim()
+  if (typeof value === "string") return value.trim()
+  return errorMessage(value)
+}

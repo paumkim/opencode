@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { downloadRefusal, locateViaXcrun, serverInstallFailed } from "@/lsp/install-failure"
+import { downloadRefusal, locateViaXcrun, packageInstallFailed, serverInstallFailed } from "@/lsp/install-failure"
 
 let restore: (() => void) | undefined
 
@@ -119,5 +119,72 @@ describe("locateViaXcrun", () => {
     }))
     expect(bin).toBe("/usr/bin/sourcekit-lsp")
     expect(lines).toEqual([])
+  })
+})
+
+describe("packageInstallFailed", () => {
+  test("reports the tool's own diagnosis, which used to die in an unread pipe", async () => {
+    // The regression. All four `spawn` paths set `stderr: "pipe"` and then never read it, returning
+    // on a non-zero exit. `spawn` returning undefined is what `getClients` reads as "this language is
+    // not handled here", so a Go module that would not resolve looked exactly like "no Go in this
+    // project" - and `go install` had printed the reason in full, specifically to be acted on.
+    const lines = captureConsole()
+    packageInstallFailed(
+      "gopls",
+      "go install golang.org/x/tools/gopls@latest",
+      1,
+      Buffer.alloc(0),
+      Buffer.from("go: module lookup disabled by GOFLAGS=-mod=vendor"),
+    )
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toContain("gopls")
+    expect(lines[0]).toContain("go install")
+    expect(lines[0]).toContain("module lookup disabled by GOFLAGS")
+  })
+
+  test("includes stdout as well, because tools disagree about which stream carries the reason", () => {
+    // `go install` writes to stderr; some `dotnet` output lands on stdout. Reporting one stream only
+    // is how the other half of the explanation gets lost.
+    const lines = captureConsole()
+    packageInstallFailed(
+      "roslyn-language-server",
+      "dotnet tool install --global roslyn-language-server --prerelease",
+      1,
+      Buffer.from("error : The tool package requires .NET 8"),
+      Buffer.from(""),
+    )
+    expect(lines[0]).toContain("requires .NET 8")
+  })
+
+  test("still names the exit code when the tool said nothing useful", () => {
+    // Some failures produce no output at all. "exited 1" plus the exit code is thinner, but it is
+    // still the difference between a recorded attempt and no record.
+    const lines = captureConsole()
+    packageInstallFailed("ruby-lsp", "gem install rubocop --bindir <bin>", 137, Buffer.alloc(0), Buffer.alloc(0))
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toContain("exited 137")
+    expect(lines[0]).toContain("ruby-lsp")
+  })
+
+  test("distinguishes a toolchain problem from a network one, which read identically before", () => {
+    const lines = captureConsole()
+    packageInstallFailed("gopls", "go install ...", 1, Buffer.alloc(0), Buffer.from("dial tcp: proxy refused"))
+    packageInstallFailed(
+      "gopls",
+      "go install ...",
+      1,
+      Buffer.alloc(0),
+      Buffer.from("build constraints exclude all Go files"),
+    )
+    expect(lines).toHaveLength(2)
+    expect(lines[0]).toContain("proxy refused")
+    expect(lines[1]).toContain("build constraints")
+  })
+
+  test("describes a structured failure rather than rendering it as an object", () => {
+    const lines = captureConsole()
+    packageInstallFailed("gopls", "go install ...", 1, undefined, { message: "EACCES: permission denied" })
+    expect(lines[0]).toContain("EACCES: permission denied")
+    expect(lines[0]).not.toContain("[object Object]")
   })
 })
