@@ -696,19 +696,12 @@ function makeUsageService(sdk: OpencodeClient) {
     })
     if (!size) return
 
-    yield* Effect.promise(() =>
-      params.connection
-        .sessionUpdate({
-          sessionId: params.sessionID,
-          update: {
-            sessionUpdate: "usage_update",
-            used: UsageService.contextTokens(message),
-            size,
-            cost: { amount: UsageService.totalSessionCost(messages), currency: "USD" },
-          },
-        })
-        .catch(() => {}),
-    )
+    yield* UsageService.deliverUsageUpdate(params.connection, {
+      sessionId: params.sessionID,
+      used: UsageService.contextTokens(message),
+      size,
+      cost: { amount: UsageService.totalSessionCost(messages), currency: "USD" },
+    })
   })
 
   return UsageService.Service.of({
