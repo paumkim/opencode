@@ -23,6 +23,7 @@ import { EffectBridge } from "@/effect/bridge"
 import { InstanceState } from "@/effect/instance-state"
 import { EffectPromise } from "@/effect/promise"
 import { FSUtil } from "@opencode-ai/core/fs-util"
+import { describeReadFailure } from "@/util/filesystem"
 import { isRecord } from "@/util/record"
 import { optional } from "@opencode-ai/core/schema"
 import { ProviderTransform } from "./transform"
@@ -171,7 +172,6 @@ export function selectBedrockMantleLanguageModel(sdk: BundledSDK, modelID: strin
     return sdk.chat?.(modelID) ?? sdk.languageModel(modelID)
   return sdk.responses?.(modelID) ?? sdk.languageModel(modelID)
 }
-
 
 const ProviderApiInfo = Schema.Struct({
   id: Schema.String,
@@ -358,7 +358,40 @@ export class NoModelsError extends Schema.TaggedErrorClass<NoModelsError>()("Pro
   }
 }
 
-export type DefaultModelError = ModelNotFoundError | NoProvidersError | NoModelsError
+/**
+ * The model state file exists but could not be read, so the recently-used models are unknown.
+ *
+ * This is not the same failure as `NoProvidersError` or `NoModelsError`, and the distinction is the
+ * whole point. Both of those mean "I looked, and there is genuinely nothing to use". This means "I
+ * could not look". Treating them alike is how a transient read error turns into a silent model
+ * switch, because the caller has no way to tell a real absence from an unanswered question.
+ *
+ * The message names the consequence rather than the errno, because a reader who has just had their
+ * model changed underneath them needs to know that refusing is protecting their recent choice.
+ */
+export class ModelStateUnreadableError extends Schema.TaggedErrorClass<ModelStateUnreadableError>()(
+  "ProviderModelStateUnreadableError",
+  {
+    file: Schema.String,
+    message: Schema.String,
+  },
+) {}
+
+/**
+ * Builds the refusal, with the substitution it prevents spelled out.
+ *
+ * `defaultModel` is what decides the model for a session's first prompt, and its result is recorded
+ * on the user message and the session row. So the harm of guessing is not a wrong suggestion in a
+ * picker - it is a durable record of a model the user never chose.
+ */
+export function modelStateUnreadable(file: string, cause: unknown) {
+  return new ModelStateUnreadableError({
+    file,
+    message: `Could not read ${file} to find your recently-used models, so no default model was chosen. Refusing to continue, because falling back to another model would start the session on one you did not pick and record that choice as if you had made it. Cause: ${describeReadFailure(cause)}`,
+  })
+}
+
+export type DefaultModelError = ModelNotFoundError | NoProvidersError | NoModelsError | ModelStateUnreadableError
 export type Error = ModelNotFoundError | InitError | NoProvidersError | NoModelsError
 
 export interface Interface {
@@ -863,14 +896,17 @@ const layer = Layer.effect(
           if (!data && !hasCredentials) {
             continue
           }
-          const result = yield* fn(data ?? {
-            id: providerID,
-            name: id,
-            source: "custom",
-            env: [],
-            options: {},
-            models: {},
-          } as Info)
+          const result = yield* fn(
+            data ??
+              ({
+                id: providerID,
+                name: id,
+                source: "custom",
+                env: [],
+                options: {},
+                models: {},
+              } as Info),
+          )
           if (result && (result.autoload || providers[providerID])) {
             if (result.getModel) modelLoaders[providerID] = result.getModel
             if (result.vars) varsLoaders[providerID] = result.vars
@@ -1262,7 +1298,18 @@ const layer = Layer.effect(
       if (cfg.model) return parseModel(cfg.model)
 
       const s = yield* InstanceState.get(state)
-      const recent = yield* fs.readJson(path.join(Global.Path.state, "model.json")).pipe(
+      const modelState = path.join(Global.Path.state, "model.json")
+      // A missing file is a first run and genuinely means "no recents", so `NotFound` resolves to an
+      // empty list. Every other failure is NOT that: it means the recents are unknown, and answering
+      // with an empty list makes the loop below skip the user's most recent model and fall through to
+      // the first configured provider's first model. Since `defaultModel` decides the model for a
+      // session's first prompt and its result is recorded on the user message and the session row,
+      // that substitution is durable - it looks like a deliberate choice.
+      //
+      // `catchReason` rather than inspecting the error: `FSUtil` surfaces a `PlatformError` whose
+      // reason distinguishes "no such file" from EACCES/EIO. A hand-rolled `code === "ENOENT"` check
+      // would swallow every other errno and reintroduce exactly this bug.
+      const recent = yield* fs.readJson(modelState).pipe(
         Effect.map((x): { providerID: ProviderV2.ID; modelID: ModelV2.ID }[] => {
           if (!isRecord(x) || !Array.isArray(x.recent)) return []
           return x.recent.flatMap((item) => {
@@ -1272,7 +1319,10 @@ const layer = Layer.effect(
             return [{ providerID: ProviderV2.ID.make(item.providerID), modelID: ModelV2.ID.make(item.modelID) }]
           })
         }),
-        Effect.catch(() => Effect.succeed([] as { providerID: ProviderV2.ID; modelID: ModelV2.ID }[])),
+        Effect.catchReason("PlatformError", "NotFound", () =>
+          Effect.succeed([] as { providerID: ProviderV2.ID; modelID: ModelV2.ID }[]),
+        ),
+        Effect.catch((error) => Effect.fail(modelStateUnreadable(modelState, error))),
       )
       for (const entry of recent) {
         const provider = s.providers[entry.providerID]

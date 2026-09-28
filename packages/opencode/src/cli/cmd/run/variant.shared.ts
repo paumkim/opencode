@@ -13,7 +13,7 @@ import { Context, Effect, Layer, Schema } from "effect"
 import { makeRuntime } from "@/effect/run-service"
 import { Global } from "@opencode-ai/core/global"
 import { isRecord } from "@/util/record"
-import { errorMessage } from "@/util/error"
+import { describeReadFailure } from "@/util/filesystem"
 import { createSession, sessionVariant, type RunSession, type SessionMessages } from "./session.shared"
 import type { RunInput, RunProvider } from "./types"
 
@@ -54,29 +54,8 @@ export class ModelStateUnreadable extends Schema.TaggedErrorClass<ModelStateUnre
 }) {}
 
 /**
- * Describes why a read failed, reaching into a `PlatformError`'s cause.
- *
- * `errorMessage` on a `PlatformError` yields its tag and method ("NotFound: FileSystem.readFile
- * (...)") but not the underlying errno, so a `PermissionDenied` reported as "PermissionDenied" tells a
- * reader nothing they did not already know. The cause carries "EACCES: permission denied", which is
- * the part that identifies the problem.
+ * Builds the refusal, with the consequence spelled out rather than left for the reader to infer.
  */
-function describeReadFailure(cause: unknown) {
-  const message = errorMessage(cause)
-  // A `PlatformError` nests the specific failure at `reason.cause`, and that is where the errno
-  // lives. Without walking in, the message reads "PermissionDenied: FileSystem.readJson (model.json)"
-  // - which names the operation but not the cause, so a reader learns nothing they did not already
-  // know from the fact that the save failed.
-  const reason = (cause as { reason?: { cause?: unknown } } | undefined)?.reason
-  const errno = (reason?.cause ?? (cause as { cause?: unknown } | undefined)?.cause) as
-    | { code?: unknown; message?: unknown }
-    | undefined
-  if (!errno) return message
-  const detail = typeof errno.code === "string" ? errno.code : errorMessage(errno)
-  return message.includes(detail) ? message : `${message} (${detail})`
-}
-
-/** Builds the refusal, with the consequence spelled out rather than left for the reader to infer. */
 export function modelStateUnreadable(file: string, cause: unknown) {
   return new ModelStateUnreadable({
     file,
