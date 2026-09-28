@@ -86,6 +86,51 @@ describe("Worktree.remove", () => {
     { git: true },
   )
 
+  // A worktree path whose own name ends in a space is printed by git verbatim, and the porcelain
+  // parser used to `.trim()` the value after the `worktree ` prefix. That turned the path into a
+  // different directory, so `remove` could not locate the entry and took the "not a worktree of
+  // ours" branch: it cleaned the directory and returned `true`. The caller was told the worktree
+  // was removed while git still had it registered, and its branch was never deleted.
+  it.instance(
+    "removes a worktree whose path ends in a space",
+    () =>
+      Effect.gen(function* () {
+        const root = (yield* TestInstance).directory
+        const svc = yield* Worktree.Service
+        const name = `remove-trailing-space-${Date.now().toString(36)}`
+        const branch = `opencode/${name}`
+        const dir = path.join(root, "..", name, "wt   ")
+
+        yield* Effect.promise(() => fs.mkdir(path.dirname(dir), { recursive: true }))
+        yield* Effect.promise(() => $`git worktree add --no-checkout -b ${branch} ${dir}`.cwd(root).quiet())
+        yield* Effect.promise(() => $`git reset --hard`.cwd(dir).quiet())
+
+        // git reports the path exactly as given, trailing space and all.
+        const before = yield* Effect.promise(() => $`git worktree list --porcelain`.cwd(root).quiet().text())
+        expect(before.split("\n")).toContain(`worktree ${dir}`)
+
+        const ok = yield* svc.remove({ directory: dir })
+
+        expect(ok).toBe(true)
+        expect(
+          yield* Effect.promise(() =>
+            fs
+              .stat(dir)
+              .then(() => true)
+              .catch(() => false),
+          ),
+        ).toBe(false)
+
+        // The branch must be gone too: reaching the remove path at all is what deletes it, and the
+        // silently-skipped path left both the registration and the branch behind.
+        const ref = yield* Effect.promise(() =>
+          $`git show-ref --verify --quiet refs/heads/${branch}`.cwd(root).quiet().nothrow(),
+        )
+        expect(ref.exitCode).not.toBe(0)
+      }),
+    { git: true },
+  )
+
   wintest(
     "stops fsmonitor before removing a worktree",
     () =>

@@ -300,19 +300,28 @@ const layer: Layer.Layer<
     })
 
     function parseWorktreeList(text: string) {
+      // The value after a `worktree ` or `branch ` prefix is taken verbatim. Trimming it corrupts a
+      // path whose own name ends in a space -- git prints that path unquoted and unescaped, and
+      // `remove` then cannot locate the worktree, so it falls through to the branch that only
+      // cleans the directory and returns success while git still has the worktree registered.
+      //
+      // Only a trailing CR is stripped, and only from the line as a whole before the prefix is
+      // taken: `trimEnd()` would be wrong for the same reason it is wrong on the value, because the
+      // path runs to the end of the line. `startsWith` is unaffected, since the prefixes contain no
+      // whitespace of their own.
       return text
         .split("\n")
-        .map((line) => line.trim())
+        .map((line) => (line.endsWith("\r") ? line.slice(0, -1) : line))
         .reduce<{ path?: string; branch?: string }[]>((acc, line) => {
           if (!line) return acc
           if (line.startsWith("worktree ")) {
-            acc.push({ path: line.slice("worktree ".length).trim() })
+            acc.push({ path: line.slice("worktree ".length) })
             return acc
           }
           const current = acc[acc.length - 1]
           if (!current) return acc
           if (line.startsWith("branch ")) {
-            current.branch = line.slice("branch ".length).trim()
+            current.branch = line.slice("branch ".length)
           }
           return acc
         }, [])
