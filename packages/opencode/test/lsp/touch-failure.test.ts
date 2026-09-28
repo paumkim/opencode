@@ -35,7 +35,7 @@ describe("openEveryClient", () => {
     expect(reported[0]).toContain("/repo/src/a.ts")
     expect(reported[0]).toContain("server exited")
     // The consequence, which is what makes the report worth writing at all.
-    expect(reported[0]).toContain("diagnostics for this file are missing")
+    expect(reported[0]).toContain("missing rather than clean")
   })
 
   test("reports every failure when several clients are down", async () => {

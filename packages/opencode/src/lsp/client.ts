@@ -3,6 +3,7 @@ import { pathToFileURL, fileURLToPath } from "url"
 import { createMessageConnection, StreamMessageReader, StreamMessageWriter } from "vscode-jsonrpc/node"
 import type { Diagnostic as VSCodeDiagnostic } from "vscode-languageserver-types"
 import { Process } from "@/util/process"
+import { errorMessage } from "@/util/error"
 import { LANGUAGE_EXTENSIONS } from "./language"
 import { Effect, Schema } from "effect"
 import type * as LSPServer from "./server"
@@ -43,10 +44,52 @@ type WorkspaceDiagnosticReport = {
   }[]
 }
 
+/**
+ * The answer for "this pull produced nothing, and nothing went wrong". Named so the three places
+ * that return it cannot drift into returning a slightly different object, which is how the failure
+ * signal got dropped at every join before it was threaded through.
+ */
+/**
+ * What a pull returns once aggregated. Separate from `DiagnosticRequestResult` because the per-request
+ * `byFile` map is consumed by the merge and has no meaning after it - and because widening this to
+ * the full type is what forced the failure signal to be dropped.
+ */
+type DiagnosticSummary = {
+  handled: boolean
+  matched: boolean
+  failed?: string[]
+}
+
+const NOTHING_HANDLED: DiagnosticSummary = { handled: false, matched: false }
+
+/** A pull that produced no report and did not fail. Carries an empty `byFile` for the merge. */
+const NOTHING_REQUESTED: DiagnosticRequestResult = { handled: false, matched: false, byFile: new Map() }
+
 type DiagnosticRequestResult = {
   handled: boolean
   matched: boolean
   byFile: Map<string, Diagnostic[]>
+  /**
+   * Set when the pull itself could not be completed - a timeout, a refused request, a transport
+   * error. Distinct from `handled: false`, which means the server answered and had nothing to say.
+   *
+   * The two were the same value before, and the consequence is a false clean bill of health:
+   * `waitForDocumentDiagnostics` loops until `matched`, so a server that never answered simply
+   * exhausted the timeout, the caller read an empty diagnostics map, and `tool/write.ts` returned
+   * "Wrote file successfully." A file with real errors was reported as clean because the request
+   * that would have found them timed out.
+   */
+  failed?: string
+}
+
+/**
+ * Tags a diagnostics pull that could not be completed, so a failure is distinguishable from a
+ * server that answered "no diagnostics". Exported for the test that pins the two apart.
+ */
+export class DiagnosticPullFailed extends Error {
+  constructor(readonly reason: unknown) {
+    super(`diagnostics pull failed: ${errorMessage(reason)}`)
+  }
 }
 
 type CapabilityRegistration = {
@@ -292,7 +335,11 @@ export async function create(input: {
   const mergeResults = (filePath: string, results: DiagnosticRequestResult[]) => {
     const handled = results.some((result) => result.handled)
     const matched = results.some((result) => result.matched)
-    if (!handled) return { handled: false, matched: false }
+    // Collected, not dropped. A partial failure is still a failure: with one identifier's pull
+    // timing out, the other identifiers' diagnostics are incomplete, and `waitFor*` cannot tell
+    // that apart from a file that is genuinely clean. The caller reports it.
+    const failed = results.map((result) => result.failed).filter((reason) => reason !== undefined)
+    if (!handled) return failed.length ? { handled: false, matched: false, failed } : NOTHING_HANDLED
 
     const merged = new Map<string, Diagnostic[]>()
     for (const result of results) {
@@ -307,7 +354,7 @@ export async function create(input: {
       updatePullDiagnostics(target, dedupeDiagnostics(items))
     }
 
-    return { handled, matched }
+    return { handled, matched, failed: failed.length ? failed : undefined }
   }
 
   async function requestDiagnosticReport(filePath: string, identifier?: string): Promise<DiagnosticRequestResult> {
@@ -319,8 +366,9 @@ export async function create(input: {
         },
       }),
       DIAGNOSTICS_REQUEST_TIMEOUT_MS,
-    ).catch(() => null)
-    if (!report) return { handled: false, matched: false, byFile: new Map<string, Diagnostic[]>() }
+    ).catch((error) => new DiagnosticPullFailed(error))
+    if (report instanceof DiagnosticPullFailed) return noReport("textDocument/diagnostic", identifier, report)
+    if (!report) return NOTHING_REQUESTED
 
     const byFile = new Map<string, Diagnostic[]>()
     const push = (target: string, items: Diagnostic[]) => {
@@ -356,8 +404,9 @@ export async function create(input: {
         previousResultIds: [],
       }),
       DIAGNOSTICS_REQUEST_TIMEOUT_MS,
-    ).catch(() => null)
-    if (!report) return { handled: false, matched: false, byFile: new Map<string, Diagnostic[]>() }
+    ).catch((error) => new DiagnosticPullFailed(error))
+    if (report instanceof DiagnosticPullFailed) return noReport("workspace/diagnostic", identifier, report)
+    if (!report) return NOTHING_REQUESTED
 
     const byFile = new Map<string, Diagnostic[]>()
     let matched = false
@@ -404,13 +453,16 @@ export async function create(input: {
     requests: Promise<DiagnosticRequestResult>[],
     done: (results: DiagnosticRequestResult[]) => boolean,
   ) {
-    if (!requests.length) return { handled: false, matched: false }
+    if (!requests.length) return NOTHING_HANDLED
 
     const results: DiagnosticRequestResult[] = []
-    return new Promise<{ handled: boolean; matched: boolean }>((resolve) => {
+    // Typed as `DiagnosticSummary`, which carries `failed`. The old inline
+    // `{ handled: boolean; matched: boolean }` annotation is what let a pull failure stop here: the
+    // reasons were collected below and then dropped by the type.
+    return new Promise<DiagnosticSummary>((resolve) => {
       let pending = requests.length
       let resolved = false
-      const finish = (merged: { handled: boolean; matched: boolean }, force = false) => {
+      const finish = (merged: DiagnosticSummary, force = false) => {
         if (resolved) return
         if (!force && !done(results)) return
         resolved = true
@@ -435,7 +487,7 @@ export async function create(input: {
   // not add a post-match settle/debounce delay. See PR #23771.
   async function requestDocumentDiagnostics(filePath: string) {
     const state = documentPullState()
-    if (!state.supported) return { handled: false, matched: false }
+    if (!state.supported) return NOTHING_HANDLED
     return requestDiagnostics(
       filePath,
       [
@@ -449,7 +501,8 @@ export async function create(input: {
   async function requestFullDiagnostics(filePath: string) {
     const documentState = documentPullState()
     const workspaceState = workspacePullState()
-    if (!documentState.supported && !workspaceState.supported) return { handled: false, matched: false }
+    if (!documentState.supported && !workspaceState.supported)
+      return { handled: false, matched: false, failed: undefined }
     return mergeResults(
       filePath,
       await Promise.all([
@@ -525,17 +578,20 @@ export async function create(input: {
       timeout: DIAGNOSTICS_DOCUMENT_WAIT_TIMEOUT_MS,
     })
 
+    const failed: string[] = []
     while (Date.now() - startedAt < DIAGNOSTICS_DOCUMENT_WAIT_TIMEOUT_MS) {
       const result = await requestDocumentDiagnostics(request.path)
-      if (result.matched) return
+      if (result.failed) failed.push(...result.failed)
+      if (result.matched) return failed.length ? failed : undefined
       const remaining = DIAGNOSTICS_DOCUMENT_WAIT_TIMEOUT_MS - (Date.now() - startedAt)
-      if (remaining <= 0) return
+      if (remaining <= 0) return failed.length ? failed : undefined
       const next = await Promise.race([
         pushWait.then((ready) => (ready ? "push" : ("timeout" as const))),
         waitForRegistrationChange(remaining).then((changed) => (changed ? "registration" : ("timeout" as const))),
       ])
-      if (next !== "registration") return
+      if (next !== "registration") return failed.length ? failed : undefined
     }
+    return failed.length ? failed : undefined
   }
 
   async function waitForFullDiagnostics(request: { path: string; version: number; after?: number }) {
@@ -547,17 +603,20 @@ export async function create(input: {
       timeout: DIAGNOSTICS_FULL_WAIT_TIMEOUT_MS,
     })
 
+    const failed: string[] = []
     while (Date.now() - startedAt < DIAGNOSTICS_FULL_WAIT_TIMEOUT_MS) {
       const result = await requestFullDiagnostics(request.path)
-      if (result.handled || result.matched) return
+      if (result.failed) failed.push(...result.failed)
+      if (result.handled || result.matched) return failed.length ? failed : undefined
       const remaining = DIAGNOSTICS_FULL_WAIT_TIMEOUT_MS - (Date.now() - startedAt)
-      if (remaining <= 0) return
+      if (remaining <= 0) return failed.length ? failed : undefined
       const next = await Promise.race([
         pushWait.then((ready) => (ready ? "push" : ("timeout" as const))),
         waitForRegistrationChange(remaining).then((changed) => (changed ? "registration" : ("timeout" as const))),
       ])
-      if (next !== "registration") return
+      if (next !== "registration") return failed.length ? failed : undefined
     }
+    return failed.length ? failed : undefined
   }
 
   // --- Public API ---
@@ -648,14 +707,15 @@ export async function create(input: {
       return result
     },
     async waitForDiagnostics(request: { path: string; version: number; mode?: "document" | "full"; after?: number }) {
+      // The pull failure is returned rather than logged here so `touchFile` can name the file and
+      // server together. Returning it keeps the diagnostic channel's own error handling untouched.
       const normalizedPath = Filesystem.normalizePath(
         path.isAbsolute(request.path) ? request.path : path.resolve(input.directory, request.path),
       )
       if (request.mode === "document") {
-        await waitForDocumentDiagnostics({ path: normalizedPath, version: request.version, after: request.after })
-        return
+        return waitForDocumentDiagnostics({ path: normalizedPath, version: request.version, after: request.after })
       }
-      await waitForFullDiagnostics({ path: normalizedPath, version: request.version, after: request.after })
+      return waitForFullDiagnostics({ path: normalizedPath, version: request.version, after: request.after })
     },
     async shutdown() {
       connection.end()
@@ -668,3 +728,38 @@ export async function create(input: {
 }
 
 export * as LSPClient from "./client"
+
+/**
+ * Decides what a diagnostics pull that produced no report actually means.
+ *
+ * Three states, and the old code had two:
+ *
+ * - a `null` report is a real answer: the server has no diagnostics for this file.
+ * - `undefined` is the same answer for this server's report shape.
+ * - a `DiagnosticPullFailed` is the ABSENCE of an answer - a timeout, a refused request, a dead
+ *   transport. That is a missing measurement, not a clean one, and it is the state the old
+ *   `.catch(() => null)` erased. Collapsing the two is what let a server that never answered be read
+ *   as a file with no errors: `waitForDocumentDiagnostics` exhausted its timeout, the caller read an
+ *   empty diagnostics map, and `tool/write.ts` returned "Wrote file successfully." for a file with
+ *   real errors in it.
+ *
+ * The failure is carried as a tag rather than detected by inspecting a payload, because a server's
+ * error object is arbitrary data that could match any shape a heuristic looks for.
+ *
+ * The call sites guard with `instanceof` first, which is what narrows a real report shape. That
+ * guard and the old `if (!report)` check are the same test in the old code, which is why the failure
+ * was invisible: the one line that kept the type honest was the line that hid the timeout.
+ *
+ * Exported so this decision - the whole defect - is directly testable without a language server.
+ */
+export function noReport(method: string, identifier: string | undefined, report: unknown): DiagnosticRequestResult {
+  if (report instanceof DiagnosticPullFailed) {
+    return {
+      handled: false,
+      matched: false,
+      byFile: new Map<string, Diagnostic[]>(),
+      failed: `${method}${identifier ? ` (${identifier})` : ""}: ${errorMessage(report.reason)}`,
+    }
+  }
+  return { handled: false, matched: false, byFile: new Map<string, Diagnostic[]>() }
+}
