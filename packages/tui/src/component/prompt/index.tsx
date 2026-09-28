@@ -57,7 +57,7 @@ import { OPENCODE_BASE_MODE, useBindings, useCommandShortcut, useLeaderActive, u
 import { useTuiConfig } from "../../config"
 import { usePromptWorkspace } from "./workspace"
 import { usePromptMove } from "./move"
-import { readLocalAttachment } from "./local-attachment"
+import { readLocalAttachment, LocalAttachmentUnreadableError } from "./local-attachment"
 import { useLocation } from "../../context/location"
 import { GoalBar } from "./goal-bar"
 
@@ -1289,7 +1289,23 @@ export function Prompt(props: PromptProps) {
     const filepath = pastedFilepath(pastedContent, terminalEnvironment.platform)
     const isUrl = /^(https?):\/\//.test(filepath)
     if (!isUrl) {
-      const attachment = await readLocalAttachment(filepath)
+      // A file that could not be read is reported rather than quietly becoming text. The text still
+      // lands below, because losing the user's paste is worse than inserting its path - but it used to
+      // insert the path with no word at all, so a failed image read produced a prompt the agent
+      // answered as though no image had been attached.
+      const attachment = await readLocalAttachment(filepath).catch((error) => {
+        // `toast` is used directly rather than the submit handler's `reportSendFailure`, which is
+        // scoped inside that handler and not visible from here.
+        toast.show({
+          title: "Could not attach file",
+          message:
+            error instanceof LocalAttachmentUnreadableError
+              ? `${path.basename(filepath)} was not attached. ${error.message}`
+              : `Reading ${path.basename(filepath)} failed. It was inserted as text instead.`,
+          variant: "error",
+        })
+        return undefined
+      })
       const filename = path.basename(filepath)
       if (attachment?.type === "text") {
         pasteText(attachment.content, `[SVG: ${filename ?? "image"}]`)
