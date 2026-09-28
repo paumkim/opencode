@@ -529,6 +529,44 @@ it.effect("logs global update diagnostics once without exposing values", () =>
   ),
 )
 
+// The legacy TOML migration used to end in `.catch(() => {})`, so a `config`
+// file that would not import left the user on defaults with no provider, no
+// model and nothing to explain it. `loadGlobal` still succeeded, so even the
+// caller's "failed to load global config" log never fired — and because the
+// file is never removed, it repeated silently on every launch.
+it.effect("logs a legacy config it could not migrate instead of silently ignoring it", () =>
+  Effect.gen(function* () {
+    const dir = yield* tmpdirScoped()
+    const legacy = path.join(dir, "config")
+    yield* FSUtil.use.writeWithDirs(legacy, "this is = = not valid toml [[[")
+    const messages: unknown[] = []
+    const result = yield* withGlobalConfigDir(
+      dir,
+      Config.use.getGlobal().pipe(
+        Effect.provide(
+          Logger.layer([
+            Logger.make<unknown, void>((options) => {
+              messages.push(options.message)
+            }),
+          ]),
+        ),
+      ),
+    )
+    // A stale config file must never stop startup, so the load still succeeds
+    // and still returns no legacy values. What it must not do is say nothing.
+    expect(result.username).toBeUndefined()
+    const warnings = messages.filter(
+      (item) => Array.isArray(item) && item[0] === "failed to migrate legacy config, ignoring it",
+    )
+    expect(warnings.length).toBe(1)
+    expect(JSON.stringify(warnings)).toContain(legacy)
+    // Left in place deliberately, so the next launch tries again rather than
+    // silently losing the config forever — and untouched, not half-migrated.
+    expect(yield* FSUtil.use.existsSafe(legacy)).toBe(true)
+    expect(yield* FSUtil.use.readFileStringSafe(legacy)).toContain("not valid toml")
+  }),
+)
+
 const updateFixtures = path.join(import.meta.dir, "fixtures/v2-compat")
 const globalInputs = [...new Bun.Glob("update-global/*-input.{json,jsonc}").scanSync({ cwd: updateFixtures })].sort()
 const projectInputs = [...new Bun.Glob("update-project/*-input.json").scanSync({ cwd: updateFixtures })].sort()
