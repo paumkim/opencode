@@ -389,7 +389,17 @@ export function Prompt(props: PromptProps) {
         run: async (ctx: CommandContext<Renderable, KeyEvent>) => {
           ctx.event.preventDefault()
           ctx.event.stopPropagation()
-          const content = await clipboard.read?.()
+          // Previously a failed read left `content` undefined and the command fell off the end having
+          // done nothing at all - no attachment, no text, no word. For a screenshot on the clipboard
+          // with no wl-paste/xclip installed, that is the ordinary path.
+          const content = await clipboard.read?.().catch((error) => {
+            toast.show({
+              title: "Could not paste from the clipboard",
+              message: error instanceof Error ? error.message : "The clipboard could not be read.",
+              variant: "error",
+            })
+            return undefined
+          })
           if (content?.mime.startsWith("image/")) {
             await pasteAttachment({
               filename: "clipboard",
