@@ -117,6 +117,7 @@ type SyncStore = {
     session_status?: string
     provider_auth?: string
     vcs?: string
+    session?: string
   }
 }
 
@@ -188,10 +189,36 @@ export const {
       }
     }
 
-    function listSessions() {
-      return sdk.client.session
-        .list({ start: Date.now() - 30 * 24 * 60 * 60 * 1000, ...sessionListQuery() })
-        .then((x) => (x.data ?? []).toSorted((a, b) => a.id.localeCompare(b.id)))
+    // The session list is the one read where an empty answer is most damaging:
+    // it used to be `x.data ?? []`, so a failed `session.list` resolved to "you
+    // have no sessions" rather than "we could not ask". The user sees the list
+    // they are working in empty out, which for a real project reads as lost work.
+    // Return the outcome so callers can keep what they know.
+    async function listSessions() {
+      return readRemote(
+        () => sdk.client.session.list({ start: Date.now() - 30 * 24 * 60 * 60 * 1000, ...sessionListQuery() }),
+        [],
+      )
+    }
+
+    /**
+     * Writes a session-list outcome to the store. A failure records the reason
+     * and leaves the known sessions alone; only a real answer replaces the list.
+     */
+    function applySessions(result: Read<Session[]>) {
+      batch(() => {
+        if (result.ok) {
+          setStore("session", reconcile(result.data.toSorted((a, b) => a.id.localeCompare(b.id))))
+          setStore("unreadable", "session", undefined)
+          return
+        }
+        setStore("unreadable", "session", result.reason)
+      })
+    }
+
+    /** Reads the session list and applies it, never replacing known sessions with a failure. */
+    async function applySessionList() {
+      applySessions(await listSessions())
     }
 
     event.subscribe((event, { directory, workspace }) => {
@@ -548,7 +575,7 @@ export const {
               setStore("console_state", reconcile(consoleState))
               setStore("agent", reconcile(agents))
               setStore("config", reconcile(config))
-              if (sessions !== undefined) setStore("session", reconcile(sessions))
+              if (sessions !== undefined) applySessions(sessions)
             })
           })
         })
@@ -571,7 +598,7 @@ export const {
             })
           }
           void Promise.all([
-            ...(args.continue ? [] : [sessionListPromise.then((sessions) => setStore("session", reconcile(sessions)))]),
+            ...(args.continue ? [] : [sessionListPromise.then(applySessions)]),
             consoleStatePromise.then((consoleState) => setStore("console_state", reconcile(consoleState))),
             readRemote(() => sdk.client.command.list({ workspace }), []).then((x) => {
               if (x.ok) setStore("command", reconcile(x.data))
@@ -651,8 +678,7 @@ export const {
           return sessionListQuery()
         },
         async refresh() {
-          const list = await listSessions()
-          setStore("session", reconcile(list))
+          await applySessionList()
         },
         status(sessionID: string) {
           const session = result.session.get(sessionID)
