@@ -227,6 +227,13 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
           draft.error = event.data.error
         })
       },
+      // Execution phases are about the Session, not about a message. They are
+      // recorded so a client can be told when a Session went idle, and project
+      // to nothing here.
+      "session.execution.started": () => Effect.void,
+      "session.execution.succeeded": () => Effect.void,
+      "session.execution.failed": () => Effect.void,
+      "session.execution.interrupted": () => Effect.void,
       "session.next.text.started": (event) => {
         return updateOwnedAssistant(event.data.assistantMessageID, (draft) => {
           draft.content.push(

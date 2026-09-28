@@ -960,6 +960,10 @@ export function createServerSession(
     //   if (info) remember({ ...info, time: { ...info.time, archived: event.created, updated: event.created } })
     //   evict([sessionID])
     // }
+    // The v2 runtime's busy/idle boundary, published by the run coordinator.
+    // This is the ONLY server-driven reset of the optimistic latch a submit
+    // used to set, so if it stops arriving the session reads as busy forever and
+    // its queued follow-ups never drain.
     if (event.type === "session.execution.started") setData("session_status", sessionID, { type: "busy" })
     if (
       event.type === "session.execution.succeeded" ||

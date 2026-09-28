@@ -194,6 +194,53 @@ export namespace Step {
   export type Failed = typeof Failed.Type
 }
 
+/**
+ * Durable busy/idle for a Session's execution.
+ *
+ * The v1 runtime published a `session.status` event; the v2 runner published
+ * nothing equivalent, so a client had no server-driven way to learn that a turn
+ * had finished and latched busy for the life of the page. These come from the run
+ * coordinator when a Session gains its first execution and when it releases its
+ * last one, so the answer is durable and survives a reconnect.
+ *
+ * `Started` is the only one of the four that is safe to infer from anything
+ * else. Every terminal phase ends the busy window, including an interrupt.
+ */
+export namespace Execution {
+  const ExecutionBase = { sessionID: SessionID }
+
+  export const Started = Event.define({
+    type: "session.execution.started",
+    ...options,
+    schema: ExecutionBase,
+  })
+  export type Started = typeof Started.Type
+
+  export const Succeeded = Event.define({
+    type: "session.execution.succeeded",
+    ...options,
+    schema: ExecutionBase,
+  })
+  export type Succeeded = typeof Succeeded.Type
+
+  export const Failed = Event.define({
+    type: "session.execution.failed",
+    ...options,
+    schema: { ...ExecutionBase, error: UnknownError },
+  })
+  export type Failed = typeof Failed.Type
+
+  export const Interrupted = Event.define({
+    type: "session.execution.interrupted",
+    ...options,
+    schema: {
+      ...ExecutionBase,
+      reason: Schema.Union([Schema.Literal("user"), Schema.Literal("shutdown"), Schema.Literal("superseded")]),
+    },
+  })
+  export type Interrupted = typeof Interrupted.Type
+}
+
 export namespace Text {
   export const Started = Event.define({
     type: "session.next.text.started",
@@ -458,6 +505,10 @@ export const DurableDefinitions = Event.inventory(
   Step.Started,
   Step.Ended,
   Step.Failed,
+  Execution.Started,
+  Execution.Succeeded,
+  Execution.Failed,
+  Execution.Interrupted,
   Text.Started,
   Text.Ended,
   Tool.Input.Started,
@@ -489,6 +540,10 @@ export const Definitions = Event.inventory(
   Step.Started,
   Step.Ended,
   Step.Failed,
+  Execution.Started,
+  Execution.Succeeded,
+  Execution.Failed,
+  Execution.Interrupted,
   Text.Started,
   Text.Delta,
   Text.Ended,

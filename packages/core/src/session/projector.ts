@@ -386,6 +386,13 @@ const layer = Layer.effectDiscard(
     yield* events.project(SessionEvent.Step.Started, (event) => run(db, event))
     yield* events.project(SessionEvent.Step.Ended, (event) => run(db, event))
     yield* events.project(SessionEvent.Step.Failed, (event) => run(db, event))
+    // Execution phases carry no message; `run` is still the projection entry
+    // point so they land in the same commit as everything else on the
+    // aggregate.
+    yield* events.project(SessionEvent.Execution.Started, (event) => run(db, event))
+    yield* events.project(SessionEvent.Execution.Succeeded, (event) => run(db, event))
+    yield* events.project(SessionEvent.Execution.Failed, (event) => run(db, event))
+    yield* events.project(SessionEvent.Execution.Interrupted, (event) => run(db, event))
     yield* events.project(SessionEvent.Text.Started, (event) => run(db, event))
     yield* events.project(SessionEvent.Text.Ended, (event) => run(db, event))
     yield* events.project(SessionEvent.Tool.Input.Started, (event) => run(db, event))

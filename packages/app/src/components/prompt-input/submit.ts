@@ -43,11 +43,9 @@ export type FollowupDraft = {
 
 type FollowupSendInput = {
   api: DirectorySDK["api"]["session"]
-  serverSync: ServerSync
   sync: DirectorySync
   draft: FollowupDraft
   messageID?: string
-  optimisticBusy?: boolean
   before?: () => Promise<boolean> | boolean
 }
 
@@ -55,19 +53,19 @@ const draftText = (prompt: Prompt) => prompt.map((part) => ("content" in part ? 
 
 const draftImages = (prompt: Prompt) => prompt.filter((part): part is ImageAttachmentPart => part.type === "image")
 
+/**
+ * The session's busy state is the server's to say.
+ *
+ * It used to be latched here, optimistically, on every submit. Nothing ever
+ * unset it, because the only server-driven reset listened for events the v2
+ * runtime never published -- so on protocol v2 a submitted session read as busy
+ * for the life of the page, which also held its queued follow-ups hostage. The
+ * v1 runtime publishes `session.status`; the v2 runtime publishes
+ * `session.execution.*`. Either way the answer arrives from the server.
+ */
 export async function sendFollowupDraft(input: FollowupSendInput) {
   const text = draftText(input.draft.prompt)
   const images = draftImages(input.draft.prompt)
-  const setBusy = () => {
-    if (!input.optimisticBusy) return
-    input.serverSync.session.set("session_status", input.draft.sessionID, { type: "busy" })
-  }
-
-  const setIdle = () => {
-    if (!input.optimisticBusy) return
-    input.serverSync.session.set("session_status", input.draft.sessionID, { type: "idle" })
-  }
-
   const wait = async () => {
     const ok = await input.before?.()
     if (ok === false) return false
@@ -77,37 +75,27 @@ export async function sendFollowupDraft(input: FollowupSendInput) {
   const [head, ...tail] = text.split(" ")
   const cmd = head?.startsWith("/") ? head.slice(1) : undefined
   if (cmd && input.sync.data.command.find((item) => item.name === cmd)) {
-    setBusy()
-    try {
-      if (!(await wait())) {
-        setIdle()
-        return false
-      }
-
-      const messageID = Identifier.ascending("message")
-      await input.api.command({
-        sessionID: input.draft.sessionID,
-        id: messageID,
-        command: cmd,
-        arguments: tail.join(" "),
-        agent: input.draft.agent,
-        model: {
-          id: input.draft.model.modelID,
-          providerID: input.draft.model.providerID,
-          variant: input.draft.variant,
-        },
-        files: await Promise.all(
-          images.map(async (attachment) => ({
-            uri: await blobDataUrl(attachment.blob, attachment.mime),
-            name: attachment.filename,
-          })),
-        ),
-      })
-      return true
-    } catch (err) {
-      setIdle()
-      throw err
-    }
+    if (!(await wait())) return false
+    const messageID = Identifier.ascending("message")
+    await input.api.command({
+      sessionID: input.draft.sessionID,
+      id: messageID,
+      command: cmd,
+      arguments: tail.join(" "),
+      agent: input.draft.agent,
+      model: {
+        id: input.draft.model.modelID,
+        providerID: input.draft.model.providerID,
+        variant: input.draft.variant,
+      },
+      files: await Promise.all(
+        images.map(async (attachment) => ({
+          uri: await blobDataUrl(attachment.blob, attachment.mime),
+          name: attachment.filename,
+        })),
+      ),
+    })
+    return true
   }
 
   const messageID = input.messageID ?? Identifier.ascending("message")
@@ -151,17 +139,11 @@ export async function sendFollowupDraft(input: FollowupSendInput) {
       messageID,
     })
 
-  batch(() => {
-    setBusy()
-    add()
-  })
+  batch(add)
 
   try {
     if (!(await wait())) {
-      batch(() => {
-        setIdle()
-        remove()
-      })
+      batch(remove)
       return false
     }
 
@@ -199,10 +181,7 @@ export async function sendFollowupDraft(input: FollowupSendInput) {
     })
     return true
   } catch (err) {
-    batch(() => {
-      setIdle()
-      remove()
-    })
+    batch(remove)
     throw err
   }
 }
@@ -516,7 +495,6 @@ export function createPromptSubmit(input: PromptSubmitInput) {
       if (customCommand) {
         clearInput()
         const messageID = Identifier.ascending("message")
-        serverSync().session.set("session_status", session.id, { type: "busy" })
         sdk()
           .api.session.command({
             sessionID: session.id,
@@ -533,7 +511,6 @@ export function createPromptSubmit(input: PromptSubmitInput) {
             ),
           })
           .catch((err) => {
-            serverSync().session.set("session_status", session.id, { type: "idle" })
             showToast({
               title: language.t("prompt.toast.commandSendFailed.title"),
               description: formatServerError(err, language.t, language.t("common.requestFailed")),
@@ -619,16 +596,11 @@ export function createPromptSubmit(input: PromptSubmitInput) {
     void sendFollowupDraft({
       api: sdk().api.session,
       sync: sync(),
-      serverSync: serverSync(),
       draft,
       messageID,
-      optimisticBusy: sessionDirectory === projectDirectory,
       before: waitForWorktree,
     }).catch((err) => {
       pending.delete(pendingKey(session.id))
-      if (sessionDirectory === projectDirectory) {
-        sync().set("session_status", session.id, { type: "idle" })
-      }
       showToast({
         title: language.t("prompt.toast.promptSendFailed.title"),
         description: errorMessage(err),
