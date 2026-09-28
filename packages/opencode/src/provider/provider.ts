@@ -383,6 +383,39 @@ interface State {
   varsLoaders: Record<string, CustomVarsLoader>
 }
 
+/**
+ * Fill `${name}` placeholders in a provider base URL, preferring the provider's
+ * `vars` loader over the process environment, and leaving anything unresolved
+ * in place.
+ *
+ * Resolution is a single pass with a replacer *function*, for two reasons that
+ * both corrupted the URL:
+ *
+ * - The value must be inserted literally. A string replacement is a
+ *   `$-pattern`, so a `$&`, `$$`, `` $` `` or `$'` in a loader-supplied value
+ *   (an API key, account id, region) was substituted instead of written, and
+ *   the two anchor forms spliced the rest of the URL in mid-value.
+ * - Values must not be rescanned. Substituting one var at a time meant a value
+ *   that itself contained a `${other}` placeholder was rewritten by that other
+ *   var -- or by the environment pass below. With `vars.a = "X${b}Y"`, a URL of
+ *   `https://h/${a}/${b}` resolved to `https://h/XINJECTEDY/INJECTED` instead
+ *   of keeping `X${b}Y` intact. A single pass cannot revisit what it just wrote.
+ *
+ * Extracted so this is testable directly; it was inline in the model loader,
+ * where the `vars` branch had no coverage at all.
+ */
+export function resolveBaseURL(
+  url: string,
+  vars: Record<string, string> | undefined,
+  envs: Record<string, string | undefined>,
+) {
+  return url.replace(/\$\{([^}]+)\}/g, (item, key) => {
+    const name = String(key)
+    if (vars && name in vars) return vars[name]
+    return envs[name] ?? item
+  })
+}
+
 export class Service extends Context.Service<Service, Interface>()("@opencode/Provider") {}
 
 export const use = serviceUse(Service)
@@ -989,24 +1022,11 @@ const layer = Layer.effect(
         }
 
         const baseURL = iife(() => {
-          let url =
+          const url =
             typeof options["baseURL"] === "string" && options["baseURL"] !== "" ? options["baseURL"] : model.api.url
           if (!url) return
-
           const loader = s.varsLoaders[model.providerID]
-          if (loader) {
-            const vars = loader(options)
-            for (const [key, value] of Object.entries(vars)) {
-              const field = "${" + key + "}"
-              url = url.replaceAll(field, value)
-            }
-          }
-
-          url = url.replace(/\$\{([^}]+)\}/g, (item, key) => {
-            const val = envs[String(key)]
-            return val ?? item
-          })
-          return url
+          return resolveBaseURL(url, loader ? loader(options) : undefined, envs)
         })
 
         if (baseURL !== undefined) options["baseURL"] = baseURL
