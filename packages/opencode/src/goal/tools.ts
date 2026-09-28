@@ -15,6 +15,7 @@ import {
   updateGoalObjective,
 } from "@/goal/impl"
 import { Agent } from "@/agent/agent"
+import { errorMessage } from "@/util/error"
 import * as Tool from "@/tool/tool"
 import * as Truncate from "@/tool/truncate"
 import { zodArgs } from "@/tool/zod"
@@ -199,7 +200,9 @@ export function goalTools(deps: Deps): Record<string, Tool.Def<Schema.Decoder<un
 
   async function createGoalFromTool(input: CreateGoalArgs, ctx: { sessionID: string; agent?: string }) {
     const planningOnly = isPlanAgent(ctx.agent)
-    const sessionTokensAtCreation = await fetchSessionTokens(deps.client, ctx.sessionID).catch(() => null)
+    const sessionTokensAtCreation = await fetchSessionTokens(deps.client, ctx.sessionID, (message) =>
+      console.error(message),
+    )
     const goal = await createGoal(ctx.sessionID, input.objective, {
       ...resolveCreateGoalLimits(input, options),
       title: input.title ?? null,
@@ -214,12 +217,6 @@ export function goalTools(deps: Deps): Record<string, Tool.Def<Schema.Decoder<un
       sessionTokensAtCreation,
     })
     return JSON.stringify(planningOnly ? { goal, plan_mode_notice: PLAN_MODE_CREATE_NOTICE } : { goal }, null, 2)
-  }
-
-  async function fetchSessionTokens(client: Client, sessionID: string) {
-    const result = await client.session.messages({ path: { id: sessionID } })
-    const data = Array.isArray(result.data) ? result.data : []
-    return tokensFromMessages(data as { info?: unknown; parts?: unknown[] }[])
   }
 
   const limitArgs = goalLimitArgs
@@ -245,7 +242,9 @@ export function goalTools(deps: Deps): Record<string, Tool.Def<Schema.Decoder<un
     record_goal_completion: defineTool(
       "record_goal_completion",
       "Record one unit of work as finished on the session goal. Call this as soon as a bounded deliverable is done AND verified, with a short description of what is now true. The completed list is written into every continuation prompt, so it is how the next turn knows what is already done and can move forward instead of redoing it. Re-recording an item that is already listed is a no-op. Recording nothing across a tool-heavy turn counts as no progress and will pause the goal, so a long run must record each finished unit. A goal that has hit a safety limit still accepts records - it is not finished, and its ledger is what the resumed run reads first - so record what you completed during the wrap-up turn too. A paused or closed goal does not accept them.",
-      { item: z.string().min(1).describe("Short description of the finished work, as a statement of what is now true.") },
+      {
+        item: z.string().min(1).describe("Short description of the finished work, as a statement of what is now true."),
+      },
       deps,
       async (args, context) => {
         const goal = await recordGoalCompletion(context.sessionID, args.item)
@@ -429,4 +428,42 @@ export function goalTools(deps: Deps): Record<string, Tool.Def<Schema.Decoder<un
       async (_args, context) => JSON.stringify({ cleared: await clearGoal(context.sessionID) }, null, 2),
     ),
   }
+}
+
+/**
+ * Reads the session's cumulative token usage to anchor a new goal's `sessionTokensAtCreation`.
+ *
+ * Returns `null` when the usage could not be established, which is deliberately NOT the same as 0.
+ * `accountUsage` differences every later observation against that baseline, and `impl.ts` only
+ * re-anchors when the baseline is absent:
+ *
+ * - `null` -> `sessionTokensAtCreation` is never written, `accountUsage` takes the
+ *   `goal.sessionTokensAtCreation == null` branch and anchors a fresh zero-usage cursor. The goal
+ *   starts accounting from the first real observation.
+ * - `0` -> the baseline is a *real* number, so it is persisted and `lastSessionTokens != null` holds.
+ *   The very next observation charges `cumulative - 0`, i.e. the whole pre-existing session history
+ *   as usage the goal spent. `nonNegativeIntegerOrUndefined` keeps 0 (it is a valid non-negative
+ *   integer), so nothing later corrects it.
+ *
+ * So a failed read that resolved to 0 charged the goal for every token the session had ever used,
+ * which can immediately trip `tokenBudget` and `noProgressTokenThreshold` and pause a goal that
+ * has spent nothing. That is why the original `.catch(() => null)` was not enough: the SDK resolves
+ * a non-2xx as a result tuple carrying `error` rather than rejecting, so the catch never ran for an
+ * HTTP failure and the `error` check below is what actually separates the two states.
+ *
+ * An empty message list from a *successful* read is 0 and stays 0: a genuinely empty session has
+ * genuinely used no tokens, and that is a real answer rather than a missing measurement.
+ *
+ * Exported for the test that pins the null/0 distinction, which is invisible from the value alone
+ * in every other respect.
+ */
+export async function fetchSessionTokens(client: Client, sessionID: string, report: (message: string) => void) {
+  const result = await client.session.messages({ path: { id: sessionID } })
+  const failure = (result as { error?: unknown } | undefined)?.error
+  if (failure) {
+    report(`[goal] failed to read session usage for goal creation: ${errorMessage(failure)}`)
+    return null
+  }
+  const data = Array.isArray(result.data) ? result.data : []
+  return tokensFromMessages(data as { info?: unknown; parts?: unknown[] }[])
 }
