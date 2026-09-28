@@ -1734,30 +1734,8 @@ const layer = Layer.effect(
       }
       const agentName = cmd.agent ?? input.agent
 
-      const raw = input.arguments.match(argsRegex) ?? []
-      const args = raw.map((arg) => arg.replace(quoteTrimRegex, ""))
       const templateCommand = yield* Effect.promise(async () => cmd.template)
-
-      const placeholders = templateCommand.match(placeholderRegex) ?? []
-      let last = 0
-      for (const item of placeholders) {
-        const value = Number(item.slice(1))
-        if (value > last) last = value
-      }
-
-      const withArgs = templateCommand.replaceAll(placeholderRegex, (_, index) => {
-        const position = Number(index)
-        const argIndex = position - 1
-        if (argIndex >= args.length) return ""
-        if (position === last) return args.slice(argIndex).join(" ")
-        return args[argIndex]
-      })
-      const usesArgumentsPlaceholder = templateCommand.includes("$ARGUMENTS")
-      let template = withArgs.replaceAll("$ARGUMENTS", input.arguments)
-
-      if (placeholders.length === 0 && !usesArgumentsPlaceholder && input.arguments.trim()) {
-        template = template + "\n\n" + input.arguments
-      }
+      let template = applyCommandTemplate(templateCommand, input.arguments)
 
       const shellMatches = ConfigMarkdown.shell(template)
       if (shellMatches.length > 0) {
@@ -1966,6 +1944,53 @@ const bashRegex = /!`([^`]+)`/g
 const argsRegex = /(?:\[Image\s+\d+\]|"[^"]*"|'[^']*'|[^\s"']+)/gi
 const placeholderRegex = /\$(\d+)/g
 const quoteTrimRegex = /^["']|["']$/g
+
+/**
+ * Substitute a custom command's placeholder arguments into its template.
+ *
+ * `$1`, `$2`, ... pull in individual arguments; the highest-numbered placeholder
+ * takes the rest of the argument string so `$1` followed by trailing text still
+ * works. `$ARGUMENTS` takes the raw argument string verbatim. A template that
+ * mentions neither gets the arguments appended, so a bare template behaves like
+ * a prompt.
+ *
+ * Every substitution uses a replacer *function*. Passing a string would make the
+ * replacement a `$-pattern`, so a `$&`, ``$` ``, `$'` or `$$` in what the user
+ * typed would be substituted: `$&` and `$$` mangled their own text, and the two
+ * anchor forms spliced surrounding template text into the middle of the
+ * arguments, duplicating the prompt's own instructions. The arguments are
+ * user input and `$` is ordinary in them.
+ *
+ * Extracted so this is directly testable; `SessionPrompt.command` only needs to
+ * read the template and hand the result to the model.
+ */
+export function applyCommandTemplate(template: string, argumentsText: string): string {
+  const args = (argumentsText.match(argsRegex) ?? []).map((arg) => arg.replace(quoteTrimRegex, ""))
+
+  const placeholders = template.match(placeholderRegex) ?? []
+  let last = 0
+  for (const item of placeholders) {
+    const value = Number(item.slice(1))
+    if (value > last) last = value
+  }
+
+  const withArgs = template.replaceAll(placeholderRegex, (_, index: string) => {
+    const position = Number(index)
+    const argIndex = position - 1
+    if (argIndex >= args.length) return ""
+    if (position === last) return args.slice(argIndex).join(" ")
+    return args[argIndex]
+  })
+
+  const usesArgumentsPlaceholder = template.includes("$ARGUMENTS")
+  let result = withArgs.replaceAll("$ARGUMENTS", () => argumentsText)
+
+  if (placeholders.length === 0 && !usesArgumentsPlaceholder && argumentsText.trim()) {
+    result = result + "\n\n" + argumentsText
+  }
+
+  return result
+}
 
 export const node = LayerNode.make({
   service: Service,
