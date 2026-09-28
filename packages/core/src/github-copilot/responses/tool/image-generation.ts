@@ -1,4 +1,3 @@
-import { createProviderToolFactoryWithOutputSchema } from "@ai-sdk/provider-utils"
 import { z } from "zod/v4"
 
 export const imageGenerationArgsSchema = z
@@ -90,25 +89,4 @@ type ImageGenerationArgs = {
    * Default: auto.
    */
   size?: "auto" | "1024x1024" | "1024x1536" | "1536x1024"
-}
-
-const imageGenerationToolFactory = createProviderToolFactoryWithOutputSchema<
-  {},
-  {
-    /**
-     * The generated image encoded in base64.
-     */
-    result: string
-  },
-  ImageGenerationArgs
->({
-  id: "openai.image_generation",
-  inputSchema: z.object({}),
-  outputSchema: imageGenerationOutputSchema,
-})
-
-export const imageGeneration = (
-  args: ImageGenerationArgs = {}, // default
-) => {
-  return imageGenerationToolFactory(args)
 }
