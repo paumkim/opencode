@@ -1,9 +1,12 @@
 import { afterEach, describe, expect } from "bun:test"
+import fs from "fs/promises"
 import path from "path"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { Cause, Deferred, Effect, Exit, Fiber } from "effect"
 import { GlobalBus, type GlobalEvent } from "../../src/bus/global"
+import { Global } from "@opencode-ai/core/global"
+import { InstanceState } from "../../src/effect/instance-state"
 import { Git } from "../../src/git"
 import { InstanceBootstrap } from "../../src/project/bootstrap"
 import { InstanceStore } from "../../src/project/instance-store"
@@ -294,6 +297,96 @@ describe("Worktree", () => {
   })
 
   describe("remove edge cases", () => {
+    // `remove` takes a `directory` off the wire (`DELETE /experimental/worktree`) and, when git does
+    // not know that path, used to delete it anyway. `create` only ever places a worktree under
+    // `<data>/worktree/<projectID>`, so a path outside that root is not ours to remove -- and the
+    // delete was recursive. Verified before the fix: a plain directory holding one file came back
+    // gone while `remove` returned `true`.
+    it.instance(
+      "refuses to delete a directory outside the worktree root",
+      () =>
+        Effect.gen(function* () {
+          const test = yield* TestInstance
+          const svc = yield* Worktree.Service
+          const victim = path.join(test.directory, "not-a-worktree")
+          const data = path.join(victim, "user-data.txt")
+          yield* Effect.promise(() => fs.mkdir(victim, { recursive: true }))
+          yield* Effect.promise(() => fs.writeFile(data, "precious"))
+
+          // The path is inside the project and is a real directory, but it is not a worktree, so
+          // `locateWorktree` finds nothing -- which is exactly the case that used to delete it.
+          const ok = yield* svc.remove({ directory: victim })
+
+          expect(ok).toBe(true)
+          expect(
+            yield* Effect.promise(() =>
+              fs
+                .stat(data)
+                .then(() => true)
+                .catch(() => false),
+            ),
+          ).toBe(true)
+        }),
+      { git: true },
+    )
+
+    // The branch guarded above exists for a real case: a directory this service created, inside the
+    // root, that git no longer lists (an interrupted bootstrap, a manually pruned registration). That
+    // must still be cleaned, so the containment check is on the root, not a blanket refusal.
+    it.instance(
+      "still cleans a stale directory inside the worktree root that git does not list",
+      () =>
+        Effect.gen(function* () {
+          const svc = yield* Worktree.Service
+          const ctx = yield* InstanceState.context
+          const stale = path.join(Global.Path.data, "worktree", ctx.project.id, `stale-${Date.now().toString(36)}`)
+          yield* Effect.promise(() => fs.mkdir(stale, { recursive: true }))
+          const data = path.join(stale, "x.txt")
+          yield* Effect.promise(() => fs.writeFile(data, "x"))
+
+          const ok = yield* svc.remove({ directory: stale })
+
+          expect(ok).toBe(true)
+          expect(
+            yield* Effect.promise(() =>
+              fs
+                .stat(stale)
+                .then(() => true)
+                .catch(() => false),
+            ),
+          ).toBe(false)
+        }),
+      { git: true },
+    )
+
+    // A sibling whose name merely shares the worktree root's prefix as a string must be rejected
+    // too: `<root>` is `/…/worktree/<id>` and this is `/…/worktree-evil/…`, so a plain string
+    // `startsWith` would accept it. `FSUtil.contains` compares path components.
+    it.instance(
+      "refuses a sibling directory whose name shares the worktree root's prefix",
+      () =>
+        Effect.gen(function* () {
+          const svc = yield* Worktree.Service
+          const outside = path.join(Global.Path.data, "worktree-evil", `probe-${Date.now().toString(36)}`)
+          yield* Effect.promise(() => fs.mkdir(outside, { recursive: true }))
+          const data = path.join(outside, "keep.txt")
+          yield* Effect.promise(() => fs.writeFile(data, "precious"))
+
+          yield* svc.remove({ directory: outside })
+
+          expect(
+            yield* Effect.promise(() =>
+              fs
+                .stat(data)
+                .then(() => true)
+                .catch(() => false),
+            ),
+          ).toBe(true)
+          yield* Effect.promise(() => fs.rm(outside, { recursive: true, force: true }))
+        }),
+      { git: true },
+    )
+
     it.instance(
       "remove non-existent directory succeeds silently",
       () =>

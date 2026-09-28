@@ -414,6 +414,22 @@ const layer: Layer.Layer<
       const entry = yield* locateWorktree(entries, directory)
 
       if (!entry?.path) {
+        // Not one of git's worktrees. `create` only ever places a worktree under
+        // `<data>/worktree/<projectID>`, so anything else here is a path this service did not create,
+        // and deleting it would be an unrequested recursive delete of a caller-supplied directory --
+        // reachable through the `worktree.remove` endpoint, whose `directory` comes straight off the
+        // wire. So confirm containment before touching the filesystem at all, and treat a path
+        // outside the root as "nothing of ours is there" rather than an error: the caller's intent
+        // (remove a worktree) is already satisfied, and the `!entry.path` case already returns `true`
+        // for a directory that does not exist.
+        const root = yield* canonical(pathSvc.join(Global.Path.data, "worktree", ctx.project.id))
+        if (!FSUtil.contains(root, directory)) {
+          yield* Effect.logWarning("refusing to remove a directory outside the worktree root", {
+            directory,
+            root,
+          })
+          return true
+        }
         const directoryExists = yield* fs.exists(directory).pipe(Effect.orDie)
         if (directoryExists) {
           yield* stopFsmonitor(directory)
