@@ -362,12 +362,7 @@ const layer = Layer.effect(
           const stepSettlement = publisher.stepSettlement()
           if (stepSettlement && !publisher.hasProviderError()) {
             const endSnapshot = yield* snapshots.capture()
-            const files =
-              startSnapshot && endSnapshot
-                ? yield* snapshots
-                    .files({ from: startSnapshot, to: endSnapshot })
-                    .pipe(Effect.catch(() => Effect.succeed(undefined)))
-                : undefined
+            const files = yield* stepFileChanges(snapshots, startSnapshot, endSnapshot)
             yield* withPublication(
               events.publish(SessionEvent.Step.Ended, {
                 sessionID: session.id,
@@ -477,3 +472,37 @@ export const node = makeLocationNode({
     Database.node,
   ],
 })
+
+/**
+ * The paths a single step changed, or `undefined` when that could not be worked out.
+ *
+ * This used to be inlined as
+ * `snapshots.files({ from, to }).pipe(Effect.catch(() => Effect.succeed(undefined)))`, and the
+ * silent `undefined` was the defect. `Step.Ended.files` is the per-step list of what the step touched,
+ * so dropping it says the step changed nothing - and the user reviewing a step that edited files is
+ * shown an empty list with nothing indicating that the list is missing rather than empty.
+ *
+ * `undefined` is still the right answer when there are no snapshots to compare, because that is a
+ * real answer: snapshots disabled, or a capture that returned nothing. The distinction this helper
+ * exists to keep is between *nothing to compare* and *could not compare*.
+ *
+ * Exported so the distinction is testable without standing up the whole runner, and so the warning
+ * cannot be dropped from the call site by accident - a bare `.catch` here is exactly what made the
+ * failure invisible in the first place.
+ */
+export function stepFileChanges(
+  snapshots: Pick<Snapshot.Interface, "files">,
+  from: Snapshot.ID | undefined,
+  to: Snapshot.ID | undefined,
+) {
+  if (!from || !to) return Effect.succeed(undefined)
+  return snapshots.files({ from, to }).pipe(
+    Effect.catchCause((cause) =>
+      Effect.logWarning("could not list the files a step changed; the step will look like it changed none", {
+        from,
+        to,
+        cause,
+      }).pipe(Effect.as(undefined)),
+    ),
+  )
+}
