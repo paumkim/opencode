@@ -57,6 +57,7 @@ const READ_LABELS: Record<string, string> = {
   provider_auth: "Provider auth methods",
   vcs: "Branch",
   session: "Session list",
+  capabilities: "Feature capabilities",
 }
 
 /** Keys already given their own section above, so they are not listed twice. */
