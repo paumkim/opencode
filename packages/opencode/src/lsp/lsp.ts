@@ -8,6 +8,7 @@ import * as LSPServer from "./server"
 import { Config } from "@/config/config"
 import { Process } from "@/util/process"
 import { spawn as lspspawn } from "./launch"
+import { errorMessage } from "@/util/error"
 import { Effect, Layer, Context, Schema } from "effect"
 import { InstanceState } from "@/effect/instance-state"
 import { containsPath } from "@/project/instance-context"
@@ -390,21 +391,8 @@ const layer = Layer.effect(
     const touchFile = Effect.fn("LSP.touchFile")(function* (input: string, diagnostics?: "document" | "full") {
       yield* Effect.logInfo("touching file", { file: input })
       const clients = yield* getClients(input)
-      yield* Effect.promise(() =>
-        Promise.all(
-          clients.map(async (client) => {
-            const after = Date.now()
-            const version = await client.notify.open({ path: input })
-            if (!diagnostics) return
-            return client.waitForDiagnostics({
-              path: input,
-              version,
-              mode: diagnostics,
-              after,
-            })
-          }),
-        ).catch(() => {}),
-      )
+      // Per-client, not `Promise.all(...).catch(() => {})`: see openEveryClient for why.
+      yield* Effect.promise(() => openEveryClient(clients, input, diagnostics, console.error))
     })
 
     const diagnostics = Effect.fn("LSP.diagnostics")(function* () {
@@ -559,3 +547,65 @@ export const node = LayerNode.make({
 })
 
 export * as LSP from "./lsp"
+
+/**
+ * Opens `file` on one client and optionally waits for its diagnostics.
+ *
+ * Split out of `touchFile`'s loop so a rejection is attributable to the client that produced it -
+ * which server failed is the only thing that makes such a failure actionable, and the old
+ * `Promise.all(...).catch(() => {})` discarded it along with every other client's results.
+ */
+async function openAndWait(client: LSPClient.Info, file: string, mode: "document" | "full" | undefined) {
+  const after = Date.now()
+  const version = await client.notify.open({ path: file })
+  if (!mode) return undefined
+  return client.waitForDiagnostics({ path: file, version, mode, after })
+}
+
+/**
+ * Opens `file` on every client, isolating and reporting per-client failures.
+ *
+ * The isolation is the point, and the old `Promise.all(...).catch(() => {})` got it wrong twice over.
+ * The `.catch` discarded the reason, and because it wrapped the `all` rather than each entry, a
+ * single client whose `didOpen` failed took down the results of every client that had succeeded. A
+ * file watched by three language servers where one is down produced no diagnostics at all, and
+ * `tool/write.ts` then reports plain "Wrote file successfully." - the agent is told the file is clean
+ * because one server failed to open it. That is the same failure mode as the LSP tool answering "No
+ * results found for ..." on a request it could not make, and the same fix: report, and let the rest
+ * through.
+ *
+ * `report` is a parameter so the failure path is observable; `open` is a parameter so a test can make
+ * exactly one client fail without standing up a language server.
+ */
+export async function openEveryClient(
+  clients: readonly LSPClient.Info[],
+  file: string,
+  mode: "document" | "full" | undefined,
+  report: (message: string) => void,
+  open: (client: LSPClient.Info, file: string, mode: "document" | "full" | undefined) => Promise<unknown> = (
+    client,
+    target,
+    diagnostics,
+  ) => openAndWait(client, target, diagnostics),
+) {
+  // Each entry maps a success to `undefined` and a failure to a tagged record, so the two are told
+  // apart by the mapping rather than by inspecting a client's payload. Deciding "did this fail?" by
+  // looking for a field named `error` would report a perfectly good result carrying one as a
+  // failure - which is how a fix starts manufacturing noise. The success value is otherwise unused
+  // here: `openAndWait` returns the client's diagnostics payload, and `touchFile` only needs the
+  // side effect of having asked for them.
+  const results = await Promise.all(
+    clients.map((client) =>
+      open(client, file, mode).then(
+        () => undefined,
+        (error: unknown) => ({ client, error }),
+      ),
+    ),
+  )
+  for (const result of results) {
+    if (!result) continue
+    report(
+      `[lsp] ${result.client.serverID} failed to open ${file}, so its diagnostics for this file are missing: ${errorMessage(result.error)}`,
+    )
+  }
+}
