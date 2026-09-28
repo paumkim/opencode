@@ -78,7 +78,16 @@ export async function openWorkspaceSelect(input: {
   onSelect: (selection: WorkspaceSelection) => Promise<void> | void
 }) {
   input.dialog.clear()
-  await input.sdk.client.experimental.workspace.syncList().catch(() => undefined)
+  // Same reason as the list dialog: this read decides what the picker offers, so a failure leaves an
+  // empty list that reads as "you have no workspaces". `loadWorkspaceAdapters` immediately below
+  // reports its own failure to this same toast.
+  await input.sdk.client.experimental.workspace.syncList().catch((err: unknown) =>
+    input.toast.show({
+      title: "Could not load your workspaces",
+      message: errorMessage(err),
+      variant: "error",
+    }),
+  )
   await input.project.workspace.sync().catch(() => undefined)
   const adapters = await loadWorkspaceAdapters(input)
   if (!adapters) return

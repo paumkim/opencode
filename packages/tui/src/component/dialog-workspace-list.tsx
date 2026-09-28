@@ -88,7 +88,14 @@ export function DialogWorkspaceList() {
 
   onMount(() => {
     dialog.setSize("large")
-    void sdk.client.experimental.workspace.syncList().catch(() => undefined)
+    // The list below is built from `project.workspace.list()`, so a refresh that fails leaves the
+    // dialog showing whatever was there - usually nothing. That reads as "you have no workspaces",
+    // which is a different situation with a different response, and `remove()` a few lines above
+    // already reports the same class of failure to this same toast.
+    void sdk.client.experimental.workspace.syncList().catch((err: unknown) => {
+      toast.show({ variant: "error", title: "Could not load your workspaces", message: errorMessage(err) })
+      return undefined
+    })
     void project.workspace.sync()
   })
 
