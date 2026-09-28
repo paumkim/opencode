@@ -19,7 +19,7 @@ import { isRecord } from "@/util/record"
 import type { ConsoleState } from "@opencode-ai/core/v1/config/console-state"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { InstanceState } from "@/effect/instance-state"
-import { Context, Duration, Effect, Exit, Fiber, Layer, Option, Schema } from "effect"
+import { Cause, Context, Duration, Effect, Exit, Fiber, Layer, Option, Schema } from "effect"
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/http"
 import { EffectFlock } from "@opencode-ai/core/util/effect-flock"
 import { containsPath, type InstanceContext } from "../project/instance-context"
@@ -322,16 +322,32 @@ const layer = Layer.effect(
       const legacy = path.join(Global.Path.config, "config")
       if (existsSync(legacy)) {
         yield* Effect.promise(() =>
-          import(pathToFileURL(legacy).href, { with: { type: "toml" } })
-            .then(async (mod) => {
-              const { provider, model, ...rest } = mod.default
-              if (provider && model) result.model = `${provider}/${model}`
-              result["$schema"] = "https://opencode.ai/config.json"
-              result = mergeConfig(result, rest)
-              await fsNode.writeFile(path.join(Global.Path.config, "config.json"), JSON.stringify(result, null, 2))
-              await fsNode.unlink(legacy)
-            })
-            .catch(() => {}),
+          import(pathToFileURL(legacy).href, { with: { type: "toml" } }).then(async (mod) => {
+            const { provider, model, ...rest } = mod.default
+            if (provider && model) result.model = `${provider}/${model}`
+            result["$schema"] = "https://opencode.ai/config.json"
+            result = mergeConfig(result, rest)
+            await fsNode.writeFile(path.join(Global.Path.config, "config.json"), JSON.stringify(result, null, 2))
+            await fsNode.unlink(legacy)
+          }),
+        ).pipe(
+          // This used to end in `.catch(() => {})`, which hid every failure of
+          // the whole migration. A legacy file that will not import, or a
+          // config.json that will not be written, left the user running on
+          // defaults with no provider and no model and nothing to explain it —
+          // and because `loadGlobal` still succeeded, the caller's
+          // "failed to load global config" log never fired either. The file
+          // stays put, so it repeated silently on every launch, forever.
+          //
+          // Leaving the file alone is still right: failing startup over a stale
+          // config would be worse than ignoring it. The defect was only that it
+          // was ignored silently.
+          Effect.catchCause((cause) =>
+            Effect.logWarning("failed to migrate legacy config, ignoring it", {
+              path: legacy,
+              error: Cause.squash(cause),
+            }),
+          ),
         )
       }
 
