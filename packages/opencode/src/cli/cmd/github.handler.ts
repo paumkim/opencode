@@ -215,12 +215,30 @@ export const githubInstall = Effect.fn("Cli.github.install")(function* () {
         }
 
         // Get repo info
-        const info = await Effect.runPromise(gitSvc.run(["remote", "get-url", "origin"], { cwd: ctx.worktree })).then(
-          (x) => x.text().trim(),
-        )
+        // `project.vcs === "git"` was already established above, so reporting
+        // "could not find a git repository" for anything that goes wrong from
+        // here on is provably the wrong diagnosis. `git remote get-url` fails
+        // when the remote is simply absent — an uncloned or locally-created
+        // repo — and the old text sent people looking for a .git directory that
+        // was there all along.
+        const remote = await Effect.runPromise(gitSvc.run(["remote", "get-url", "origin"], { cwd: ctx.worktree }))
+        if (remote.exitCode !== 0) {
+          const reason = remote.stderr.toString("utf8").trim()
+          prompts.log.error(
+            reason
+              ? `Could not read the git remote "origin" in ${ctx.worktree}: ${reason}`
+              : `This repository has no "origin" remote. Add one and try again.`,
+          )
+          throw new UI.CancelledError()
+        }
+        const info = remote.text().trim()
         const parsed = parseGitHubRemote(info)
         if (!parsed) {
-          prompts.log.error(`Could not find git repository. Please run this command from a git repository.`)
+          prompts.log.error(
+            info
+              ? `The "origin" remote (${info}) is not a GitHub repository.`
+              : `The "origin" remote is empty. Set it to a GitHub URL and try again.`,
+          )
           throw new UI.CancelledError()
         }
         return { owner: parsed.owner, repo: parsed.repo, root: ctx.worktree }

@@ -59,17 +59,41 @@ export const PrCommand = effectCmd({
         const forkName = prInfo.headRepository.name
         const remoteName = forkOwner
 
-        const remotes = (yield* git.run(["remote"], { cwd: worktree })).text().trim()
-        if (!remotes.split("\n").includes(remoteName)) {
-          yield* git.run(["remote", "add", remoteName, `https://github.com/${forkOwner}/${forkName}.git`], {
+        // Everything below is best-effort enrichment of a checkout that has
+        // already succeeded, so a failure here should not abort the command.
+        // It should not be invisible either: `git.run` does not check exit
+        // codes, so without these checks a failed `remote add` still printed
+        // "Added fork remote", and a failed `--set-upstream-to` left the branch
+        // tracking nothing while the command went on to report success.
+        const remotes = yield* git.run(["remote"], { cwd: worktree })
+        if (remotes.exitCode !== 0) {
+          UI.println(
+            `Could not list git remotes, skipping fork setup: ${remotes.stderr.toString("utf8").trim() || "git remote failed"}`,
+          )
+        } else if (!remotes.text().trim().split("\n").includes(remoteName)) {
+          const add = yield* git.run(["remote", "add", remoteName, `https://github.com/${forkOwner}/${forkName}.git`], {
             cwd: worktree,
           })
-          UI.println(`Added fork remote: ${remoteName}`)
+          if (add.exitCode === 0) {
+            UI.println(`Added fork remote: ${remoteName}`)
+          } else {
+            UI.println(
+              `Failed to add fork remote ${remoteName}: ${add.stderr.toString("utf8").trim() || "git remote add failed"}`,
+            )
+          }
         }
 
-        yield* git.run(["branch", `--set-upstream-to=${remoteName}/${prInfo.headRefName}`, localBranchName], {
-          cwd: worktree,
-        })
+        const upstream = yield* git.run(
+          ["branch", `--set-upstream-to=${remoteName}/${prInfo.headRefName}`, localBranchName],
+          { cwd: worktree },
+        )
+        if (upstream.exitCode !== 0) {
+          UI.println(
+            `Failed to track ${remoteName}/${prInfo.headRefName} for ${localBranchName}: ${
+              upstream.stderr.toString("utf8").trim() || "git branch --set-upstream-to failed"
+            }`,
+          )
+        }
       }
 
       if (prInfo?.body) {
