@@ -193,9 +193,20 @@ const discoverSkills = Effect.fnUntraced(function* (
       yield* scan(state, root, EXTERNAL_SKILL_PATTERN, { dot: true, scope: "global" })
     }
 
-    const upDirs = yield* fsys
-      .up({ targets: externalDirs, start: directory, stop: worktree })
-      .pipe(Effect.catch(() => Effect.succeed([] as string[])))
+    const upDirs = yield* fsys.up({ targets: externalDirs, start: directory, stop: worktree }).pipe(
+      // `scan` above logs a directory it could not read and carries on; this was the one path in
+      // the function that failed in silence. Now that `up` tolerates a single unreadable ancestor,
+      // reaching here means the whole walk failed, and collapsing that to `[]` would say "this
+      // project has no external skills" - which is what an agent that has silently lost its
+      // project-scope skills looks like.
+      Effect.catch((error) =>
+        Effect.logError("failed to walk up for external skill directories", {
+          directory,
+          worktree,
+          error,
+        }).pipe(Effect.as([] as string[])),
+      ),
+    )
 
     for (const root of upDirs) {
       yield* scan(state, root, EXTERNAL_SKILL_PATTERN, { dot: true, scope: "project" })

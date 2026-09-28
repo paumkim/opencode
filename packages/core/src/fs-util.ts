@@ -162,7 +162,14 @@ export namespace FSUtil {
         let current = start
         while (true) {
           const search = join(current, target)
-          if (yield* fs.exists(search)) result.push(search)
+          // `existsSafe`, not `fs.exists`. This walk accumulates, so a failed probe used to abort
+          // the Effect and throw away every path found before it - and `fs.exists` only tolerates
+          // NotFound, not ENOTDIR or PermissionDenied. The probe is a question about one directory
+          // ("is there a `target` in here?"); "I could not look" has to answer no, like `isDir` and
+          // `readFileStringSafe` already do two functions above. Callers use this to decide whether
+          // a directory is a git repo and which instructions apply to it, so a walk that collapses
+          // to "nothing anywhere" is worse than one that skips a directory it could not read.
+          if (yield* existsSafe(search)) result.push(search)
           if (stop === current) break
           const parent = dirname(current)
           if (parent === current) break
@@ -177,7 +184,11 @@ export namespace FSUtil {
         while (true) {
           for (const target of options.targets) {
             const search = join(current, target)
-            if (yield* fs.exists(search)) result.push(search)
+            // Same reasoning as `findUp` above, and the same consequence if it regresses: skill
+            // discovery in @opencode-ai/opencode walks up for `.claude/skills` and `AGENTS.md`, so
+            // one unreadable ancestor used to cost the agent every project-scope skill it had
+            // already found, with nothing recorded anywhere.
+            if (yield* existsSafe(search)) result.push(search)
           }
           if (options.stop === current) break
           const parent = dirname(current)
