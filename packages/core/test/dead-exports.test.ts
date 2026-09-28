@@ -122,6 +122,20 @@ const DECLARATION = /^export\s+(?:async\s+)?(?:function|const|class|let)\s+([A-Z
 const EXTENSION = /\.[cm]?[jt]sx?$/
 const moduleName = (specifier: string) => path.basename(specifier).replace(EXTENSION, "")
 
+// Every way a module gets named in an import statement, not just the two obvious ones. All three of
+// these appear in this repo, and the form the check misses is the one that lies to it:
+//
+//   import { a } from "./x"        a named import
+//   import "./x"                   a side-effect import, the module's exports are never referenced
+//   await import("./x")            a dynamic import; the migration registry loads its steps this way
+//
+// A side-effect import has no `from` and no parens, so matching only the other two reports a module
+// that exists purely to run on load as an orphan, and reports its exports as unreferenced too --
+// since nothing can name them, that is exactly what such a module looks like. `import "./x"` is the
+// ordinary way to wire a polyfill or a registration side effect, so this gap would punish the next
+// such module rather than the check that missed it.
+const SPECIFIER = /\b(?:from\s*|import\s*(?:\(\s*)?)"([^"]+)"/g
+
 describe("no dead exports in core", () => {
   test("every exported function or const in core/src is referenced somewhere", async () => {
     const { count, counts } = await corpus()
@@ -149,12 +163,7 @@ describe("no dead exports in core", () => {
     // file imports; a core module whose basename is absent was never imported by anything. Matching
     // per file instead would be a regex per module over the whole corpus and times the test out.
     const imported = new Set<string>()
-    // Both forms: a static `from "./x"` and a dynamic `import("./x")`. The migration registry loads
-    // its steps with `import(...)`, so matching only the first form reports every migration as an
-    // orphan.
-    for (const match of text.matchAll(/(?:\bfrom\s*|\bimport\s*\()\s*"([^"]+)"/g)) {
-      imported.add(moduleName(match[1]!))
-    }
+    for (const match of text.matchAll(SPECIFIER)) imported.add(moduleName(match[1]!))
 
     const orphans: string[] = []
     for (const file of await sources()) {
