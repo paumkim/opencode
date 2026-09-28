@@ -31,6 +31,10 @@ function parseParams(body: string): Record<string, unknown> {
 // (or pasted third-party content echoed by the model) smuggles an arbitrary
 // <tool_call name="..."> that would otherwise run as a real tool part.
 // NOTE: keep in sync with the builtin tool IDs in src/tool/registry.ts.
+// test/session/pseudo-tool-call.test.ts asserts every builtin ID is listed, so
+// a tool added to the registry cannot silently miss this set. Being absent
+// costs more than it looks: strip() leaves the markup in the text, so a model
+// calling a real tool this way shows the user raw <tool_call> instead of a part.
 export const KNOWN_TOOL_CALLS: ReadonlySet<string> = new Set([
   "read",
   "write",
@@ -55,6 +59,20 @@ export const KNOWN_TOOL_CALLS: ReadonlySet<string> = new Set([
   "invalid",
   "execute",
   "agents",
+  "ghostty_terminal",
+  // Goal tools. The registry loads these unconditionally ("core: they must load
+  // regardless of the plugin configuration"), so a model that has them and then
+  // writes one out as markup was previously left with the markup on screen.
+  "create_goal",
+  "get_goal",
+  "get_goal_history",
+  "set_goal",
+  "update_goal",
+  "update_goal_status",
+  "update_goal_objective",
+  "extend_goal",
+  "record_goal_completion",
+  "clear_goal",
 ])
 
 export function isKnownToolCall(name: string): boolean {
