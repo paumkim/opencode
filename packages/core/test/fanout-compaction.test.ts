@@ -291,8 +291,8 @@ describe("FanoutContext across compaction", () => {
       expect(yield* childEvents(children)).toEqual(beforeEvents)
       for (const [index, child] of children.entries()) {
         const context = yield* store.context(child)
-        expect(context).toHaveLength(beforeContext[index]!.length)
-        expect(context).toEqual(beforeContext[index]!)
+        expect(context).toHaveLength(beforeContext[index].length)
+        expect(context).toEqual(beforeContext[index])
         expect(context.some((message) => message.type === "compaction")).toBe(false)
       }
 
@@ -301,7 +301,7 @@ describe("FanoutContext across compaction", () => {
       expect(yield* FanoutLedger.cursor(db, sessionID)).toEqual({ groups: 1, live: 2, unclaimed: 0 })
       for (const id of workerIDs) expect(yield* FanoutLedger.findWorker(db, id)).toMatchObject({ status: "live" })
       expect((yield* jobs.list()).map((job) => job.status).sort()).toEqual(["running", "running"])
-      const group = (yield* FanoutLedger.groups(db, sessionID))[0]!
+      const group = (yield* FanoutLedger.groups(db, sessionID))[0]
       expect(yield* FanoutLedger.findGroup(db, group.id)).toMatchObject({ status: "live" })
       expect((yield* FanoutLedger.groupWorkers(db, group.id)).map((worker) => worker.sessionID).sort()).toEqual(
         [...children].sort(),
@@ -362,7 +362,7 @@ describe("FanoutContext across compaction", () => {
       // fossil of the pre-compaction one: the ledger had already moved by the
       // time this turn was assembled, because a digest was claimed before the
       // parent was woken.
-      const rebuilt = State.requests[firstWith("fanout-result")]!
+      const rebuilt = State.requests[firstWith("fanout-result")]
       const crew = /(\d+) worker\(s\) live across 1 group\(s\)/.exec(system(rebuilt))
       expect(crew).not.toBeNull()
       expect(Number(crew![1])).toBeLessThanOrEqual(1)
