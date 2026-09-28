@@ -31,6 +31,7 @@ import { createComponent, createSignal, type Accessor, type Setter } from "solid
 import { createStore, reconcile } from "solid-js/store"
 import { OpencodeKeymapProvider } from "@opencode-ai/tui/keymap"
 import { mergeCatalogList } from "./catalog"
+import { errorMessage } from "@/util/error"
 import { RUN_COMMAND_PANEL_ROWS, RUN_SUBAGENT_PANEL_ROWS } from "./footer.command"
 import { SUBAGENT_INSPECTOR_ROWS } from "./footer.subagent"
 import { PROMPT_MAX_ROWS, TEXTAREA_MIN_ROWS } from "./footer.prompt"
@@ -821,6 +822,44 @@ export class RunFooter implements FooterApi {
     this.setNotice(result.status ?? "variant updated")
   }
 
+  /**
+   * Restores the model the footer showed before a switch that failed, and says why.
+   *
+   * `handleModelSelect` sets the model optimistically before the request, so a swallowed failure left
+   * the footer naming the model the user had just chosen while the next prompt went to the
+   * configured one: a user who picked a model to get out of a rate limit had no way to learn the
+   * switch never happened, and nothing on screen connected the two names.
+   */
+  private onModelChangeFailed = (
+    model: NonNullable<RunInput["model"]>,
+    previous: RunInput["model"] | undefined,
+    error: unknown,
+  ) => applyModelChangeFailure(this.modelChangeSurface(), model, previous, error)
+
+  /** The footer state a failed model switch reads and writes, gathered so a test can substitute it. */
+  private modelChangeSurface() {
+    return {
+      gone: this.isGone,
+      current: this.currentModel(),
+      restore: (model: RunInput["model"] | undefined) => this.setCurrentModel(model),
+      clearVariant: () => this.setCurrentVariant(undefined),
+      notice: (text: string) => this.setNotice(text),
+    }
+  }
+
+  /**
+   * Restores the variant and says why the switch failed.
+   *
+   * Same shape as `onModelChangeFailed`: the variant is set optimistically too, so swallowing the
+   * failure left the footer claiming a variant the next prompt would not use - and a variant can be
+   * the difference between a working model and one that refuses the request.
+   */
+  private onVariantChangeFailed = (error: unknown) => {
+    if (this.isGone) return
+    this.setCurrentVariant(undefined)
+    this.setNotice(`variant switch failed: ${errorMessage(error)}`)
+  }
+
   private handleModelSelect = (model: NonNullable<RunInput["model"]>): void => {
     if (this.isClosed) {
       return
@@ -865,7 +904,7 @@ export class RunFooter implements FooterApi {
           this.setNotice(result.status)
         }
       })
-      .catch(() => {})
+      .catch((error) => this.onModelChangeFailed(model, previous, error))
   }
 
   private handleVariantSelect = (variant: string | undefined): void => {
@@ -906,7 +945,7 @@ export class RunFooter implements FooterApi {
           this.setNotice(result.status)
         }
       })
-      .catch(() => {})
+      .catch((error) => this.onVariantChangeFailed(error))
   }
 
   private clearInterruptTimer(): void {
@@ -1131,4 +1170,57 @@ export class RunFooter implements FooterApi {
         this.flushError = error
       })
   }
+}
+
+/**
+ * Decides whether a failed model switch should roll the footer back to the previous model, and clears
+ * the variant when the restore changes model.
+ *
+ * Returns `undefined` when the footer has already moved on, which is the case that makes the
+ * rollback safe: a slow request can fail after the user has chosen a different model, and reverting
+ * then would undo a change they made. The comparison is against what is displayed NOW, not against
+ * the model the failed request was for, because those are the same thing only until the user acts
+ * again.
+ *
+ * `clearVariant` is separate because a variant belongs to a model: clearing it when the restore does
+ * not change model would discard a still-valid selection.
+ */
+export function modelRollback(
+  current: { providerID: string; modelID: string } | undefined,
+  requested: { providerID: string; modelID: string },
+  previous: { providerID: string; modelID: string } | undefined,
+) {
+  if (current?.providerID !== requested.providerID || current?.modelID !== requested.modelID) return undefined
+  const changesModel =
+    !previous || previous.providerID !== requested.providerID || previous.modelID !== requested.modelID
+  return { clearVariant: changesModel }
+}
+
+/**
+ * Applies `modelRollback` to a footer: restore the model, drop a now-invalid variant, and put the
+ * reason on screen.
+ *
+ * A free function over its dependencies so the behaviour is reachable from a test. `RunFooter` needs
+ * a renderer, a keymap and a live terminal, and a test of `modelRollback` alone passes whether or not
+ * the handler is ever called - I confirmed that by reverting the handler to `.catch(() => {})` and
+ * watching every test stay green.
+ */
+export function applyModelChangeFailure(
+  ui: {
+    gone: boolean
+    current: { providerID: string; modelID: string } | undefined
+    restore: (model: { providerID: string; modelID: string } | undefined) => void
+    clearVariant: () => void
+    notice: (text: string) => void
+  },
+  model: { providerID: string; modelID: string },
+  previous: { providerID: string; modelID: string } | undefined,
+  error: unknown,
+) {
+  if (ui.gone) return
+  const rollback = modelRollback(ui.current, model, previous)
+  if (!rollback) return
+  ui.restore(previous)
+  if (rollback.clearVariant) ui.clearVariant()
+  ui.notice(`model switch failed: ${errorMessage(error)}`)
 }
