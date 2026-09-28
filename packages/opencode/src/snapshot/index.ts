@@ -1,5 +1,6 @@
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Cause, Duration, Effect, Layer, Schedule, Schema, Semaphore, Context } from "effect"
+import { errorMessage } from "@/util/error"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
 import { formatPatch, structuredPatch } from "diff"
 import path from "path"
@@ -181,11 +182,20 @@ const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Service | C
 
         const sync = Effect.fnUntraced(function* (list: string[] = []) {
           const file = yield* excludes()
+          const current = file
+            ? yield* readForRewrite(fs.readFileString(file), (error) =>
+                Effect.logWarning("failed to read exclude file, leaving it untouched", {
+                  path: file,
+                  error: errorMessage(error),
+                }),
+              )
+            : ({ text: "", error: undefined } as const)
+          // Without the current contents the merge would be built on a guess, and the guess is
+          // "empty", so writing would delete whatever was there. Skip the write instead: the entries
+          // opencode wanted to add are re-applied on the next successful sync.
+          if (current.text === undefined) return
           const target = path.join(state.gitdir, "info", "exclude")
-          const text = [
-            file ? (yield* read(file)).trimEnd() : "",
-            ...list.map((item) => `/${item.replaceAll("\\", "/")}`),
-          ]
+          const text = [current.text.trimEnd(), ...list.map((item) => `/${item.replaceAll("\\", "/")}`)]
             .filter(Boolean)
             .join("\n")
           yield* fs.ensureDir(path.join(state.gitdir, "info")).pipe(Effect.orDie)
@@ -841,3 +851,32 @@ export const node = LayerNode.make({
 })
 
 export * as Snapshot from "."
+
+/**
+ * Reads the current contents of a file that is about to be rewritten, or reports that it cannot be.
+ *
+ * `Snapshot` reads with a catch that answers `""` on failure, which is the right default for the
+ * alternates file where "nothing chained" is a usable answer. It is the wrong default for
+ * `info/exclude`: `sync` merges the list it wants to add with whatever is already in that file and
+ * writes the result back, so a read that failed became "the file was empty" and the user's existing
+ * exclude entries were replaced with opencode's list. A transient IO error, a permission problem or a
+ * lock, and the exclude file was rewritten with their entries gone and nothing reported. Deletion is
+ * not recoverable by retrying, so this refuses to produce a body at all rather than producing the
+ * wrong one — the caller skips the write and the entries it wanted to add are re-applied on the next
+ * successful sync.
+ */
+export const readForRewrite = Effect.fnUntraced(function* <E>(
+  read: Effect.Effect<string, E>,
+  report: (error: E) => Effect.Effect<void>,
+) {
+  return yield* read.pipe(
+    Effect.map((text): { readonly text: string; readonly error: undefined } => ({ text, error: undefined })),
+    Effect.catch((error) =>
+      report(error).pipe(
+        Effect.andThen(() =>
+          Effect.succeed({ text: undefined, error } as { readonly text: undefined; readonly error: E }),
+        ),
+      ),
+    ),
+  )
+})
