@@ -440,6 +440,23 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
   const attention = createTuiAttention({ renderer, config: tuiConfig, kv })
   const clipboard = useClipboard()
 
+  /**
+   * Reports a failed fork with the server's own reason where there is one.
+   *
+   * `session.fork` answers 400 and 404, and the client resolves those as
+   * `{data: undefined, error}`; a transport failure rejects instead. Both used
+   * to end at a bare "Failed to fork session", and the rejection case had no
+   * handler at all, so a connection blip during `opencode --fork` produced an
+   * unhandled rejection and no message on screen.
+   */
+  const reportForkFailure = (error: unknown) => {
+    const reason = error === undefined ? "" : errorMessage(error)
+    toast.show({
+      message: reason ? `Failed to fork session: ${reason}` : "Failed to fork session",
+      variant: "error",
+    })
+  }
+
   const api = createTuiApi(
     createTuiApiAdapters({
       version: InstallationVersion,
@@ -574,13 +591,18 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
     if (match) {
       continued = true
       if (args.fork) {
-        void sdk.client.session.fork({ sessionID: match }).then((result) => {
-          if (result.data?.id) {
-            route.navigate({ type: "session", sessionID: result.data.id })
-          } else {
-            toast.show({ message: "Failed to fork session", variant: "error" })
-          }
-        })
+        void sdk.client.session
+          .fork({ sessionID: match })
+          .then((result) => {
+            if (result.data?.id) {
+              route.navigate({ type: "session", sessionID: result.data.id })
+            } else {
+              reportForkFailure(result.error)
+            }
+          })
+          // A transport failure never resolves with an `error`, so without this
+          // it escapes as an unhandled rejection and the user sees nothing.
+          .catch((error) => reportForkFailure(error))
       } else {
         route.navigate({ type: "session", sessionID: match })
       }
@@ -594,13 +616,16 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
   createEffect(() => {
     if (forked || sync.status !== "complete" || !args.sessionID || !args.fork) return
     forked = true
-    void sdk.client.session.fork({ sessionID: args.sessionID }).then((result) => {
-      if (result.data?.id) {
-        route.navigate({ type: "session", sessionID: result.data.id })
-      } else {
-        toast.show({ message: "Failed to fork session", variant: "error" })
-      }
-    })
+    void sdk.client.session
+      .fork({ sessionID: args.sessionID })
+      .then((result) => {
+        if (result.data?.id) {
+          route.navigate({ type: "session", sessionID: result.data.id })
+        } else {
+          reportForkFailure(result.error)
+        }
+      })
+      .catch((error) => reportForkFailure(error))
   })
 
   createEffect(
