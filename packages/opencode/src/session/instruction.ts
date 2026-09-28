@@ -10,6 +10,7 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { withTransientReadRetry } from "@/util/effect-http-client"
+import { errorMessage } from "@/util/error"
 import { Global } from "@opencode-ai/core/global"
 import type { MessageV2 } from "./message-v2"
 import type { MessageID } from "./schema"
@@ -56,6 +57,47 @@ const INSTRUCTION_CACHE_LIMIT = 512
 // large any one of them is.
 const MAX_INSTRUCTION_BYTES = 256 * 1024
 const TRUNCATION_MARKER = "\n\n[opencode: instruction truncated]"
+
+/**
+ * Reads one instruction file, serving a previously cached result when there is one.
+ *
+ * A failed read is deliberately *not* cached. It used to be: every failure was caught into `""` and
+ * that empty string was written into the cache, so one permissions error, half-written file or
+ * transient IO fault removed that instruction from the agent's context for the rest of the
+ * instance. Nothing distinguishes "this project has no such file" from "we could not read it", so
+ * the model proceeds as though the project has no rules and says so with confidence. Leaving the
+ * failure uncached means the next turn retries, and `onFailure` records why instead of dropping it.
+ *
+ * A *successful* read of an empty file is cached, because there the empty result is the truth.
+ */
+export const readInstructionFile = Effect.fnUntraced(function* <E>(
+  state: { readonly cache: Map<string, string> },
+  filepath: string,
+  read: Effect.Effect<string, E>,
+  onFailure: (filepath: string, error: E) => Effect.Effect<void>,
+) {
+  const cached = state.cache.get(filepath)
+  if (cached !== undefined) return cached
+  const outcome = yield* read.pipe(
+    Effect.map((content) => ({ content, failed: false })),
+    Effect.catch((error) =>
+      onFailure(filepath, error).pipe(Effect.andThen(() => Effect.succeed({ content: "", failed: true }))),
+    ),
+  )
+  if (outcome.failed) return ""
+  // Bound the cache. Keys are instruction-file paths discovered by walking
+  // up from the working directory, so a long-lived instance that visits many
+  // worktrees, temporary directories, or generated paths would otherwise
+  // retain a file's full contents for every path it has ever seen. Insertion
+  // order makes the oldest key the first eviction candidate, which keeps the
+  // hot ancestor-chain entries that every turn re-reads.
+  if (state.cache.size >= INSTRUCTION_CACHE_LIMIT) {
+    const oldest = state.cache.keys().next()
+    if (!oldest.done) state.cache.delete(oldest.value)
+  }
+  state.cache.set(filepath, outcome.content)
+  return outcome.content
+})
 
 /**
  * Decode at most `MAX_INSTRUCTION_BYTES`, cutting on a UTF-8 sequence boundary.
@@ -112,38 +154,33 @@ const layer: Layer.Layer<
       ),
     )
 
+    // A failed walk is indistinguishable from "no instruction file anywhere up the tree" once it
+    // resolves to `[]`, and the agent has no way to tell it is running without the project's rules.
+    // The turn still proceeds, but the reason is recorded rather than dropped.
     const relative = Effect.fnUntraced(function* (instruction: string) {
       const ctx = yield* InstanceState.context
-      if (!Flag.OPENCODE_DISABLE_PROJECT_CONFIG) {
-        return yield* fs
-          .globUp(instruction, ctx.directory, ctx.worktree)
-          .pipe(Effect.catch(() => Effect.succeed([] as string[])))
-      }
-      return yield* fs
-        .globUp(instruction, global.config, global.config)
-        .pipe(Effect.catch(() => Effect.succeed([] as string[])))
+      const walk = !Flag.OPENCODE_DISABLE_PROJECT_CONFIG
+        ? fs.globUp(instruction, ctx.directory, ctx.worktree)
+        : fs.globUp(instruction, global.config, global.config)
+      return yield* walk.pipe(
+        Effect.catch((error) =>
+          Effect.logWarning("failed to search for instruction file", {
+            instruction,
+            error: errorMessage(error),
+          }).pipe(Effect.andThen(() => Effect.succeed([] as string[]))),
+        ),
+      )
     })
 
     const read = Effect.fnUntraced(function* (filepath: string) {
       const s = yield* InstanceState.get(state)
-      const cached = s.cache.get(filepath)
-      if (cached !== undefined) return cached
-      const content = yield* fs.readFile(filepath).pipe(
-        Effect.map((bytes) => decodeInstruction(bytes)),
-        Effect.catch(() => Effect.succeed("")),
+      return yield* readInstructionFile(
+        s,
+        filepath,
+        fs.readFile(filepath).pipe(Effect.map((bytes) => decodeInstruction(bytes))),
+        (file, error) =>
+          Effect.logWarning("failed to read instruction file", { filepath: file, error: errorMessage(error) }),
       )
-      // Bound the cache. Keys are instruction-file paths discovered by walking
-      // up from the working directory, so a long-lived instance that visits many
-      // worktrees, temporary directories, or generated paths would otherwise
-      // retain a file's full contents for every path it has ever seen. Insertion
-      // order makes the oldest key the first eviction candidate, which keeps the
-      // hot ancestor-chain entries that every turn re-reads.
-      if (s.cache.size >= INSTRUCTION_CACHE_LIMIT) {
-        const oldest = s.cache.keys().next()
-        if (!oldest.done) s.cache.delete(oldest.value)
-      }
-      s.cache.set(filepath, content)
-      return content
     })
 
     const fetch = Effect.fnUntraced(function* (url: string) {

@@ -11,6 +11,7 @@ import { MessageID, PartID, SessionID } from "../../src/session/schema"
 import { Global } from "@opencode-ai/core/global"
 import { RuntimeFlags } from "../../src/effect/runtime-flags"
 import { provideInstance, provideTmpdirInstance, tmpdirScoped } from "../fixture/fixture"
+import { errorMessage } from "@/util/error"
 import { testEffect } from "../lib/effect"
 import { TestConfig } from "../fixture/config"
 import { ProviderV2 } from "@opencode-ai/core/provider"
@@ -389,4 +390,82 @@ describe("Instruction.systemPaths global config", () => {
       }).pipe(provideInstance(projectTmp), provideInstruction({ home: globalTmp, config: globalTmp }))
     }),
   )
+})
+
+// `read` used to catch every failure into `""` and then cache that empty string, so a single
+// permissions error or transient IO fault deleted the project's instructions from the agent's
+// context for the rest of the instance. Nothing distinguishes "no such file" from "could not read
+// it", so the model proceeds as though the project has no rules. The failure has to stay uncached
+// (so the next turn retries) and has to be reported (so the reason is not dropped).
+describe("Instruction.readInstructionFile", () => {
+  const state = () => ({ cache: new Map<string, string>() })
+  const report = () => {
+    const seen: { filepath: string; error: unknown }[] = []
+    return {
+      seen,
+      onFailure: (filepath: string, error: unknown) => Effect.sync(() => void seen.push({ filepath, error })),
+    }
+  }
+
+  test("caches a successful read and serves it back", async () => {
+    const s = state()
+    const { seen, onFailure } = report()
+    const first = await Effect.runPromise(
+      Instruction.readInstructionFile(s, "AGENTS.md", Effect.succeed("rules"), onFailure),
+    )
+    const second = await Effect.runPromise(
+      Instruction.readInstructionFile(s, "AGENTS.md", Effect.die("never re-read"), onFailure),
+    )
+
+    expect(first).toBe("rules")
+    expect(second).toBe("rules")
+    expect(s.cache.get("AGENTS.md")).toBe("rules")
+    expect(seen).toEqual([])
+  })
+
+  test("caches a genuinely empty file, because there the empty result is the truth", async () => {
+    const s = state()
+    const { onFailure } = report()
+    await Effect.runPromise(Instruction.readInstructionFile(s, "EMPTY.md", Effect.succeed(""), onFailure))
+    expect(s.cache.get("EMPTY.md")).toBe("")
+    expect(s.cache.has("EMPTY.md")).toBe(true)
+  })
+
+  test("does not cache a failed read, so a later turn retries and recovers", async () => {
+    const s = state()
+    const { seen, onFailure } = report()
+    const failing = Effect.fail(new Error("EACCES: permission denied"))
+
+    expect(await Effect.runPromise(Instruction.readInstructionFile(s, "AGENTS.md", failing, onFailure))).toBe("")
+    expect(s.cache.has("AGENTS.md")).toBe(false)
+
+    // The retry is what makes this recoverable: a transient fault no longer poisons the session.
+    const recovered = await Effect.runPromise(
+      Instruction.readInstructionFile(s, "AGENTS.md", Effect.succeed("rules"), onFailure),
+    )
+    expect(recovered).toBe("rules")
+    expect(s.cache.get("AGENTS.md")).toBe("rules")
+  })
+
+  test("reports the reason a read failed instead of dropping it", async () => {
+    const s = state()
+    const { seen, onFailure } = report()
+    await Effect.runPromise(
+      Instruction.readInstructionFile(s, "AGENTS.md", Effect.fail(new Error("EACCES")), onFailure),
+    )
+    expect(seen).toHaveLength(1)
+    expect(seen[0]?.filepath).toBe("AGENTS.md")
+    expect((seen[0]?.error as Error).message).toBe("EACCES")
+  })
+
+  test("reports a non-Error failure reason rather than rendering it as {}", async () => {
+    const s = state()
+    const { seen, onFailure } = report()
+    await Effect.runPromise(
+      Instruction.readInstructionFile(s, "AGENTS.md", Effect.fail({ code: "ETIMEDOUT" }), onFailure),
+    )
+    expect(seen).toHaveLength(1)
+    // The trap this guards: a plain object reason must not be stringified into a useless "{}".
+    expect(errorMessage(seen[0]?.error)).not.toBe("{}")
+  })
 })
