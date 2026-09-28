@@ -102,7 +102,18 @@ function cleanupOwnerIndex(owner: symbol) {
   for (const [name, value] of mcpNameToOwner) if (value === owner) mcpNameToOwner.delete(name)
 }
 
-function release(owner: symbol) {
+/**
+ * Hand an owner from `ensureRunning` back without waiting for a callback.
+ *
+ * `ensureRunning` takes a reference on a listener that stays bound to its port
+ * until the last owner releases it. The callback path releases through
+ * `waitForCallback`'s timeout or `handleRequest`, so a caller that started a
+ * listener and then decided no callback is coming - the server answered without
+ * demanding authorization, or the attempt failed - has to release it here, or
+ * it holds the callback port for the life of the process.
+ */
+export function release(owner: symbol) {
+  cleanupOwnerIndex(owner)
   for (const listener of servers.values()) listener.owners.delete(owner)
   for (const listener of servers.values()) {
     if (listener.owners.size === 0) {
@@ -181,6 +192,21 @@ export async function cancelPending(mcpName: string): Promise<void> {
     pending.reject(new Error("Authorization cancelled"))
   }
   cleanupOwnerIndex(owner)
+  release(owner)
+}
+
+/**
+ * Release the owner an MCP server's auth flow took, by name.
+ *
+ * The `startAuth`/`finishAuth` pair runs the whole flow across two requests, so
+ * the caller that took the owner is not the one that finishes it. Releasing by
+ * name lets the ending step hand the listener back without threading the symbol
+ * through the wire. Releasing an owner that is already gone is a no-op, so a
+ * caller that already got released through the callback path can call this too.
+ */
+export function releaseByName(mcpName: string) {
+  const owner = mcpNameToOwner.get(mcpName)
+  if (!owner) return
   release(owner)
 }
 
