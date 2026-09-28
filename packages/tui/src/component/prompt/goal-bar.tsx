@@ -7,10 +7,8 @@ import { useDialog, type DialogContext } from "../../ui/dialog"
 import { DialogSelect, type DialogSelectOption } from "../../ui/dialog-select"
 import { DialogPrompt } from "../../ui/dialog-prompt"
 import { useToast } from "../../ui/toast"
-import { useTerminalDimensions } from "@opentui/solid"
 import { formatDuration } from "../../util/format"
 import { errorMessage } from "../../util/error"
-import { Locale } from "../../util/locale"
 import { legacyStateFile, statePath } from "@opencode-ai/core/goal/path"
 
 const GOAL_POLL_MS = 2_000
@@ -187,7 +185,6 @@ export function runGoalMenuCommand(input: {
 
 export function GoalBar(props: { sessionID?: string }) {
   const { theme } = useTheme()
-  const dimensions = useTerminalDimensions()
   const event = useEvent()
   const sdk = useSDK()
   const sync = useSync()
@@ -271,7 +268,6 @@ export function GoalBar(props: { sessionID?: string }) {
     if (goal.status === "paused" && goal.stopReason === "plan mode") return "switch to Build mode to run this goal"
     return goalText(goal)
   })
-  const contentWidth = createMemo(() => Math.min(72, Math.max(24, dimensions().width - 4)))
   // The goal plugin always registers a command literally named `goal`.
   const goalCommandName = createMemo(() => {
     if (sync.data.command.some((x) => x.name === DEFAULT_GOAL_COMMAND)) return DEFAULT_GOAL_COMMAND
@@ -282,17 +278,14 @@ export function GoalBar(props: { sessionID?: string }) {
     if (goalCommandName()) reportedUnavailable = false
   })
   // The caret is its own element so it is a real hit target rather than an
-  // implicit side effect of the whole row being clickable. CARET_WIDTH is the
-  // column budget reserved for it in the truncation math below.
+  // implicit side effect of the whole row being clickable.
   const CARET = "▾"
   const CARET_WIDTH = 2 // " " + caret
-  const summary = createMemo(() => {
+  const prefix = createMemo(() => {
     const state = limited() ? "!" : paused() ? "Ⅱ" : "•"
-    const prefix = `● ${state} ${label()} · `
-    const suffix = contentWidth() >= 60 && elapsed() ? ` · ${elapsed()}` : ""
-    const available = Math.max(8, contentWidth() - prefix.length - suffix.length - CARET_WIDTH)
-    return prefix + Locale.truncate(objective(), available) + suffix
+    return `● ${state} ${label()} · `
   })
+  const suffix = createMemo(() => (elapsed() ? ` · ${elapsed()}` : ""))
 
   function runGoalCommand(args: string) {
     runGoalMenuCommand({
@@ -338,25 +331,45 @@ export function GoalBar(props: { sessionID?: string }) {
   return (
     <Show when={visible()}>
       <box
-        width={contentWidth()}
-        maxWidth="100%"
-        height={1}
+        width="100%"
         flexShrink={0}
         flexDirection="row"
         alignItems="center"
-        paddingLeft={1}
-        paddingRight={1}
+        paddingLeft={2}
+        paddingTop={1}
         backgroundColor={theme.backgroundElement}
         onMouseUp={() => openMenu()}
       >
-        <text width={contentWidth() - CARET_WIDTH} flexShrink={0} fg={color()} wrapMode="none" truncate>
-          {summary()}
+        {/* The status marker carries the only saturated color; the objective reads as body
+            text and the clock and caret recede, so one accent per row does not shout across
+            the full panel width. */}
+        <text flexShrink={0} fg={color()}>
+          {prefix()}
+        </text>
+        {/* Width is left to flexbox on purpose. This bar lives inside the session layout, so
+            its container is narrower than the terminal; sizing against terminal dimensions
+            overestimated the row by ~45 columns, overflowed, and pushed the clock and caret
+            off the panel. The objective grows into whatever space the fixed chrome leaves and
+            is the only segment that yields when cramped, so the elapsed time and caret are
+            never the thing that gets dropped. */}
+        <text
+          flexGrow={1}
+          flexShrink={1}
+          minWidth={0}
+          fg={theme.text}
+          wrapMode="none"
+          truncate
+        >
+          {objective()}
+        </text>
+        <text flexShrink={0} fg={theme.textMuted}>
+          {suffix()}
         </text>
         {/* Explicit caret affordance. It carries its own handler so the caret
             reads as the control it looks like; the row handler still covers
             clicks anywhere else on the bar. stopPropagation keeps a caret
             click from opening the menu twice. */}
-        <text width={CARET_WIDTH} flexShrink={0} fg={color()} onMouseUp={(e: { stopPropagation(): void }) => {
+        <text width={CARET_WIDTH} flexShrink={0} fg={theme.textMuted} onMouseUp={(e: { stopPropagation(): void }) => {
           e.stopPropagation()
           openMenu()
         }}>
