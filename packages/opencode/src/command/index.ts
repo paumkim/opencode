@@ -36,6 +36,22 @@ export const Info = Schema.Struct({
 
 export type Info = Omit<Schema.Schema.Type<typeof Info>, "template"> & { template: Promise<string> | string }
 
+/**
+ * Substitute the worktree path into a command template's `${path}` placeholder.
+ *
+ * The path is inserted with a replacer *function* so it is written literally. As
+ * a string replacement it was a `$-pattern`, and `$` is a legal character in a
+ * directory name: a worktree at `.../dev/$&notes` turned into the literal text
+ * `${path}notes`, `a$$b` collapsed to `a$b`, and `tail$'y` spliced the whole
+ * prompt in twice. All three silently changed what the model was told to do.
+ *
+ * `replaceAll` rather than `replace` so a template mentioning `${path}` more than
+ * once is filled throughout.
+ */
+export function fillWorktreePath(template: string, worktree: string) {
+  return template.replaceAll("${path}", () => worktree)
+}
+
 export function hints(template: string) {
   const result: string[] = []
   const numbered = template.match(/\$\d+/g)
@@ -102,7 +118,7 @@ const layer = Layer.effect(
         description: "guided AGENTS.md setup",
         source: "command",
         get template() {
-          return PROMPT_INITIALIZE.replace("${path}", ctx.worktree)
+          return fillWorktreePath(PROMPT_INITIALIZE, ctx.worktree)
         },
         hints: hints(PROMPT_INITIALIZE),
       }
@@ -111,7 +127,10 @@ const layer = Layer.effect(
         description: "review changes [commit|branch|pr], defaults to uncommitted",
         source: "command",
         get template() {
-          return PROMPT_REVIEW.replace("${path}", ctx.worktree)
+          // `review.txt` currently has no `${path}` placeholder, so this is a
+          // no-op today; the path comes in through `$ARGUMENTS`. Kept because the
+          // fill is correct if a placeholder is added.
+          return fillWorktreePath(PROMPT_REVIEW, ctx.worktree)
         },
         subtask: true,
         hints: hints(PROMPT_REVIEW),
