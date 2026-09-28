@@ -135,6 +135,52 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/LSP") {}
 
+/**
+ * Turns a failed LSP request into a defect carrying the reason, rather than
+ * an empty result.
+ *
+ * These methods back the agent tools in src/tool/lsp.ts, which answer
+ * `No results found for <operation>` whenever the result comes back empty.
+ * So catching to `[]` meant a crashed, hung or erroring language server was
+ * reported to the model as "this symbol has no references" or "this file has
+ * no symbols" — a confident falsehood about the user's own code, which the
+ * model then reasons about and acts on, for instance concluding that a
+ * function is unused and editing accordingly.
+ *
+ * The reason matters as much as the failure: a server that does not
+ * implement a request answers with a JSON-RPC method-not-found error, and
+ * the model can do something correct with that, unlike with a silent empty
+ * list.
+ *
+ * The same tool function already surfaces "No LSP server available for this
+ * file type." as a real error, so a failed request belongs on that path
+ * rather than being laundered into an answer.
+ */
+/**
+ * Describes a rejected LSP request well enough to be worth showing.
+ *
+ * `String(error)` is useless for the two shapes that actually arrive: a plain
+ * object becomes literally "[object Object]", and a JSON-RPC error — which is
+ * what a server sends when it does not implement a method, and the case where
+ * the reason matters most — carries its detail on `message`.
+ */
+const describeLspError = (error: unknown): string => {
+  if (error instanceof Error) return error.message
+  if (error && typeof error === "object" && "message" in error && typeof error.message === "string")
+    return error.message
+  if (typeof error === "string" && error) return error
+  try {
+    return JSON.stringify(error) ?? String(error)
+  } catch {
+    return String(error)
+  }
+}
+
+export const requestOrFail = <T>(method: string, request: Promise<T>): Promise<T> =>
+  request.catch((error) => {
+    throw new Error(`LSP ${method} request failed: ${describeLspError(error)}`)
+  })
+
 const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
@@ -376,48 +422,52 @@ const layer = Layer.effect(
 
     const hover = Effect.fn("LSP.hover")(function* (input: LocInput) {
       return yield* run(input.file, (client) =>
-        client.connection
-          .sendRequest("textDocument/hover", {
+        requestOrFail(
+          "hover",
+          client.connection.sendRequest("textDocument/hover", {
             textDocument: { uri: pathToFileURL(input.file).href },
             position: { line: input.line, character: input.character },
-          })
-          .catch(() => null),
+          }),
+        ),
       )
     })
 
     const definition = Effect.fn("LSP.definition")(function* (input: LocInput) {
       const results = yield* run(input.file, (client) =>
-        client.connection
-          .sendRequest("textDocument/definition", {
+        requestOrFail(
+          "goToDefinition",
+          client.connection.sendRequest("textDocument/definition", {
             textDocument: { uri: pathToFileURL(input.file).href },
             position: { line: input.line, character: input.character },
-          })
-          .catch(() => null),
+          }),
+        ),
       )
       return results.flat().filter(Boolean)
     })
 
     const references = Effect.fn("LSP.references")(function* (input: LocInput) {
       const results = yield* run(input.file, (client) =>
-        client.connection
-          .sendRequest("textDocument/references", {
+        requestOrFail(
+          "findReferences",
+          client.connection.sendRequest("textDocument/references", {
             textDocument: { uri: pathToFileURL(input.file).href },
             position: { line: input.line, character: input.character },
             context: { includeDeclaration: true },
-          })
-          .catch(() => []),
+          }),
+        ),
       )
       return results.flat().filter(Boolean)
     })
 
     const implementation = Effect.fn("LSP.implementation")(function* (input: LocInput) {
       const results = yield* run(input.file, (client) =>
-        client.connection
-          .sendRequest("textDocument/implementation", {
+        requestOrFail(
+          "goToImplementation",
+          client.connection.sendRequest("textDocument/implementation", {
             textDocument: { uri: pathToFileURL(input.file).href },
             position: { line: input.line, character: input.character },
-          })
-          .catch(() => null),
+          }),
+        ),
       )
       return results.flat().filter(Boolean)
     })
@@ -425,29 +475,32 @@ const layer = Layer.effect(
     const documentSymbol = Effect.fn("LSP.documentSymbol")(function* (uri: string) {
       const file = fileURLToPath(uri)
       const results = yield* run(file, (client) =>
-        client.connection.sendRequest("textDocument/documentSymbol", { textDocument: { uri } }).catch(() => []),
+        requestOrFail(
+          "documentSymbol",
+          client.connection.sendRequest("textDocument/documentSymbol", { textDocument: { uri } }),
+        ),
       )
       return (results.flat() as (DocumentSymbol | Symbol)[]).filter(Boolean)
     })
 
     const workspaceSymbol = Effect.fn("LSP.workspaceSymbol")(function* (query: string) {
       const results = yield* runAll((client) =>
-        client.connection
-          .sendRequest<Symbol[]>("workspace/symbol", { query })
-          .then((result) => result.filter((x) => kinds.includes(x.kind)).slice(0, 10))
-          .catch(() => [] as Symbol[]),
+        requestOrFail("workspaceSymbol", client.connection.sendRequest<Symbol[]>("workspace/symbol", { query })).then(
+          (result) => result.filter((x) => kinds.includes(x.kind)).slice(0, 10),
+        ),
       )
       return results.flat()
     })
 
     const prepareCallHierarchy = Effect.fn("LSP.prepareCallHierarchy")(function* (input: LocInput) {
       const results = yield* run(input.file, (client) =>
-        client.connection
-          .sendRequest("textDocument/prepareCallHierarchy", {
+        requestOrFail(
+          "prepareCallHierarchy",
+          client.connection.sendRequest("textDocument/prepareCallHierarchy", {
             textDocument: { uri: pathToFileURL(input.file).href },
             position: { line: input.line, character: input.character },
-          })
-          .catch(() => []),
+          }),
+        ),
       )
       return results.flat().filter(Boolean)
     })
@@ -457,14 +510,15 @@ const layer = Layer.effect(
       direction: "callHierarchy/incomingCalls" | "callHierarchy/outgoingCalls",
     ) {
       const results = yield* run(input.file, async (client) => {
-        const items = await client.connection
-          .sendRequest<unknown[] | null>("textDocument/prepareCallHierarchy", {
+        const items = await requestOrFail(
+          direction === "callHierarchy/incomingCalls" ? "incomingCalls" : "outgoingCalls",
+          client.connection.sendRequest<unknown[] | null>("textDocument/prepareCallHierarchy", {
             textDocument: { uri: pathToFileURL(input.file).href },
             position: { line: input.line, character: input.character },
-          })
-          .catch(() => [] as unknown[])
+          }),
+        )
         if (!items?.length) return []
-        return client.connection.sendRequest(direction, { item: items[0] }).catch(() => [])
+        return requestOrFail(direction, client.connection.sendRequest(direction, { item: items[0] }))
       })
       return results.flat().filter(Boolean)
     })
