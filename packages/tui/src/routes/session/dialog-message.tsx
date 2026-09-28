@@ -6,6 +6,8 @@ import { useRoute } from "../../context/route"
 import { useClipboard } from "../../context/clipboard"
 import type { PromptInfo } from "../../component/prompt/history"
 import { stripPromptPartIDs as strip } from "../../prompt/part"
+import { useToast } from "../../ui/toast"
+import { mutateRemote } from "../../util/mutate-remote"
 
 export function DialogMessage(props: {
   messageID: string
@@ -17,6 +19,7 @@ export function DialogMessage(props: {
   const message = createMemo(() => sync.data.message[props.sessionID]?.find((x) => x.id === props.messageID))
   const route = useRoute()
   const clipboard = useClipboard()
+  const toast = useToast()
 
   return (
     <DialogSelect
@@ -26,14 +29,22 @@ export function DialogMessage(props: {
           title: "Revert",
           value: "session.revert",
           description: "undo messages and file changes",
-          onSelect: (dialog) => {
+          onSelect: async (dialog) => {
             const msg = message()
             if (!msg) return
 
-            void sdk.client.session.revert({
-              sessionID: props.sessionID,
-              messageID: msg.id,
-            })
+            // `session.revert` refuses with 409 while the session is running.
+            // Refilling the prompt without checking would hand the user the old
+            // text to resend against a conversation that was never rewound.
+            const reverted = await mutateRemote(
+              () =>
+                sdk.client.session.revert({
+                  sessionID: props.sessionID,
+                  messageID: msg.id,
+                }),
+              (reason) => toast.show({ variant: "error", title: "Could not revert", message: reason }),
+            )
+            if (!reverted) return
 
             if (props.setPrompt) {
               const parts = sync.data.part[msg.id]
