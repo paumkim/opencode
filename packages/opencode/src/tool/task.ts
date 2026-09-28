@@ -41,6 +41,31 @@ export interface TaskPromptOps {
   }): Effect.Effect<void>
 }
 
+/**
+ * Resolves the child session a subagent run should continue, or `undefined`
+ * when there is no such task.
+ *
+ * Two failures look alike here and must not be treated alike.
+ *
+ * A `task_id` that genuinely does not exist resolves to `undefined` and the
+ * caller creates a fresh child, which is the documented, forgiving behaviour:
+ * the agent may hand us a stale id and the work should still go forward.
+ *
+ * A read that *failed* — a storage or transport error, which surfaces as a
+ * defect rather than a `NotFound` — used to be swallowed by the same
+ * `catchCause` and produced the same `undefined`. That was the dangerous half:
+ * the agent asked to continue a task, was handed a blank subagent, redid the
+ * work from scratch, and left the prior transcript orphaned with nothing
+ * reporting a problem. Only the `NotFound` is caught now, so a real failure
+ * surfaces instead of quietly starting over.
+ */
+export function readTaskSession<A>(
+  taskID: string,
+  get: Effect.Effect<A, Session.NotFound>,
+): Effect.Effect<A | undefined> {
+  return get.pipe(Effect.catchTag("NotFoundError", () => Effect.succeed(undefined)))
+}
+
 const id = "task"
 /**
  * Delegation is non-blocking by default.
@@ -206,7 +231,7 @@ export const TaskTool = Tool.define(
       }
 
       const session = params.task_id
-        ? yield* sessions.get(SessionID.make(params.task_id)).pipe(Effect.catchCause(() => Effect.succeed(undefined)))
+        ? yield* readTaskSession(params.task_id, sessions.get(SessionID.make(params.task_id)))
         : undefined
       const childPermission = deriveSubagentSessionPermission({
         parentSessionPermission: parent.permission ?? [],
