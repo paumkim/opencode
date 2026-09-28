@@ -24,7 +24,10 @@ import { PtyEnvironment } from "./pty-environment"
 import { layer as locationLayer } from "./location"
 import { sessionLocationLayer } from "./middleware/session-location"
 
-const applicationServices = LayerNode.group([
+// Exported so the graph-shape guard can assert that construction-time nodes are
+// listed here. `compile` only builds what a group names, so a node that nobody
+// lists is not "probably provided by a dependency" -- it is absent.
+export const applicationServices = LayerNode.group([
   Database.node,
   EventV2.node,
   httpClient,

@@ -326,6 +326,22 @@ export function hasUnbound(root: Node<unknown, unknown, any>, source: AnyNode): 
   })
 }
 
+/**
+ * Whether `root` reaches a node named like `source`.
+ *
+ * Nodes are compared by name rather than identity because a graph may reach the
+ * same service through a different (but equivalent) node object. This is the
+ * guard for nodes that do real work at construction time: `compile` only builds
+ * what a graph names, so a node nobody lists is silently absent, and a node
+ * listed as a dependency is only built once per compile.
+ */
+export function includes(root: Node<unknown, unknown, any>, source: AnyNode): boolean {
+  return walk<boolean>(root, (node, context) => {
+    if (node.name === source.name) return true
+    return node.dependencies.some(context.visit)
+  })
+}
+
 function flatten(node: AnyNode): readonly AnyNode[] {
   return node.kind === "group" ? node.dependencies.flatMap(flatten) : [node]
 }

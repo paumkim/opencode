@@ -55,6 +55,7 @@ import { AppNodeBuilderV1 } from "@/effect/app-node-builder-v1"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { httpClient } from "@opencode-ai/core/effect/app-node-platform"
 import { EventV2 } from "@opencode-ai/core/event"
+import { FanoutDelivery } from "@opencode-ai/core/fanout/delivery"
 import { ModelsDev } from "@opencode-ai/core/models-dev"
 import { News } from "@opencode-ai/news"
 import { Npm } from "@opencode-ai/core/npm"
@@ -214,7 +215,10 @@ type RouteRequirements =
   | HttpRouter.Request<"Requires", unknown>
   | HttpRouter.Request<"GlobalRequires", never>
 
-const app = LayerNode.group([
+// Exported so the graph-shape guard can assert that construction-time nodes are
+// listed here. `compile` only builds what a group names, so a node that nobody
+// lists is not "probably provided by a dependency" -- it is absent.
+export const app = LayerNode.group([
   Npm.node,
   FSUtil.node,
   Database.node,
@@ -239,9 +243,14 @@ const app = LayerNode.group([
   PermissionSaved.node,
   Todo.node,
   Session.node,
+  SessionV2.node,
   SessionProjector.node,
   SessionStatus.node,
   BackgroundJob.node,
+  // Pushes a settled worker's digest to its parent. Nothing else subscribes to
+  // `FanoutEvent.WorkerSettled`, so without this node a fanned-out parent is
+  // never woken and `FanoutLedger.unclaimed` never drains.
+  FanoutDelivery.node,
   RuntimeFlags.node,
   EventV2Bridge.node,
   SessionRunState.node,
@@ -301,15 +310,19 @@ export function createRoutes(
     Layer.provide(sessionLocationLayer),
     Layer.provide(locationLayer),
     Layer.provide(PtyEnvironment.layer),
+    // `app` and `SessionV2` are compiled as ONE graph on purpose.
+    // `LayerNode.compile` builds each root independently, so compiling them
+    // separately would build TWO `SessionExecutionLocal` instances -- one
+    // owning the session's turns and another the one fan-out delivery registers
+    // a wake on. The second has no runner, so the wake would never drain and
+    // the parent would never be given a turn.
     Layer.provide(
-      AppNodeBuilderV1.build(SessionV2.node, [
+      AppNodeBuilderV1.build(app, [
         [LocationServiceMap.node, locationServiceMapV2],
         [SessionExecution.node, SessionExecutionLocal.node],
       ]),
     ),
     Layer.provide(locationServiceMapV2),
-
-    Layer.provide(AppNodeBuilderV1.build(app)),
     // Must stay last: layers provided later in this pipe build beneath earlier ones,
     // so Observability must come after every service graph. Otherwise eagerly forked
     // fibers (e.g. the ModelsDev background refresh) capture Effect's default stdout
