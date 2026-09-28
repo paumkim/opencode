@@ -101,9 +101,9 @@ export interface Interface {
   readonly status: (cwd: string) => Effect.Effect<Item[], CommandError>
   readonly diff: (cwd: string, ref: string) => Effect.Effect<Item[], CommandError>
   readonly stats: (cwd: string, ref: string) => Effect.Effect<Stat[], CommandError>
-  readonly patch: (cwd: string, ref: string, file: string, options?: PatchOptions) => Effect.Effect<Patch>
-  readonly patchAll: (cwd: string, ref: string, options?: PatchOptions) => Effect.Effect<Patch>
-  readonly patchUntracked: (cwd: string, file: string, options?: PatchOptions) => Effect.Effect<Patch>
+  readonly patch: (cwd: string, ref: string, file: string, options?: PatchOptions) => Effect.Effect<Patch, CommandError>
+  readonly patchAll: (cwd: string, ref: string, options?: PatchOptions) => Effect.Effect<Patch, CommandError>
+  readonly patchUntracked: (cwd: string, file: string, options?: PatchOptions) => Effect.Effect<Patch, CommandError>
   readonly statUntracked: (cwd: string, file: string) => Effect.Effect<Stat | undefined>
   readonly applyPatch: (cwd: string, patch: string) => Effect.Effect<Result>
 }
@@ -169,6 +169,29 @@ const layer = Layer.effect(
 
     const checkedText = Effect.fnUntraced(function* (args: string[], opts: Options) {
       return (yield* checked(args, opts)).text()
+    })
+
+    // `git diff --no-index` reports "these two paths differ" as exit 1, and
+    // asking for the diff of an untracked file is *asking* for a difference, so
+    // 1 is the expected answer rather than a failure. Treating it as one would
+    // reject every untracked file in every worktree.
+    //
+    // Exit code alone is not enough, though: a path git cannot read also exits 1,
+    // with an empty stdout and the reason on stderr. Verified against git 2.4x —
+    // `diff --no-index /dev/null missing.txt` is exit 1 + "error: Could not
+    // access 'missing.txt'", and a real difference is exit 1 + a patch. So at
+    // exit 1 the presence of the patch is what separates "these differ" from
+    // "this could not be read", and the second one must not become an empty
+    // new-file patch.
+    const checkedDiffing = Effect.fn("Git.checkedDiffing")(function* (args: string[], opts: Options) {
+      const result = yield* run(args, opts)
+      if (result.exitCode === 0) return result
+      if (result.exitCode === 1 && result.stdout.length > 0) return result
+      return yield* new CommandError({
+        args,
+        exitCode: result.exitCode,
+        message: result.stderr.toString("utf8").trim() || result.text().trim() || `git ${args[0]} failed`,
+      })
     })
 
     const lines = Effect.fn("Git.lines")(function* (args: string[], opts: Options) {
@@ -297,7 +320,7 @@ const layer = Layer.effect(
     })
 
     const patch = Effect.fn("Git.patch")(function* (cwd: string, ref: string, file: string, options?: PatchOptions) {
-      const result = yield* run(
+      const result = yield* checked(
         ["diff", "--patch", "--no-ext-diff", "--no-renames", `--unified=${options?.context ?? 3}`, ref, "--", file],
         { cwd, maxOutputBytes: options?.maxOutputBytes },
       )
@@ -305,7 +328,7 @@ const layer = Layer.effect(
     })
 
     const patchAll = Effect.fn("Git.patchAll")(function* (cwd: string, ref: string, options?: PatchOptions) {
-      const result = yield* run(
+      const result = yield* checked(
         ["diff", "--patch", "--no-ext-diff", "--no-renames", `--unified=${options?.context ?? 3}`, ref, "--", "."],
         { cwd, maxOutputBytes: options?.maxOutputBytes },
       )
@@ -317,7 +340,7 @@ const layer = Layer.effect(
       file: string,
       options?: PatchOptions,
     ) {
-      const result = yield* run(
+      const result = yield* checkedDiffing(
         [
           "diff",
           "--no-index",
