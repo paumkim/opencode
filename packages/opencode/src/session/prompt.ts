@@ -53,6 +53,7 @@ import { SessionRunState } from "./run-state"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { Database } from "@opencode-ai/core/database/database"
+import { FanoutContext } from "@opencode-ai/core/fanout/context"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { eq } from "drizzle-orm"
@@ -1496,11 +1497,16 @@ const layer = Layer.effect(
             yield* plugin.trigger("experimental.chat.messages.transform", {}, transformOutput)
 
             const minimalContext = agent.context === "minimal"
-            const [skills, env, mcpInstructions, modelMsgs] = yield* Effect.all([
+            const [skills, env, mcpInstructions, modelMsgs, crew] = yield* Effect.all([
               minimalContext ? Effect.succeed(undefined) : sys.skills(agent),
               minimalContext ? Effect.succeed(undefined) : sys.environment(model),
               minimalContext ? Effect.succeed(undefined) : sys.mcp(agent, session.permission),
               MessageV2.toModelMessagesEffect(msgs, model),
+              // The parent's per-turn view of its own crew. Delegation is
+              // non-blocking, so the parent has to be able to answer "what is
+              // still running" from something that survives compaction and
+              // restart -- and that is this sentence, not the ledger row.
+              FanoutContext.sentence(db, sessionID),
             ])
             const instructions = session.parentID || minimalContext ? [] : (yield* instruction.system().pipe(Effect.orDie))
             
@@ -1516,6 +1522,7 @@ const layer = Layer.effect(
               instructions.length ? instructions : undefined,
               mcpInstructions,
               skills,
+              crew,
               systemOnePrompt || undefined,
             ].filter((part): part is string => typeof part === "string")
             const format = lastUser.format ?? { type: "text" as const }
