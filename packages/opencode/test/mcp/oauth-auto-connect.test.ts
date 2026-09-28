@@ -245,6 +245,32 @@ mcpTest.instance("successful reauthentication commits replacement credentials", 
     expect(entry?.tokens?.accessToken).toBe("replacement-token")
     expect(entry?.clientInfo?.clientId).toBe("replacement-client")
     expect(entry?.serverUrl).toBe(server.url)
+    // The `startAuth` half took a reference on the callback listener; `finishAuth` is the
+    // step that ends the flow, so it is the one that has to hand it back.
+    expect(McpOAuthCallback.isRunning()).toBe(false)
+  }),
+)
+
+mcpTest.instance("a failed reauthentication also hands the callback listener back", () =>
+  Effect.gen(function* () {
+    yield* stopOAuthCallback
+    const server = yield* serveOAuthMcp()
+    const mcp = yield* MCP.Service
+    const auth = yield* McpAuth.Service
+    const name = "test-reauth-failure-release"
+
+    yield* auth.updateClientInfo(name, { clientId: "dynamic-client", clientSecret: "dynamic-secret" }, server.url)
+    yield* auth.updateTokens(name, { accessToken: "working-token" }, server.url)
+    yield* mcp.add(name, remote(server.url))
+    expect((yield* mcp.startAuth(name)).authorizationUrl).toContain("/authorize")
+
+    expect(yield* mcp.finishAuth(name, "invalid-code")).toEqual({
+      status: "failed",
+      error: "OAuth completion failed: Token exchange failed",
+    })
+    // A failed exchange still ends the flow. Releasing only on success would leave the
+    // listener held by every server whose reauth the user got wrong.
+    expect(McpOAuthCallback.isRunning()).toBe(false)
   }),
 )
 
@@ -280,6 +306,25 @@ mcpTest.instance("authenticate() stores a connected client when auth completes w
     server.allowAnonymous()
     expect((yield* mcp.authenticate(name)).status).toBe("connected")
     expect((yield* mcp.status())[name]?.status).toBe("connected")
+  }),
+)
+
+mcpTest.instance("authenticate() that needs no browser round trip leaves no callback server listening", () =>
+  Effect.gen(function* () {
+    yield* stopOAuthCallback
+    const server = yield* serveOAuthMcp()
+    const mcp = yield* MCP.Service
+    const name = "test-oauth-no-round-trip"
+    const added = yield* mcp.add(name, remote(server.url))
+    expect((added.status as Record<string, { status: string }>)[name]?.status).toBe("needs_auth")
+
+    // The server stops demanding a token, so `authenticate` connects outright and never
+    // awaits a callback. The callback listener it started on the way there has no owner
+    // left to release it, so it would stay bound to the callback port for the process life.
+    server.allowAnonymous()
+    expect((yield* mcp.authenticate(name)).status).toBe("connected")
+
+    expect(McpOAuthCallback.isRunning()).toBe(false)
   }),
 )
 

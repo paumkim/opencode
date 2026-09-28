@@ -879,6 +879,9 @@ const layer = Layer.effect(
             pendingOAuthTransports.set(mcpName, { transport, provider: authProvider })
             return Effect.succeed({ authorizationUrl: capturedUrl.toString(), oauthState, callbackOwner: owner } satisfies AuthResult)
           }
+          // No authorization URL means no callback will arrive, and the owner this
+          // call took on the callback listener has no other path back to it.
+          McpOAuthCallback.release(owner)
           return Effect.die(error)
         }),
       )
@@ -890,6 +893,11 @@ const layer = Layer.effect(
     ) {
       const result = yield* startAuth(mcpName)
       if (!result.authorizationUrl) {
+        // `startAuth` opens the callback listener before it knows whether the server will
+        // demand authorization. This branch connected outright, so no callback is ever
+        // awaited and nothing else will release the owner it handed back — without this
+        // the listener stays bound to the callback port for the life of the process.
+        if (result.callbackOwner) McpOAuthCallback.release(result.callbackOwner)
         const client = "client" in result ? result.client : undefined
         const mcpConfig = yield* requireMcpConfig(mcpName).pipe(
           Effect.tapError(() => Effect.tryPromise(() => client?.close() ?? Promise.resolve()).pipe(Effect.ignore)),
@@ -933,7 +941,7 @@ const layer = Layer.effect(
       return yield* finishAuth(mcpName, code)
     })
 
-    const finishAuth = Effect.fn("MCP.finishAuth")(function* (mcpName: string, authorizationCode: string) {
+    const finishAuthEffect = Effect.fn("MCP.finishAuth")(function* (mcpName: string, authorizationCode: string) {
       yield* requireMcpConfig(mcpName)
       const pending = pendingOAuthTransports.get(mcpName)
       if (!pending) throw new Error(`No pending OAuth flow for MCP server: ${mcpName}`)
@@ -958,6 +966,16 @@ const layer = Layer.effect(
 
       return yield* createAndStore(mcpName, { ...mcpConfig, enabled: true })
     })
+
+    // `finishAuth` is the end of the `startAuth`/`finishAuth` pair, so it is the only place
+    // that can hand back the callback listener `startAuth` took. Releasing on exit rather
+    // than on scope close matters: the release has to happen when the request finishes, not
+    // whenever the enclosing session fiber is eventually torn down. `onExit` covers every
+    // exit, so a failed token exchange gives the listener back too.
+    const finishAuth = (mcpName: string, authorizationCode: string) =>
+      finishAuthEffect(mcpName, authorizationCode).pipe(
+        Effect.onExit(() => Effect.sync(() => McpOAuthCallback.releaseByName(mcpName))),
+      )
 
     const removeAuth = Effect.fn("MCP.removeAuth")(function* (mcpName: string) {
       yield* auth.remove(mcpName)
