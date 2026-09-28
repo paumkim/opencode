@@ -248,7 +248,16 @@ export const {
           const request = event.properties
           if (permission.mode === "auto") {
             if (sharedWs) {
-              sharedWs.sendPermissionReply(request.sessionID, request.id, "once")
+              // The socket reconnects on route changes, so an auto-approve
+              // written while it was down vanished into a bare `return` and the
+              // agent sat blocked on a tool the user never saw asked for.
+              if (!sharedWs.sendPermissionReply(request.sessionID, request.id, "once")) {
+                toast.show({
+                  variant: "error",
+                  title: "Auto-approve failed",
+                  message: "the shared workspace connection dropped the answer — the tool is waiting for you.",
+                })
+              }
             } else {
               // Auto-approve still deserves a voice when it fails: the agent is
               // blocked on a tool the user never sees asked for, and silence
