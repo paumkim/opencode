@@ -218,6 +218,17 @@ export const groupWorkers = Effect.fn("FanoutLedger.groupWorkers")(function* (
   return rows.map(worker)
 })
 
+/** Workers a session's ledger still calls live, whether or not anything runs them. */
+export const live = Effect.fn("FanoutLedger.live")(function* (db: DatabaseService, parentSessionID: SessionSchema.ID) {
+  const rows = yield* db
+    .select()
+    .from(FanoutWorkerTable)
+    .where(and(eq(FanoutWorkerTable.parent_session_id, parentSessionID), eq(FanoutWorkerTable.status, "live")))
+    .all()
+    .pipe(Effect.orDie)
+  return rows.map(worker)
+})
+
 /** Workers that finished but whose digest has not reached the parent yet. */
 export const unclaimed = Effect.fn("FanoutLedger.unclaimed")(function* (
   db: DatabaseService,
@@ -261,6 +272,17 @@ export const claim = Effect.fn("FanoutLedger.claim")(function* (
     .all()
     .pipe(Effect.orDie)
   return updated.map((row) => row.id)
+})
+
+/** Every session that still owes its parent a finished-but-undelivered result. */
+export const parentsWithUnclaimed = Effect.fn("FanoutLedger.parentsWithUnclaimed")(function* (db: DatabaseService) {
+  const rows = yield* db
+    .selectDistinct({ parentSessionID: FanoutWorkerTable.parent_session_id })
+    .from(FanoutWorkerTable)
+    .where(and(isNull(FanoutWorkerTable.claimed_seq), ne(FanoutWorkerTable.status, "live")))
+    .all()
+    .pipe(Effect.orDie)
+  return rows.map((row) => row.parentSessionID)
 })
 
 /** The whole per-turn view of a crew: three integers, recomputed every turn. */
