@@ -31,6 +31,20 @@ OPENCODE_BIN="${CREW_OPENCODE_BIN:-$HOME/.opencode/bin/opencode}"
 # The source tree, when it is right here. A crew started from a checkout runs the
 # same code the operator is editing, which is the whole point of a per-project crew.
 DEV_PKG="$REPO_ROOT/packages/opencode"
+# The hard memory ceiling for ONE crew window, enforced by a cgroup on the whole window.
+#
+# This is a guard, not advice. The bootstrap prompt already told every window to cap its test runs,
+# and a window ignored it and ran a bare `bun test` that took all 31GB out from under the machine -
+# hard enough to lose the session and kill both crew windows with it. The term repo had already
+# learned this lesson the same way: its own test-capped.sh carries a comment about the freeze, and
+# states the conclusion plainly - "prose does not survive an unattended agent". So the cap is applied
+# to the WINDOW rather than to any command in it: whatever the agent runs, including something no
+# prompt anticipated, the cgroup stops it at the ceiling instead of the machine running out of memory
+# under both crews at once.
+#
+# 10G leaves room for two windows on a 31GB machine with the desktop and the operator's own work.
+# Override per-machine with CREW_MEMORY_MAX.
+CREW_MEMORY_MAX="${CREW_MEMORY_MAX:-10G}"
 
 mkdir -p "$STATE/run" "$STATE/logs" "$STATE/prompts"
 
@@ -83,9 +97,34 @@ resolve_opencode() {
 launch_window() {
   local name="$1" dir="$2" prompt="$3" logf="$4"
   nohup ghostty --title="agent-$name" \
-    -e "${OPENCODE_CMD[@]}" "$dir" --auto --prompt "$prompt" \
+    -e "${WINDOW_CMD[@]}" "$dir" --auto --prompt "$prompt" \
     > "$logf" 2>&1 < /dev/null &
   echo $!
+}
+
+# Build the argv that runs INSIDE the window: the agent TUI, wrapped in a cgroup memory cap.
+#
+# Resolved once, here, so the cap cannot be applied by one caller and skipped by another - the same
+# reason launch_window is the single place a window is created.
+#
+# `--scope` is used rather than a transient unit because it inherits the window's TTY, and a
+# transient unit would detach the TUI from its terminal. Two failure modes are handled explicitly
+# and LOUDLY, because a guard that silently does not apply is worse than no guard: if systemd-run is
+# missing, or there is no user systemd session to put a scope in, the window still starts but the
+# operator is told in the same breath that nothing is capping it.
+build_window_cmd() {
+  local probe
+  if ! command -v systemd-run >/dev/null 2>&1; then
+    warn "systemd-run not found: crew windows will be UNCAPPED and can exhaust machine memory"
+    WINDOW_CMD=("${OPENCODE_CMD[@]}")
+    return 0
+  fi
+  if ! probe="$(systemd-run --user --scope --quiet true 2>&1)"; then
+    warn "no user systemd session ($probe): crew windows will be UNCAPPED and can exhaust machine memory"
+    WINDOW_CMD=("${OPENCODE_CMD[@]}")
+    return 0
+  fi
+  WINDOW_CMD=(systemd-run --user --scope -p "MemoryMax=$CREW_MEMORY_MAX" -p MemorySwapMax=0 -- "${OPENCODE_CMD[@]}")
 }
 
 # Registry, in precedence order. Creates a commented template rather than guessing.
@@ -208,12 +247,18 @@ Then loop, one bounded deliverable at a time:
 - When the objective is genuinely covered, close with update_goal and real evidence.
   Otherwise keep working.
 
-HARD RULE — MEMORY. This machine is shared and finite, and has run out of memory
-and lost unattended sessions before.
+HARD RULE — MEMORY. This machine is shared and finite, and it has run out of
+memory and lost unattended sessions before — recently: a window ran a bare
+\`bun test\` and took all 31GB with it, losing both crew windows and the session.
+- The window itself is already capped at ${CREW_MEMORY_MAX} by a cgroup, so a runaway
+  run is killed at the ceiling instead of the machine dying under you. Treat
+  hitting that cap as a BUG IN YOUR COMMAND, not as the machine being slow.
 - NEVER run a whole test suite. Scope to specific files.
-- Run tests under a memory cap, never bare:
-    systemd-run --user --scope -p MemoryMax=6G -p MemorySwapMax=0 -- <command>
-- If the project ships a cgroup test wrapper, use it.
+- NEVER run \`bun test\` bare. Run tests through the project's own capped wrapper,
+  which exists in BOTH project trees:
+      script/test-capped.sh bun test <file> [--timeout 60000]
+  It applies the cgroup cap itself. If that file is missing, fall back to:
+      systemd-run --user --scope -p MemoryMax=6G -p MemorySwapMax=0 -- <command>
 - Never raise concurrency. Never use \`ulimit -v\` under Bun — it caps address space
   rather than resident memory and kills the process outright.
 - Watch RSS on long runs (\`ps -o rss\`) and abort past ~6GB.
@@ -247,6 +292,14 @@ doctor() {
   command -v ghostty >/dev/null 2>&1 && log "  ghostty: $(command -v ghostty)" \
                                    || { warn "ghostty not on PATH"; ok=1; }
   log "  display: DISPLAY=${DISPLAY:-unset} WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-unset}"
+  # Report the memory cap, and say plainly when there is none. A crew that cannot exhaust the
+  # machine is a safety property, and a safety property the operator cannot see is one they have to
+  # take on trust - which is how a window ran a bare `bun test` into an OOM that killed both windows.
+  if command -v systemd-run >/dev/null 2>&1 && systemd-run --user --scope --quiet true >/dev/null 2>&1; then
+    log "  memory cap: $CREW_MEMORY_MAX per window (cgroup, enforced)"
+  else
+    warn "  memory cap: NONE - windows can exhaust machine memory (no user systemd scope available)"
+  fi
   command -v free >/dev/null 2>&1 && log "  memory: $(free -g | awk '/^Mem:/{print $7"GB available of "$2"GB"}')"
   while IFS=$'\t' read -r path label; do
     [ -z "$path" ] && continue
@@ -267,6 +320,9 @@ doctor() {
 start() {
   local want="${1:-1}" only="${2:-}" n name dir label pid arr=()
   resolve_opencode
+  # The memory cap wraps the resolved argv, so it has to be built after `resolve_opencode` and
+  # before the first `launch_window` - otherwise the window starts uncapped and the guard is a lie.
+  build_window_cmd
   doctor >/dev/null 2>&1 || warn "preflight reported issues; continuing anyway"
   if [ -n "$only" ]; then
     [ -d "$only/.git" ] || die "not a git repo: $only"
