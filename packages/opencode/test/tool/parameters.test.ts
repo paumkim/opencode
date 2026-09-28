@@ -262,9 +262,15 @@ describe("tool parameters", () => {
       const parsed = parse(Task, { description: "d", prompt: "p", subagent_type: "general" })
       expect(parsed.subagent_type).toBe("general")
     })
-    test("accepts optional background flag", () => {
-      const parsed = parse(Task, { description: "d", prompt: "p", subagent_type: "general", background: true })
-      expect(parsed.background).toBe(true)
+    test("accepts optional wait flag", () => {
+      const parsed = parse(Task, { description: "d", prompt: "p", subagent_type: "general", wait: true })
+      expect(parsed.wait).toBe(true)
+    })
+    test("delegation is non-blocking unless wait is passed", () => {
+      // The default is the whole point: a model that omits `wait` must not park
+      // the conversation, and the schema has to make waiting something it asked
+      // for by name.
+      expect(parse(Task, { description: "d", prompt: "p", subagent_type: "general" }).wait).toBeUndefined()
     })
     test("rejects missing prompt", () => {
       expect(accepts(Task, { description: "d", subagent_type: "general" })).toBe(false)

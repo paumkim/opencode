@@ -58,7 +58,6 @@ const layer = (flags: Partial<RuntimeFlags.Info> = {}) =>
   )
 
 const it = testEffect(layer())
-const background = testEffect(layer({ experimentalBackgroundSubagents: true }))
 
 function defer<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void
@@ -264,6 +263,7 @@ describe("tool.task", () => {
           description: "inspect bug",
           prompt: "look into the cache key path",
           subagent_type: "general",
+          wait: true,
           task_id: child.id,
         },
         {
@@ -301,6 +301,7 @@ describe("tool.task", () => {
             description: "inspect bug",
             prompt: "look into the cache key path",
             subagent_type: "general",
+            wait: true,
           },
           {
             sessionID: chat.id,
@@ -344,6 +345,7 @@ describe("tool.task", () => {
             description: "inspect external directory",
             prompt: "read the external directory",
             subagent_type: "general",
+            wait: true,
           },
           {
             sessionID: chat.id,
@@ -420,6 +422,7 @@ describe("tool.task", () => {
             description: "inspect bug",
             prompt: "look into the cache key path",
             subagent_type: "general",
+            wait: true,
           },
           {
             sessionID: chat.id,
@@ -481,6 +484,7 @@ describe("tool.task", () => {
               description: "inspect bug",
               prompt: "look into the cache key path",
               subagent_type: "general",
+              wait: true,
             },
             {
               sessionID: chat.id,
@@ -586,6 +590,7 @@ describe("tool.task", () => {
             description: "inspect bug",
             prompt: "look into the cache key path",
             subagent_type: "general",
+            wait: true,
           },
           {
             sessionID: chat.id,
@@ -623,6 +628,7 @@ describe("tool.task", () => {
           description: "inspect bug",
           prompt: "look into the cache key path",
           subagent_type: "general",
+          wait: true,
           task_id: "ses_missing",
         },
         {
@@ -708,6 +714,7 @@ describe("tool.task", () => {
             description: "inspect bug",
             prompt: "look into the cache key path",
             subagent_type: "general",
+            wait: true,
           },
           {
             sessionID: child.id,
@@ -794,34 +801,34 @@ describe("tool.task", () => {
     },
   )
 
-  it.instance("rejects background execution when the experiment is disabled", () =>
+  it.instance("delegation is non-blocking by default and needs no experiment flag", () =>
     Effect.gen(function* () {
       const { chat, assistant } = yield* seed()
       const tool = yield* TaskTool
       const def = yield* tool.init()
 
-      const exit = yield* def
-        .execute(
-          {
-            description: "inspect bug",
-            prompt: "look into the cache key path",
-            subagent_type: "general",
-            background: true,
-          },
-          {
-            sessionID: chat.id,
-            messageID: assistant.id,
-            agent: "build",
-            abort: new AbortController().signal,
-            extra: { promptOps: stubOps() },
-            messages: [],
-            metadata: () => Effect.void,
-            ask: () => Effect.void,
-          },
-        )
-        .pipe(Effect.exit)
+      // The subagent never answers, so a blocking call would hang here forever.
+      // Returning at all is the assertion.
+      const result = yield* def.execute(
+        {
+          description: "inspect bug",
+          prompt: "look into the cache key path",
+          subagent_type: "general",
+        },
+        {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          agent: "build",
+          abort: new AbortController().signal,
+          extra: { promptOps: { ...stubOps(), prompt: () => Effect.never } satisfies TaskPromptOps },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        },
+      )
 
-      expect(Exit.isFailure(exit)).toBe(true)
+      expect(result.metadata.background).toBe(true)
+      expect(result.output).toContain(`state="running"`)
     }),
   )
 
@@ -858,6 +865,7 @@ describe("tool.task", () => {
             description: "inspect bug",
             prompt: "look into the cache key path",
             subagent_type: "general",
+            wait: true,
           },
           {
             sessionID: chat.id,
@@ -892,7 +900,7 @@ describe("tool.task", () => {
     }),
   )
 
-  background.instance("execute launches background tasks without waiting for completion", () =>
+  it.instance("execute launches background tasks without waiting for completion", () =>
     Effect.gen(function* () {
       const jobs = yield* BackgroundJob.Service
       const { chat, assistant } = yield* seed()
@@ -904,7 +912,6 @@ describe("tool.task", () => {
           description: "inspect bug",
           prompt: "look into the cache key path",
           subagent_type: "general",
-          background: true,
         },
         {
           sessionID: chat.id,
@@ -930,7 +937,7 @@ describe("tool.task", () => {
     }),
   )
 
-  background.instance("background task completion waits for running updates", () =>
+  it.instance("background task completion waits for running updates", () =>
     Effect.gen(function* () {
       const jobs = yield* BackgroundJob.Service
       const { chat, assistant } = yield* seed()
@@ -970,7 +977,6 @@ describe("tool.task", () => {
           description: "inspect bug",
           prompt: "look into the cache key path",
           subagent_type: "general",
-          background: true,
         },
         context,
       )
@@ -989,9 +995,15 @@ describe("tool.task", () => {
       expect(result.output).toContain("Background task updated")
       first.resolve()
       expect((yield* jobs.get(started.metadata.sessionId))?.status).toBe("running")
-      expect((yield* Effect.promise(() => updated.promise)).parts).toEqual([
-        { type: "text", text: "also inspect cancellation" },
-      ])
+      // The worker is told what its closing message is for before it is given
+      // the work, so the assertion has to allow the preamble.
+      const updateParts = (yield* Effect.promise(() => updated.promise)).parts
+      expect(updateParts).toHaveLength(1)
+      expect(updateParts[0]?.type).toBe("text")
+      if (updateParts[0]?.type === "text") {
+        expect(updateParts[0].text).toContain("You are a background subagent")
+        expect(updateParts[0].text).toContain("also inspect cancellation")
+      }
 
       second.resolve()
       const waited = yield* jobs.wait({ id: started.metadata.sessionId, timeout: 1_000 })
@@ -1004,7 +1016,7 @@ describe("tool.task", () => {
     }),
   )
 
-  background.instance("background tasks complete through the background job service", () =>
+  it.instance("background tasks complete through the background job service", () =>
     Effect.gen(function* () {
       const jobs = yield* BackgroundJob.Service
       const { chat, assistant } = yield* seed()
@@ -1016,7 +1028,6 @@ describe("tool.task", () => {
           description: "inspect bug",
           prompt: "look into the cache key path",
           subagent_type: "general",
-          background: true,
         },
         {
           sessionID: chat.id,
@@ -1037,7 +1048,7 @@ describe("tool.task", () => {
     }),
   )
 
-  background.instance("background task completion does not wait for the parent async prompt", () =>
+  it.instance("background task completion does not wait for the parent async prompt", () =>
     Effect.gen(function* () {
       const jobs = yield* BackgroundJob.Service
       const { chat, assistant } = yield* seed()
@@ -1049,7 +1060,6 @@ describe("tool.task", () => {
           description: "inspect bug",
           prompt: "look into the cache key path",
           subagent_type: "general",
-          background: true,
         },
         {
           sessionID: chat.id,
@@ -1075,7 +1085,7 @@ describe("tool.task", () => {
     }),
   )
 
-  background.instance("removing the parent session cancels running background tasks", () =>
+  it.instance("removing the parent session cancels running background tasks", () =>
     Effect.gen(function* () {
       const jobs = yield* BackgroundJob.Service
       const sessions = yield* Session.Service
@@ -1088,7 +1098,6 @@ describe("tool.task", () => {
           description: "inspect bug",
           prompt: "look into the cache key path",
           subagent_type: "general",
-          background: true,
         },
         {
           sessionID: chat.id,
@@ -1114,7 +1123,7 @@ describe("tool.task", () => {
     }),
   )
 
-  background.instance("removing the child task session cancels its running background task", () =>
+  it.instance("removing the child task session cancels its running background task", () =>
     Effect.gen(function* () {
       const jobs = yield* BackgroundJob.Service
       const sessions = yield* Session.Service
@@ -1127,7 +1136,6 @@ describe("tool.task", () => {
           description: "inspect bug",
           prompt: "look into the cache key path",
           subagent_type: "general",
-          background: true,
         },
         {
           sessionID: chat.id,
@@ -1153,7 +1161,7 @@ describe("tool.task", () => {
     }),
   )
 
-  background.instance("cancelling the parent run cancels running background tasks", () =>
+  it.instance("cancelling the parent run cancels running background tasks", () =>
     Effect.gen(function* () {
       const jobs = yield* BackgroundJob.Service
       const runState = yield* SessionRunState.Service
@@ -1166,7 +1174,6 @@ describe("tool.task", () => {
           description: "inspect bug",
           prompt: "look into the cache key path",
           subagent_type: "general",
-          background: true,
         },
         {
           sessionID: chat.id,

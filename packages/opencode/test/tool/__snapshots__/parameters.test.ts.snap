@@ -301,10 +301,6 @@ exports[`tool parameters JSON Schema (wire shape) task 1`] = `
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "properties": {
-    "background": {
-      "description": "Run the agent in the background. You will be notified when it completes. DO NOT sleep, poll, or proactively check on its progress",
-      "type": "boolean",
-    },
     "command": {
       "description": "The command that triggered this task",
       "type": "string",
@@ -324,6 +320,10 @@ exports[`tool parameters JSON Schema (wire shape) task 1`] = `
     "task_id": {
       "description": "This should only be set if you mean to resume a previous task (you can pass a prior task_id and the task will continue the same subagent session as before instead of creating a fresh one)",
       "type": "string",
+    },
+    "wait": {
+      "description": "Block until the subagent finishes and return its result in this turn. Off by default because a blocking delegation parks the whole conversation; only pass it when nothing else can be done first.",
+      "type": "boolean",
     },
   },
   "required": [

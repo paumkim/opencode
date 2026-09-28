@@ -42,3 +42,20 @@ export const describe = (cursor: Fanout.Cursor) =>
 
 export const baseline = (cursor: Fanout.Cursor) =>
   `Your fan-out ledger is durable and survives compaction. Right now: ${describe(cursor)}.`
+
+/**
+ * The v1 equivalent of `load`: the same sentence, or nothing at all.
+ *
+ * v1 assembles a plain system array every step and has no snapshot to reconcile
+ * against, so the cost of remembering a crew is one indexed count and, for a
+ * session that has ever delegated, one short line. A session that never
+ * delegates pays the count and emits nothing, which is the overwhelming
+ * majority and the only one whose cost is worth optimising.
+ */
+export const sentence = Effect.fn("FanoutContext.sentence")(function* (
+  db: DatabaseService,
+  sessionID: SessionSchema.ID,
+) {
+  const cursor = yield* FanoutLedger.cursor(db, sessionID)
+  return cursor.groups === 0 ? undefined : baseline(cursor)
+})
