@@ -103,3 +103,99 @@ describe("Git.CommandError", () => {
     }),
   )
 })
+
+describe("Git.CommandError on the patch path", () => {
+  // These three feed `vcs.diff` and `vcs.diffRaw`. `diffRaw` used to be typed as
+  // failing on a bad git call, but the patch readers behind it ran through
+  // `run()` and ignored `exitCode`, so the declared error was unreachable: a
+  // corrupt index produced 0 bytes of stdout and the caller read that as "no
+  // uncommitted changes" — which `sessionWarp` would then copy into a new
+  // workspace as a genuinely empty patch.
+  it.live("patchAll() fails rather than reporting an empty worktree patch", () =>
+    Effect.gen(function* () {
+      const tmp = yield* scopedTmpdir({ git: true })
+      const git = yield* Git.Service
+      yield* withCorruptIndex(tmp.path)
+
+      const error = yield* Effect.flip(git.patchAll(tmp.path, "HEAD"))
+
+      expect(error).toBeInstanceOf(Git.CommandError)
+      if (!(error instanceof Git.CommandError)) return
+      expect(error.message).toContain("index file smaller than expected")
+      expect(error.exitCode).toBe(128)
+    }),
+  )
+
+  it.live("patch() fails rather than reporting an empty file patch", () =>
+    Effect.gen(function* () {
+      const tmp = yield* scopedTmpdir({ git: true })
+      const git = yield* Git.Service
+      yield* withCorruptIndex(tmp.path)
+
+      const error = yield* Effect.flip(git.patch(tmp.path, "HEAD", "a.txt"))
+
+      expect(error).toBeInstanceOf(Git.CommandError)
+      if (!(error instanceof Git.CommandError)) return
+      expect(error.message).toContain("index file smaller than expected")
+    }),
+  )
+
+  // `--no-index` compares two paths directly and never reads the index, so a
+  // corrupt index is not a failure mode for it — this test proves a real
+  // failure is still caught. The one that actually bites is a path git cannot
+  // read: it exits 1, like a real difference does, but with an empty patch and
+  // the reason on stderr. A file removed between `status` and the patch read is
+  // the ordinary way to get there.
+  it.live("patchUntracked() fails rather than reporting an empty new-file patch", () =>
+    Effect.gen(function* () {
+      const tmp = yield* scopedTmpdir({ git: true })
+      const git = yield* Git.Service
+
+      const error = yield* Effect.flip(git.patchUntracked(tmp.path, "missing.txt"))
+
+      expect(error).toBeInstanceOf(Git.CommandError)
+      if (!(error instanceof Git.CommandError)) return
+      expect(error.message).toContain("Could not access")
+      // Exit 1, same as a successful difference — which is exactly why the
+      // empty patch, not the code, is what identifies this as a failure.
+      expect(error.exitCode).toBe(1)
+    }),
+  )
+
+  // The guard against over-reaching on this path. `git diff --no-index` exits 1
+  // to mean "the two paths differ" — the expected answer when diffing an
+  // untracked file against /dev/null. A blanket non-zero check would turn every
+  // untracked file in every worktree into a hard error, so this must succeed.
+  it.live("patchUntracked() still returns a real patch, despite git exiting 1", () =>
+    Effect.gen(function* () {
+      const tmp = yield* scopedTmpdir({ git: true })
+      const git = yield* Git.Service
+      yield* Effect.promise(() => $`echo brand-new > new.txt`.cwd(tmp.path).quiet())
+
+      const result = yield* git.patchUntracked(tmp.path, "new.txt")
+
+      expect(result.truncated).toBe(false)
+      expect(result.text).toContain("new.txt")
+      expect(result.text).toContain("+brand-new")
+    }),
+  )
+
+  it.live("patchAll() still returns real changes on a healthy worktree", () =>
+    Effect.gen(function* () {
+      const tmp = yield* scopedTmpdir({ git: true })
+      const git = yield* Git.Service
+      // `tmpdir({ git: true })` commits an *empty* root commit, so a file has to
+      // be committed before it is a modification of HEAD rather than an addition.
+      yield* Effect.promise(() => $`echo before > a.txt`.cwd(tmp.path).quiet())
+      yield* Effect.promise(() => $`git add a.txt`.cwd(tmp.path).quiet())
+      yield* Effect.promise(() => $`git commit -m "add a"`.cwd(tmp.path).quiet())
+      yield* Effect.promise(() => $`echo after > a.txt`.cwd(tmp.path).quiet())
+
+      const result = yield* git.patchAll(tmp.path, "HEAD")
+
+      expect(result.truncated).toBe(false)
+      expect(result.text).toContain("-before")
+      expect(result.text).toContain("+after")
+    }),
+  )
+})
