@@ -935,9 +935,7 @@ export function createGoalRuntime(input: { client: Client; options?: Options }):
       // for a stale row is the right way round. The real fix is to record the owning directory on
       // each goal so the sweep can scope itself; that is a persisted-schema change and an owner's
       // call, not a minimal fix.
-      const session = await Promise.resolve(client.session.get({ path: { id: sessionID } } as never)).catch(
-        () => null,
-      )
+      const session = await Promise.resolve(client.session.get({ path: { id: sessionID } } as never)).catch(() => null)
       const info = (session as { data?: { info?: unknown } } | null)?.data?.info
       // No console output here. The sweep visits EVERY active goal in the global state file on
       // every tick, so a line per goal is a line every few seconds on the user's TUI - noise that
@@ -1024,18 +1022,7 @@ export function createGoalRuntime(input: { client: Client; options?: Options }):
           // accounting is best-effort here; never mask the original failure
         }
       }
-      try {
-        await client.app?.log?.({
-          body: {
-            service: "opencode-goal",
-            level: "error",
-            message: "Turn watchdog retry failed",
-            extra: { error: error instanceof Error ? error.message : String(error) },
-          },
-        })
-      } catch {
-        return
-      }
+      await reportGoalFailure(client, "Turn watchdog retry failed", error)
     } finally {
       if (claimedContinuation) releaseContinuation(sessionID)
       if (turnWatchdogs.get(sessionID) === watchdog) turnWatchdogs.delete(sessionID)
@@ -1123,18 +1110,7 @@ export function createGoalRuntime(input: { client: Client; options?: Options }):
           // best-effort accounting must never mask the original failure
         }
       }
-      try {
-        await client.app?.log?.({
-          body: {
-            service: "opencode-goal",
-            level: "error",
-            message: "Auto-continue failed",
-            extra: { error: error instanceof Error ? error.message : String(error) },
-          },
-        })
-      } catch {
-        // logging must never replace the original error
-      }
+      await reportGoalFailure(client, "Auto-continue failed", error)
     } finally {
       releaseContinuation(sessionID)
     }
@@ -1184,9 +1160,7 @@ export function createGoalRuntime(input: { client: Client; options?: Options }):
       // so a throw here becomes an unhandled rejection. Also: only assistant messages may advance
       // the continuation baseline, or a user/compaction message ID corrupts no-progress detection.
       if (assistantMarker(message ?? {})) {
-        await goalBookkeeping("recordAssistantMessage", () =>
-          recordAssistantMessage(sessionID, message, taskTracker),
-        )
+        await goalBookkeeping("recordAssistantMessage", () => recordAssistantMessage(sessionID, message, taskTracker))
       }
     }
 
@@ -1365,3 +1339,41 @@ export const node = LayerNode.make({
 })
 
 export * as GoalDriver from "./driver"
+
+/**
+ * Records a goal failure in the server log, and reports a failure of THAT to the console.
+ *
+ * This is the goal driver's only channel to the operator, so it cannot fail quietly: the two call
+ * sites are the auto-continue and watchdog failure paths, where the alternative is a goal that stops
+ * working with nothing on record about why.
+ *
+ * Both failure modes are handled, because they are different. `app.log` resolves a non-2xx as a
+ * result tuple carrying `error` rather than rejecting, so a `try/catch` alone - which is all the old
+ * code had - never saw an HTTP failure at all. And a rejected call is still possible (a transport
+ * error, a server that is gone), so both are covered.
+ *
+ * Neither failure propagates. The callers are already in a catch block handling the original error,
+ * and replacing that error with "the log call also failed" would lose the cause the user needs. The
+ * console line is the fallback for when the log file is exactly what is broken.
+ */
+export async function reportGoalFailure(client: Client, message: string, error: unknown) {
+  // `errorDetail` is this file's own: the SDK returns a typed failure as a schema object, and a bare
+  // String(error) on one of those renders "[object Object]".
+  const detail = errorDetail(error)
+  try {
+    const result = await client.app?.log?.({
+      body: {
+        service: "opencode-goal",
+        level: "error",
+        message,
+        extra: { error: detail },
+      },
+    })
+    const failure = (result as { error?: unknown } | undefined)?.error
+    if (failure) {
+      console.error(`[goal] could not write "${message}" to the server log: ${errorDetail(failure)}`)
+    }
+  } catch (failure) {
+    console.error(`[goal] could not write "${message}" to the server log: ${errorDetail(failure)}`)
+  }
+}
