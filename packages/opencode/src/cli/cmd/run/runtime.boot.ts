@@ -95,20 +95,38 @@ const layer = Layer.effect(
       directory: string,
       model: RunInput["model"],
     ) {
+      // `config.providers` is the primary source and `provider.list()` the
+      // fallback, so a failure of the first is not itself fatal — that is what
+      // the fallback is for, and it must keep working. But when the second
+      // fails too there is no data *and* a real error, and the old `?? []`
+      // claimed the user has no models. That reads as broken auth or a broken
+      // install rather than as the transient read failure it is, and a user who
+      // pinned a model also lost every variant, because `info` is looked up in
+      // the empty list.
       const connected = yield* Effect.promise(() =>
         sdk.config
           .providers({ directory })
-          .then((item) => item.data?.providers)
-          .catch(() => undefined),
+          .then((item) => ({ data: item.data?.providers, failed: false }))
+          .catch(() => ({ data: undefined, failed: true })),
       )
-      const providers = yield* Effect.promise(() =>
-        connected
-          ? Promise.resolve(connected)
-          : sdk.provider
-              .list()
-              .then((item) => item.data?.all ?? [])
-              .catch(() => []),
-      )
+      const providers =
+        connected.data !== undefined
+          ? connected.data
+          : yield* Effect.promise(() =>
+              sdk.provider
+                .list()
+                .then((item) => item.data?.all)
+                .catch(() => undefined),
+            )
+      if (providers === undefined) {
+        return yield* Effect.die(
+          new Error(
+            `could not read the provider list for ${directory}: config.providers${
+              connected.failed ? " and provider.list both failed" : " returned no data"
+            }, so the model list is unknown rather than empty`,
+          ),
+        )
+      }
       const limits = Object.fromEntries(
         providers.flatMap((provider) =>
           Object.entries(provider.models ?? {}).flatMap(([modelID, info]) => {
@@ -183,7 +201,10 @@ export async function resolveModelInfo(
   directory: string,
   model: RunInput["model"],
 ): Promise<ModelInfo> {
-  return runtime.runPromise((svc) => svc.resolveModelInfo(sdk, directory, model)).catch(() => emptyModelInfo())
+  // No catch: see the reasoning in the resolver above. `provider.list()`
+  // defaults are the one place a fabricated empty value is defensible, and it
+  // is not here.
+  return runtime.runPromise((svc) => svc.resolveModelInfo(sdk, directory, model))
 }
 
 // Fetches session messages to determine if this is the first turn and build prompt history.
