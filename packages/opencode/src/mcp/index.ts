@@ -389,14 +389,16 @@ const layer = Layer.effect(
         }
 
         return yield* Effect.gen(function* () {
-          const listed = mcpClient.getServerCapabilities()?.tools ? yield* McpCatalog.defs(mcpClient, mcp.timeout) : []
-          if (!listed) {
-            return yield* Effect.fail(new Error("Failed to get tools"))
+          const listed = mcpClient.getServerCapabilities()?.tools
+            ? yield* McpCatalog.defs(mcpClient, key, mcp.timeout)
+            : ({ tools: [], error: undefined } satisfies McpCatalog.ToolsResult)
+          if (!listed.tools) {
+            return yield* Effect.fail(new Error(McpCatalog.toolsFailure(listed.error)))
           }
           return {
             mcpClient,
             status,
-            defs: listed,
+            defs: listed.tools,
             instructions: mcpClient.getInstructions()?.trim(),
           } satisfies CreateResult
         }).pipe(
@@ -463,11 +465,23 @@ const layer = Layer.effect(
       client.setNotificationHandler(ToolListChangedNotificationSchema, async () => {
         if (s.clients[name] !== client || s.status[name]?.status !== "connected") return
 
-        const listed = await bridge.promise(McpCatalog.defs(client, timeout))
-        if (!listed) return
+        const listed = await bridge.promise(McpCatalog.defs(client, name, timeout))
+        if (!listed.tools) {
+          // The server told us its tool list changed and we could not re-read it, so `s.defs[name]`
+          // stays stale until the next successful refresh. That is the right call — replacing a
+          // good list with an empty one would be worse — but it used to happen with no record at
+          // all, leaving a permanently stale list nobody could explain. Same log the sibling
+          // `fetch` helper emits for a failed prompt/resource list.
+          await bridge.promise(
+            Effect.logWarning("failed to get tools", { clientName: name, error: listed.error.message }).pipe(
+              Effect.ignore,
+            ),
+          )
+          return
+        }
         if (s.clients[name] !== client || s.status[name]?.status !== "connected") return
 
-        s.defs[name] = listed
+        s.defs[name] = listed.tools
         await bridge.promise(events.publish(ToolsChanged, { server: name }).pipe(Effect.ignore))
       })
     }
@@ -883,17 +897,20 @@ const layer = Layer.effect(
 
         const listed = client
           ? client.getServerCapabilities()?.tools
-            ? yield* McpCatalog.defs(client, mcpConfig.timeout)
-            : []
+            ? yield* McpCatalog.defs(client, mcpName, mcpConfig.timeout)
+            : ({ tools: [], error: undefined } satisfies McpCatalog.ToolsResult)
           : undefined
-        if (!client || !listed) {
+        if (!client || !listed?.tools) {
           yield* Effect.tryPromise(() => client?.close() ?? Promise.resolve()).pipe(Effect.ignore)
-          return { status: "failed", error: "Failed to get tools" } satisfies Status
+          // No client at all is reported by `startAuth` already; a client that could not be asked
+          // for its tools is only diagnosable from the reason it gave.
+          const error = listed?.error ? McpCatalog.toolsFailure(listed.error) : "Failed to get tools"
+          return { status: "failed", error } satisfies Status
         }
 
         const s = yield* InstanceState.get(state)
         yield* auth.clearOAuthState(mcpName)
-        return yield* storeClient(s, mcpName, client, listed, client.getInstructions()?.trim(), mcpConfig.timeout)
+        return yield* storeClient(s, mcpName, client, listed.tools, client.getInstructions()?.trim(), mcpConfig.timeout)
       }
 
       const callbackPromise = McpOAuthCallback.waitForCallback(result.oauthState, mcpName, result.callbackOwner!)

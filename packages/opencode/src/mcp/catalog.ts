@@ -35,8 +35,29 @@ export async function paginate<T, R extends { nextCursor?: string }>(
   throw new Error(`MCP list exceeded ${MAX_LIST_PAGES} pages`)
 }
 
-export function defs(client: Client, timeout?: number) {
-  return listTools(client, timeout ?? DEFAULT_TIMEOUT).pipe(Effect.catch(() => Effect.void))
+/**
+ * Outcome of a `tools/list` round-trip. A discriminated union rather than
+ * `Tool[] | undefined` so the reason survives to the caller: `defs` used to
+ * `catch(() => Effect.void)`, which left every consumer with nothing to report
+ * but the fact of failure, so the user saw a bare "Failed to get tools" and a
+ * failed `tools/list_changed` refresh left the tool list stale with no log at
+ * all. Both hid the cause — a timeout, a protocol error and a rejected auth
+ * are three different problems to go looking for.
+ */
+export type ToolsResult =
+  | { readonly tools: MCPToolDef[]; readonly error: undefined }
+  | { readonly tools: undefined; readonly error: Error }
+
+export function defs(client: Client, clientName: string, timeout?: number) {
+  return listTools(client, timeout ?? DEFAULT_TIMEOUT).pipe(
+    Effect.map((tools): ToolsResult => ({ tools, error: undefined })),
+    Effect.catch((error) => Effect.succeed({ tools: undefined, error })),
+  )
+}
+
+/** The reason a `tools/list` call failed, for a message the user will read. */
+export function toolsFailure(error: Error) {
+  return `Failed to get tools: ${error.message}`
 }
 
 export function convertTool(mcpTool: MCPToolDef, client: Client, timeout?: number): Tool {

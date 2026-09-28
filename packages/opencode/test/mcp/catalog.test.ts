@@ -96,12 +96,62 @@ test("preserves output schema validation across paginated tool discovery", async
   await Promise.all([client.connect(clientTransport), server.connect(serverTransport)])
 
   try {
-    const tools = await Effect.runPromise(McpCatalog.defs(client))
-    expect(tools?.map((tool) => tool.name)).toEqual(["first", "second"])
+    const listed = await Effect.runPromise(McpCatalog.defs(client, "pagination"))
+    expect(listed.error).toBeUndefined()
+    expect(listed.tools?.map((tool) => tool.name)).toEqual(["first", "second"])
     await expect(client.callTool({ name: "first", arguments: {} })).rejects.toThrow(
       "Structured content does not match the tool's output schema",
     )
   } finally {
     await Promise.all([client.close(), server.close()])
   }
+})
+
+// `defs` used to end in `Effect.catch(() => Effect.void)`, so a failed `tools/list` left the
+// caller with nothing but the fact of failure. Both surviving consumers then reported the fixed
+// string "Failed to get tools", and the `tools/list_changed` handler dropped the refresh with no
+// record at all — a permanently stale tool list nobody could explain. A timeout, a protocol error
+// and a rejected auth are three different problems to go looking for, so the reason has to arrive.
+describe("McpCatalog.defs", () => {
+  const connect = async (name: string, handler: () => Promise<any>) => {
+    const server = new Server({ name, version: "1.0.0" }, { capabilities: { tools: {} } })
+    server.setRequestHandler(ListToolsRequestSchema, handler as any)
+    const client = new Client({ name: `${name}-test`, version: "1.0.0" })
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+    await Promise.all([client.connect(clientTransport), server.connect(serverTransport)])
+    return { server, client }
+  }
+
+  test("returns the tools when the server answers", async () => {
+    const { server, client } = await connect("ok", () =>
+      Promise.resolve({ tools: [{ name: "ping", inputSchema: { type: "object", properties: {} } }] }),
+    )
+    try {
+      const result = await Effect.runPromise(McpCatalog.defs(client, "ok"))
+      expect(result.error).toBeUndefined()
+      expect(result.tools?.map((t) => t.name)).toEqual(["ping"])
+    } finally {
+      await client.close()
+      await server.close()
+    }
+  })
+
+  test("carries the reason instead of discarding it", async () => {
+    const { server, client } = await connect("bad", () => Promise.reject(new Error("MCP server did not respond")))
+    try {
+      const result = await Effect.runPromise(McpCatalog.defs(client, "bad"))
+      expect(result.tools).toBeUndefined()
+      expect(result.error).toBeInstanceOf(Error)
+      // The whole point: the cause survives to the message the user reads.
+      expect(result.error?.message).toContain("MCP server did not respond")
+      // The SDK prefixes the cause with its JSON-RPC code; what matters is that the cause is
+      // there at all, where before the message was the bare "Failed to get tools".
+      const message = McpCatalog.toolsFailure(result.error!)
+      expect(message).toStartWith("Failed to get tools: ")
+      expect(message).toContain("MCP server did not respond")
+    } finally {
+      await client.close()
+      await server.close()
+    }
+  })
 })
