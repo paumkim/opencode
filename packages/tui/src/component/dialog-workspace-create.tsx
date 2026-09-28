@@ -9,7 +9,7 @@ import { errorMessage } from "../util/error"
 import { useSDK } from "../context/sdk"
 import { useToast } from "../ui/toast"
 import { DialogAlert } from "../ui/dialog-alert"
-import { DialogWorkspaceFileChanges } from "./dialog-workspace-file-changes"
+import { DialogWorkspaceFileChanges, readWorkspaceFileChanges } from "./dialog-workspace-file-changes"
 
 type Adapter = ExperimentalWorkspaceAdapterListResponse[number]
 
@@ -167,10 +167,19 @@ export async function confirmWorkspaceFileChanges(input: {
   sdk: ReturnType<typeof useSDK>
   sourceWorkspaceID?: string
 }) {
-  const status = await input.sdk.client.vcs.status({ workspace: input.sourceWorkspaceID }).catch(() => undefined)
-  const fileChangeChoice = status?.data?.length
-    ? await DialogWorkspaceFileChanges.show(input.dialog, status.data)
-    : "no"
+  const status = await readWorkspaceFileChanges(input.sdk.client, { workspace: input.sourceWorkspaceID })
+  if (!status.ok) {
+    // Not knowing the working tree's state is not the same as it being clean.
+    // Saying nothing here would carry the workspace over with none of the
+    // uncommitted changes and no indication that they were left behind.
+    await DialogAlert.show(
+      input.dialog,
+      "Unable to read file changes",
+      `Could not read the working tree's file changes: ${status.reason}`,
+    )
+    return false
+  }
+  const fileChangeChoice = status.data.length ? await DialogWorkspaceFileChanges.show(input.dialog, status.data) : "no"
   if (!fileChangeChoice) return
   return fileChangeChoice === "yes"
 }
