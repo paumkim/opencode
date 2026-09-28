@@ -32,14 +32,26 @@ function budgetLines(goal: GoalSnapshot) {
 }
 
 /**
- * The completed-work ledger and the recent checkpoints, rendered into the ONE prompt an unattended
- * continuation turn actually reads.
+ * The completed-work ledger, the recent checkpoints, and the procedure for choosing the next unit of
+ * work - rendered into the ONE prompt an unattended continuation turn actually reads.
  *
  * Without this the prompt carried the objective and the budget and nothing else, while telling the
  * model to distrust its own prior context. A goal whose objective is open-ended - "find further
  * bugs" - therefore restarted its whole audit every turn, re-found the same defects, and re-fixed
  * them, and nothing in the prompt let it see that it had already done so. Naming what is finished
  * is what lets it move forward instead.
+ *
+ * The ledger alone was still not enough, and the gap it left is the one that decides whether a turn
+ * moves: for an open-ended objective, CHOOSING the next unit is the whole difficulty, and the block
+ * below the ledger said nothing about how to do it. Its only advice was bookkeeping - record this,
+ * do not redo that, close the goal when the list is full - so a turn that had finished its last
+ * named item was left to invent its own next one, which in practice meant re-running the same audit
+ * or taking the easiest thing it could see. That is the loop the ledger was added to break: a run
+ * that spends its budget re-deriving its own history never grows the ledger, and the stall detector
+ * then pauses a goal that was never actually stuck. So the procedure below states the choice, the
+ * declared target, and the order of operations, because "call record_goal_completion the moment a
+ * unit is done" without the order is how a ledger ends up claiming work the repository does not
+ * contain - which makes the NEXT turn skip real work.
  */
 function progressLines(goal: GoalSnapshot) {
   const recent = (goal.checkpoints ?? []).slice(-4).map((c) => c.summary)
@@ -57,9 +69,12 @@ ${recent.map((summary) => `- ${escapeXmlText(summary)}`).join("\n")}`
     : ""
 }
 
-Moving forward:
-- Call record_goal_completion with a short description the moment a unit of work is genuinely done and verified. That ledger is how the next turn knows where to resume.
-- If you find yourself re-doing, re-verifying, or re-fixing something listed above, stop and pick a DIFFERENT unfinished item instead. Repeating finished work counts as no progress and will pause the goal.
+Next unit of work - pick this first, then do it:
+- Choose it as work NOT in the completed list above, preferring the highest-value unfinished item over the easiest one. If you catch yourself re-doing, re-verifying, or re-fixing something already listed, pick a DIFFERENT unfinished item instead; repeating finished work counts as no progress and will pause the goal.
+- Name that one unit in a single line before you start it, so the turn has a declared target rather than whatever is nearest.
+- Then do it in this order: implement -> verify with real evidence (test output, command output, runtime behavior) -> commit if this repo expects commits -> call record_goal_completion. Recording last is the point: an entry written before the work is committed claims something the repository does not contain, and the next turn trusts it and skips the work.
+- If the remaining work has more than one step, track it with the \`todowrite\` tool, keeping exactly one item in progress.
+- If a fresh turn or a compaction left no clear next unit, reconstruct it from the worktree - uncommitted changes, recent commits, failing tests - instead of re-running the whole audit.
 - If the objective is fully covered by the completed list, call update_goal with status "complete" and the evidence. Do not keep searching for new work that is not required.
 
 `
@@ -75,8 +90,8 @@ ${escapeXmlText(goal.objective)}
 </untrusted_objective>
 ${progressLines(goal)}
 Continuation behavior:
-- This goal persists across turns. Ending this turn does not require shrinking the objective to what fits now.
-- Keep the full objective intact. If it cannot be finished now, make concrete progress toward the real requested end state.
+- This goal persists across turns, so keep the full objective intact and make concrete progress toward the real requested end state. Ending a turn does not require shrinking the objective to what fits now.
+- The objective is not only defect repair. When it names a feature, a capability, or an affordance the repo does not have yet, build it: a run that closed defects but never built the requested capability has not met the objective, however many defects it fixed.
 - Temporary rough edges are acceptable while the work is moving in the right direction. Completion still requires the requested end state to be true and verified.
 - Long runs: keep your context small. Call the \`compact\` tool (no permission needed, it preserves the goal and committed work) when the window is getting heavy, when tool output has piled up, or when you move to a new unit of work. Every turn re-processes the whole window, so an unpruned context is the main reason a long goal starts responding slowly.
 
@@ -84,29 +99,42 @@ Budget:
 ${budgetLines(goal)}
 
 Work from evidence:
-- Use the current worktree and external state as authoritative.
-- Inspect the current state before relying on prior conversation context.
+- Use the current worktree and external state as authoritative: inspect the current state before relying on prior conversation context.
 - Improve, replace, or remove existing work as needed to satisfy the actual objective.
 
 Fidelity:
 - Optimize each turn for movement toward the requested end state, not the smallest stable-looking subset.
 - Do not substitute a narrower, safer, smaller, merely compatible, or easier-to-test solution because it is more likely to pass current tests.
+- Do not settle into safe repairs as a way of avoiding the harder build work. An objective that asks for a capability needs the capability, not only a cleaner codebase.
 - An edit is aligned only if it makes the requested final state more true.
 
-Completion audit:
+Closing the goal:
 - Restate the objective as concrete deliverables or success criteria.
 - Build a prompt-to-artifact checklist that maps every explicit requirement, named file, command, test, gate, and deliverable to concrete evidence.
 - Inspect the relevant files, command output, test results, PR state, runtime behavior, or other real evidence for each checklist item.
 - Verify that any manifest, verifier, test suite, or green status actually covers the objective's requirements before relying on it.
-- Treat uncertainty, missing evidence, indirect evidence, or weak coverage as not achieved.
-
-Blocked audit:
-- Do not call update_goal with status "unmet" merely because work is hard, slow, uncertain, incomplete, or would benefit from clarification.
-- Use status "unmet" only when you are truly at an impasse and cannot make meaningful progress without user input or an external-state change.
-
-Do not rely on intent, partial progress, elapsed effort, memory of earlier work, or a plausible final answer as proof of completion. Only call update_goal with status "complete" when the objective has actually been achieved and no required work remains, and include concise evidence. If the objective is impossible or blocked by missing external input, call update_goal with status "unmet" and include the blocker.`
+- Treat uncertainty, missing evidence, indirect evidence, or weak coverage as not achieved, and never accept intent, partial progress, elapsed effort, or memory of earlier work as proof.
+- Only then call update_goal: status "complete" with concise evidence once that audit passes, or status "unmet" with the blocker when you are truly at an impasse and cannot make meaningful progress without user input or an external-state change - not merely because the work is hard, slow, uncertain, or would benefit from clarification.`
 }
 
+// The wrap-up turn, sent instead of a continuation once a limit has stopped the run. It used to say
+// "summarize useful progress" and nothing else, which is where the last units of work a run finished
+// were lost: the completed list is the goal's only durable record, the next turn is handed THAT
+// rather than this transcript, and prose in a transcript nobody re-reads cannot tell finished work
+// from interrupted work. So the turn is told to record first and wrap up after, and the ordering is
+// the point - an instruction to record that trails "wrap up this turn soon" is an instruction the
+// turn never follows, because the turn ends.
+//
+// The rest is the coupling, and it is load-bearing in both directions. This prompt is sent
+// EXCLUSIVELY for a `budgetLimited` or `usageLimited` goal - `reserveContinuation` routes both here
+// and `canContinue` covers neither - so it is precisely the status the runtime used to refuse a
+// record on, and the instruction below was a no-op: the tool answered "nothing was recorded" and the
+// work was lost exactly as it was before the sentence was added. `canRecordCompletion` in impl.ts is
+// what makes the sentence actionable (it admits the limited statuses, and still refuses `paused` and
+// the closed ones), and the `record_goal_completion` wrapper asks that same predicate, so the two
+// cannot drift apart. Narrowing that predicate again would silently turn this prompt back into a
+// wasted tool call, which is why the regression test asserts the ordering of this text AND a real
+// record landing on a tripped limit, rather than checking the sentence is present.
 export function limitPrompt(goal: GoalSnapshot) {
   return `The active session goal has reached a safety limit.
 
@@ -122,7 +150,7 @@ ${budgetLines(goal)}
 Status: ${goal.status}
 Stop reason: ${goal.stopReason ?? "goal limit reached"}
 
-Do not start new substantive work for this goal. Wrap up this turn soon: summarize useful progress, identify remaining work or blockers, and leave the user with a clear next step. Do not call update_goal unless the goal is actually complete.`
+Do not start new substantive work for this goal. Before you stop, call record_goal_completion once for each unit you actually finished and verified in this session - work that is done but unrecorded is lost, because the completed list is the only durable record of it and the next turn is handed that list instead of this conversation. "Summarize useful progress" in your reply is not a substitute: a summary is prose in a transcript nobody re-reads, so without the tool call the next turn cannot tell finished work from interrupted work and redoes it. Then wrap up this turn soon: identify remaining work or blockers and leave the user with a clear next step. Do not call update_goal unless the goal is actually complete.`
 }
 
 export function planModeReminder(goal: GoalSnapshot) {

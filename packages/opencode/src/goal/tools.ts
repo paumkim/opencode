@@ -2,6 +2,7 @@ import { Effect, Schema } from "effect"
 import { z } from "zod"
 import {
   clearGoal,
+  canRecordCompletion,
   completeGoal,
   createGoal,
   escapePromptText,
@@ -115,6 +116,23 @@ export const goalEvidenceArg = z
   .min(1)
   .refine((value) => withinCharacterLimit(value, GOAL_MAX_EVIDENCE), { message: evidenceLimitMessage })
 
+/**
+ * The optional short-label arg, shared by create_goal/set_goal/update_goal_objective. Exported so a
+ * test can assert the real boundary rather than a reconstruction of it.
+ *
+ * No `.max(...)` on purpose: an over-long title is TRUNCATED by `validateTitle`, not rejected. The
+ * objective is the goal's durable record and is worth refusing, but a title only ever appears in a
+ * one-line bar that truncates anyway - so a schema-level refusal here would fail goal creation over
+ * a cosmetic field, and the tool boundary would then disagree with the implementation on purpose.
+ */
+export const goalTitleArg = z
+  .string()
+  .min(1)
+  .optional()
+  .describe(
+    "Optional SHORT one-line label for the session status bar, a few words and not a sentence. This is what the bar shows instead of the objective, which is the durable record and may be as detailed as the work needs. Omit it if you have no better short label; the objective is then used as before.",
+  )
+
 const PLAN_MODE_CREATE_NOTICE =
   'Goal recorded while the session is in Plan mode, so execution is paused. Do not start implementation work now. Ask the user to switch to Build mode and resume the goal (for example with "/goal resume") to begin execution.'
 
@@ -184,6 +202,7 @@ export function goalTools(deps: Deps): Record<string, Tool.Def<Schema.Decoder<un
     const sessionTokensAtCreation = await fetchSessionTokens(deps.client, ctx.sessionID).catch(() => null)
     const goal = await createGoal(ctx.sessionID, input.objective, {
       ...resolveCreateGoalLimits(input, options),
+      title: input.title ?? null,
       // A per-call value wins over the config default. The defaults are tuned for interactive
       // use and self-pause an unattended run quickly, so a caller that asks for a tolerant goal
       // must not be silently downgraded to them.
@@ -225,20 +244,21 @@ export function goalTools(deps: Deps): Record<string, Tool.Def<Schema.Decoder<un
     ),
     record_goal_completion: defineTool(
       "record_goal_completion",
-      "Record one unit of work as finished on the active session goal. Call this as soon as a bounded deliverable is done AND verified, with a short description of what is now true. The completed list is written into every continuation prompt, so it is how the next turn knows what is already done and can move forward instead of redoing it. Re-recording an item that is already listed is a no-op. Recording nothing across a tool-heavy turn counts as no progress and will pause the goal, so a long run must record each finished unit.",
+      "Record one unit of work as finished on the session goal. Call this as soon as a bounded deliverable is done AND verified, with a short description of what is now true. The completed list is written into every continuation prompt, so it is how the next turn knows what is already done and can move forward instead of redoing it. Re-recording an item that is already listed is a no-op. Recording nothing across a tool-heavy turn counts as no progress and will pause the goal, so a long run must record each finished unit. A goal that has hit a safety limit still accepts records - it is not finished, and its ledger is what the resumed run reads first - so record what you completed during the wrap-up turn too. A paused or closed goal does not accept them.",
       { item: z.string().min(1).describe("Short description of the finished work, as a statement of what is now true.") },
       deps,
       async (args, context) => {
         const goal = await recordGoalCompletion(context.sessionID, args.item)
         if (!goal) return "No active goal for this session; nothing was recorded."
-        // A snapshot is returned for a goal in ANY status, but only an ACTIVE goal is recorded onto.
-        // Testing only for `!goal` therefore reported a discarded record as a success-shaped
-        // `{goal}` payload: the model was told to call this the moment a unit is done, believed it
-        // had closed the unit out, and the next turn's ledger did not list it - so the work was
-        // redone. That is the loop the ledger exists to prevent, and this is what made it invisible.
-        // The status is the same field `recordGoalCompletion` gates on, so the two cannot disagree.
-        if (goal.status !== "active")
-          return `The goal for this session is ${goal.status}, not active, so nothing was recorded. Its completed list still reads ${
+        // A snapshot is returned for a goal in ANY status, but only a goal that can still accept a
+        // record has one recorded onto. Testing only for `!goal` therefore reported a discarded
+        // record as a success-shaped `{goal}` payload: the model was told to call this the moment a
+        // unit is done, believed it had closed the unit out, and the next turn's ledger did not list
+        // it - so the work was redone. That is the loop the ledger exists to prevent, and this is
+        // what made it invisible. The predicate is `canRecordCompletion` itself rather than a second
+        // spelling of it, so this report and `recordGoalCompletion` cannot disagree.
+        if (!canRecordCompletion(goal.status))
+          return `The goal for this session is ${goal.status}, and a ${goal.status} goal does not accept completed-work records, so nothing was recorded. Its completed list still reads ${
             goal.completed.length === 0 ? "empty" : `${goal.completed.length} item(s)`
           }.`
         return JSON.stringify({ goal }, null, 2)
@@ -246,16 +266,21 @@ export function goalTools(deps: Deps): Record<string, Tool.Def<Schema.Decoder<un
     ),
     create_goal: defineTool(
       "create_goal",
-      "Create a goal only when explicitly requested by the user or system/developer instructions; do not infer goals from ordinary tasks. Fails while a goal is still open (active, paused, budgetLimited, or usageLimited); a goal that is complete or unmet does not block a new one, so do not try to close or clear it first. Limits are unlimited by default: omitting a limit arg (or passing null) means no token budget, no auto-continue cap, and no duration cap, so only pass numbers the user explicitly asked for. While the session is in Plan mode, the goal is recorded as paused and execution requires the user to switch to Build mode.",
-      { objective: goalObjectiveArg.describe("The concrete objective to start pursuing."), ...limitArgs },
+      "Create a goal only when explicitly requested by the user or system/developer instructions; do not infer goals from ordinary tasks. Fails while a goal is still open (active, paused, budgetLimited, or usageLimited); a goal that is complete or unmet does not block a new one, so do not try to close or clear it first. Limits are unlimited by default: omitting a limit arg (or passing null) means no token budget, no auto-continue cap, and no duration cap, so only pass numbers the user explicitly asked for. While the session is in Plan mode, the goal is recorded as paused and execution requires the user to switch to Build mode. The objective is the durable record and may be as detailed as the work needs; `title` is the short one-line label the session status bar shows, so pass a few words (not a whole clause) whenever you can.",
+      {
+        objective: goalObjectiveArg.describe("The concrete objective to start pursuing."),
+        title: goalTitleArg,
+        ...limitArgs,
+      },
       deps,
       async (args, context) => createGoalFromTool(args as CreateGoalArgs, context),
     ),
     set_goal: defineTool(
       "set_goal",
-      "Set a new goal when the user explicitly asks the AGENT to formulate and set its own goal (the model writes the objective itself). Prefer create_goal when passing the user's own words. Fails while a goal is still open (active, paused, budgetLimited, or usageLimited); a goal that is complete or unmet does not block a new one, so do not try to close or clear it first. Limits are unlimited by default: omitting a limit arg (or passing null) means no token budget, no auto-continue cap, and no duration cap, so only pass numbers the user explicitly asked for. While the session is in Plan mode, the goal is recorded as paused and execution requires the user to switch to Build mode.",
+      "Set a new goal when the user explicitly asks the AGENT to formulate and set its own goal (the model writes the objective itself). Prefer create_goal when passing the user's own words. Fails while a goal is still open (active, paused, budgetLimited, or usageLimited); a goal that is complete or unmet does not block a new one, so do not try to close or clear it first. Limits are unlimited by default: omitting a limit arg (or passing null) means no token budget, no auto-continue cap, and no duration cap, so only pass numbers the user explicitly asked for. While the session is in Plan mode, the goal is recorded as paused and execution requires the user to switch to Build mode. The objective is the durable record and may be as detailed as the work needs; `title` is the short one-line label the session status bar shows, so pass a few words (not a whole clause) whenever you can.",
       {
         objective: goalObjectiveArg.describe("The model-formulated concrete objective to start pursuing."),
+        title: goalTitleArg,
         ...limitArgs,
       },
       deps,
@@ -263,14 +288,15 @@ export function goalTools(deps: Deps): Record<string, Tool.Def<Schema.Decoder<un
     ),
     update_goal_objective: defineTool(
       "update_goal_objective",
-      "Edit the current OpenCode goal objective when the user explicitly asks to edit or replace it.",
+      "Edit the current OpenCode goal objective when the user explicitly asks to edit or replace it. The objective is the durable record and may be as detailed as the work needs; `title` is the short one-line label the session status bar shows, so pass a few words (not a whole clause) whenever you can.",
       {
         objective: goalObjectiveArg.describe("The updated concrete objective."),
+        title: goalTitleArg,
         status: z.enum(["active", "paused"]).optional().describe("Whether the edited goal should be active or paused."),
       },
       deps,
       async (args, context) => {
-        const input = args as { objective: string; status?: "active" | "paused" }
+        const input = args as { objective: string; title?: string; status?: "active" | "paused" }
         const requested = input.status ?? "active"
         const planningOnly = requested === "active" && isPlanAgent(context.agent)
         const goal = await updateGoalObjective(
@@ -283,6 +309,9 @@ export function goalTools(deps: Deps): Record<string, Tool.Def<Schema.Decoder<un
             // Editing the objective resumes, so this path needs the same configured turn default the
             // resume guard and runtime enforcement share.
             defaultMaxAutoTurns: maxAutoTurns,
+            // Omitted (undefined) keeps the existing label; only a title the model actually sends
+            // replaces it, so an ordinary objective edit cannot drop the bar's label.
+            title: input.title,
           },
         )
         return JSON.stringify(planningOnly ? { goal, plan_mode_notice: PLAN_MODE_CREATE_NOTICE } : { goal }, null, 2)

@@ -26,6 +26,7 @@ import {
   truncateToCodePoints,
   GOAL_MAX_EVIDENCE,
   GOAL_MAX_OBJECTIVE,
+  GOAL_MAX_TITLE,
   StateSchema,
   GoalError,
 } from "./schema"
@@ -226,6 +227,22 @@ export function validateObjective(objective: string) {
   return value
 }
 
+/**
+ * The short status-bar label, bounded rather than rejected.
+ *
+ * This is the deliberate opposite of `validateObjective`, which throws. The objective is the goal's
+ * durable record, so a bad one has to be refused; the title only ever appears in a one-line bar that
+ * truncates anyway, so refusing goal creation over it would turn a cosmetic slip into a hard
+ * failure. Trimming, then `undefined` for anything blank (so a whitespace-only title cannot render
+ * as an empty row that looks like no title at all), then a code-point truncation - `GoalSchema`
+ * declares the field as an optional String, so `undefined` is exactly how "no title" is spelled.
+ */
+export function validateTitle(title: string | null | undefined): string | undefined {
+  const value = title?.trim()
+  if (!value) return undefined
+  return truncateToCodePoints(value, GOAL_MAX_TITLE)
+}
+
 export function validateEvidence(evidence: string | null | undefined, label: string) {
   const value = evidence?.trim()
   if (!value) throw new GoalError({ message: `${label} must not be empty` })
@@ -299,6 +316,11 @@ function normalizeGoal(goal: Goal) {
   goal.maxPromptFailures = positiveIntegerOrNull(goal.maxPromptFailures)
   goal.budgetWrapupSent = goal.budgetWrapupSent === true
   goal.stopReason ??= null
+  // The state file is user-writable, so the bar cannot trust this field: an unbounded or
+  // whitespace-only title read straight off disk would render as a full-width row of padding (the
+  // blank case) or defeat the bar's own truncation. Normalizing here - rather than only on the way
+  // in - means a hand-edited value is bounded on the next read, not just on the next create.
+  goal.title = validateTitle(goal.title)
   return goal
 }
 
@@ -358,6 +380,31 @@ function canContinue(status: Goal["status"]) {
 }
 
 /**
+ * True when a goal can still accept a record of completed work - the ONE definition of that, shared
+ * with the `record_goal_completion` tool so the two can never disagree about whether a record was
+ * kept.
+ *
+ * The LIMITED statuses are included and `paused` is not, which is the distinction that matters:
+ * `limitPrompt` is sent exclusively for a `budgetLimited`/`usageLimited` goal and tells the model to
+ * record every unit it finished before stopping, so gating on `active` alone made the goal system's
+ * own wrap-up prompt a no-op and threw away the last units of an overnight run. A limited goal is not
+ * closed - `extendGoal` accepts it, `setGoalStatus` resumes it once its limits allow - and its ledger
+ * is exactly what the resumed run needs first, because the next turn is handed that list rather than
+ * the transcript. A PAUSED goal is a deliberate stop where no turn is running, and a complete/unmet
+ * goal is finished, so neither may take new work records.
+ *
+ * Deliberately NOT widened to cover recording a turn's PROGRESS. This is the ledger only:
+ * `recordAssistantProgress` stays `active`-only because its stall branch can set `status = "paused"`,
+ * and letting a limited goal through there would rewrite its limited status and bypass the
+ * "extend before resuming" guard in `setGoalStatus` (which only rejects budgetLimited/usageLimited)
+ * - the same hazard `recordContinuationResult` documents where it refuses to auto-pause a limited
+ * goal.
+ */
+export function canRecordCompletion(status: Goal["status"]) {
+  return status === "active" || status === "budgetLimited" || status === "usageLimited"
+}
+
+/**
  * Shared reactivation bookkeeping. Every path that moves a goal back to `active` must reset the
  * failure and no-progress counters, otherwise a goal resumed via one path behaves differently
  * from the same goal resumed via another.
@@ -387,6 +434,7 @@ export function snapshot(goal: Goal): GoalSnapshot {
   return {
     sessionID: goal.sessionID,
     objective: goal.objective,
+    title: goal.title,
     status: goal.status,
     tokenBudget: goal.tokenBudget,
     tokensUsed: goal.tokensUsed,
@@ -448,6 +496,10 @@ export async function createGoal(
     const goal: Goal = {
       sessionID,
       objective: value,
+      // `normalizeCreateOptions` speaks `null` for "no title" because every sibling option in
+      // `CreateGoalOptions` does; the goal itself spells that `undefined`, and `GoalSchema` declares
+      // the field as an optional String, which does not accept null.
+      title: normalizedOptions.title ?? undefined,
       status: normalizedOptions.initialStatus,
       tokenBudget: normalizedOptions.tokenBudget,
       tokensUsed: 0,
@@ -496,7 +548,7 @@ export async function updateGoalObjective(
   sessionID: string,
   objective: string,
   status: "active" | "paused" = "active",
-  options?: { agent?: string | null; planModePause?: boolean; defaultMaxAutoTurns?: number },
+  options?: { agent?: string | null; planModePause?: boolean; defaultMaxAutoTurns?: number; title?: string | null },
 ) {
   const value = validateObjective(objective)
   const agent = typeof options?.agent === "string" && options.agent.trim() ? options.agent.trim() : null
@@ -535,6 +587,18 @@ export async function updateGoalObjective(
     // the result could never exceed the 280 the outer call enforces, so the 400 did nothing except
     // imply that a history entry can hold 400 characters of objective when it can hold 280.
     pushHistory(goal, "updated", `Goal objective updated: ${value}`)
+    // A title is OPTIONAL here, and omitted is not the same as cleared: `update_goal_objective` is
+    // how the model edits the objective, which is a required arg, so a caller that has no reason to
+    // relabel the bar must not have its label silently dropped by an arg it never sent. An explicit
+    // `null`/blank does clear it, and the change is recorded so a relabel is visible in the history
+    // rather than looking like it never happened.
+    if (options?.title !== undefined) {
+      const title = validateTitle(options.title)
+      if (title !== goal.title) {
+        goal.title = title
+        pushHistory(goal, "updated", title ? `Goal title updated: ${title}` : "Goal title cleared.")
+      }
+    }
     if (planModePause) pushHistory(goal, "paused", goal.lastStatus)
     return { goal: snapshot(goal), limited: false }
   })
@@ -1017,7 +1081,14 @@ function boundCompletedItems(items: string[] | undefined): string[] {
 export async function recordGoalCompletion(sessionID: string, item: string) {
   return mutate((state) => {
     const goal = state.goals[sessionID]
-    if (!goal || goal.status !== "active") return goal ? snapshot(goal) : null
+    // `canRecordCompletion`, not `status !== "active"`: a limited goal is still an OPEN goal, and the
+    // wrap-up prompt the goal itself sends for exactly that status ends with "call
+    // record_goal_completion once for each unit you actually finished and verified in this session".
+    // Gating on `active` refused that call and reported the refusal back to the model, so the units
+    // finished just before the limit tripped were lost from the only durable record of them - and the
+    // next turn, which is handed the ledger rather than the transcript, redid them. A PAUSED goal and
+    // a closed one are refused, and the refusal is still a snapshot so the tool can name the status.
+    if (!goal || !canRecordCompletion(goal.status)) return goal ? snapshot(goal) : null
     const value = truncateToCodePoints(item.trim(), GOAL_MAX_COMPLETED_ITEM_CHARS)
     if (!value) throw new GoalError({ message: "completed item must not be empty" })
     // "Already recorded" means a DUPLICATE, not "the array is the same length". The ledger is capped
@@ -1154,6 +1225,7 @@ function formatHistoryTimestamp(seconds: number) {
 function normalizeCreateOptions(input?: number | null | CreateGoalOptions): Required<CreateGoalOptions> {
   if (typeof input === "number" || input === null) {
     return {
+      title: null,
       tokenBudget: positiveIntegerOrNull(input),
       maxAutoTurns: null,
       maxDurationSeconds: null,
@@ -1166,6 +1238,7 @@ function normalizeCreateOptions(input?: number | null | CreateGoalOptions): Requ
     }
   }
   return {
+    title: validateTitle(input?.title) ?? null,
     tokenBudget: positiveIntegerOrNull(input?.tokenBudget),
     maxAutoTurns: positiveIntegerOrNull(input?.maxAutoTurns),
     maxDurationSeconds: positiveIntegerOrNull(input?.maxDurationSeconds),
