@@ -1,10 +1,46 @@
 import { batch } from "solid-js"
-import type { Path, Workspace } from "@opencode-ai/sdk/v2"
+import type { Path, Workspace, WorkspaceEventConnectionStatus } from "@opencode-ai/sdk/v2"
 import { createStore, reconcile } from "solid-js/store"
 import { createSimpleContext } from "./helper"
 import { useSDK } from "./sdk"
+import { readRemote, type Read } from "../util/read-remote"
 
 type WorkspaceStatus = "connected" | "connecting" | "disconnected" | "error"
+
+/**
+ * The identity of the project and directory this client is attached to.
+ *
+ * The generated SDK resolves a non-2xx as `{ data: undefined, error }` instead
+ * of rejecting, and neither `/path` nor `/project/current` declares a 500 even
+ * though both read through `InstanceContextMiddleware`, so a failed instance
+ * load reaches the client as an ordinary response with no data.
+ *
+ * A failed read must therefore never be written as if it were an answer.
+ * Writing it would replace a known-good worktree and project id with the
+ * pre-read placeholders, and `instance.directory()` — which callers use as the
+ * directory a session is created or moved into — would quietly become a
+ * different directory than the one the user is in.
+ */
+type ProjectStore = {
+  project: {
+    id: string | undefined
+    worktree: string | undefined
+    mainDir: string | undefined
+  }
+  instance: {
+    path: Path
+  }
+  workspace: {
+    current: string | undefined
+    list: Workspace[]
+    status: Record<string, WorkspaceStatus>
+  }
+  /**
+   * Set when the last `sync` could not read the server's answer. Distinguishes
+   * "the server says this directory has no project" from "we could not ask".
+   */
+  unreadable: Read<never> | undefined
+}
 
 export const { use: useProject, provider: ProjectProvider } = createSimpleContext({
   name: "Project",
@@ -19,49 +55,83 @@ export const { use: useProject, provider: ProjectProvider } = createSimpleContex
       directory: sdk.directory ?? "",
     } satisfies Path
 
-    const [store, setStore] = createStore({
+    const [store, setStore] = createStore<ProjectStore>({
       project: {
-        id: undefined as string | undefined,
-        worktree: undefined as string | undefined,
-        mainDir: undefined as string | undefined,
+        id: undefined,
+        worktree: undefined,
+        mainDir: undefined,
       },
       instance: {
         path: defaultPath,
       },
       workspace: {
-        current: undefined as string | undefined,
-        list: [] as Workspace[],
-        status: {} as Record<string, WorkspaceStatus>,
+        current: undefined,
+        list: [],
+        status: {},
       },
+      unreadable: undefined,
     })
 
     async function sync() {
       const workspace = store.workspace.current
       const [instancePath, project] = await Promise.all([
-        sdk.client.path.get({ workspace }),
-        sdk.client.project.current({ workspace }),
+        readRemote(() => sdk.client.path.get({ workspace }), defaultPath),
+        readRemote(() => sdk.client.project.current({ workspace }), undefined),
       ])
-      const directories = project.data?.id
-        ? await sdk.client.project.directories({ projectID: project.data.id, workspace })
+
+      // Either read failing leaves the previous good state in place. Overwriting
+      // it would be a guess dressed as an answer: a stale-but-real worktree is
+      // recoverable, a fabricated one silently misroutes sessions.
+      if (!instancePath.ok || !project.ok) {
+        const reason = !instancePath.ok ? instancePath.reason : (project as { ok: false; reason: string }).reason
+        batch(() => setStore("unreadable", { ok: false, reason }))
+        return
+      }
+
+      // `project.current` answers with no `id` when the directory is not part of
+      // a project. That is a real answer, so only then is `directories` worth
+      // asking.
+      const projectID = project.data?.id
+      const directories = projectID
+        ? await readRemote(() => sdk.client.project.directories({ projectID, workspace }), [])
         : undefined
+
       batch(() => {
-        setStore("instance", "path", reconcile(instancePath.data || defaultPath))
+        setStore("instance", "path", reconcile(instancePath.data))
         setStore("project", "id", project.data?.id)
         setStore("project", "worktree", project.data?.worktree)
-        setStore("project", "mainDir", directories?.data?.findLast((item) => item.strategy === undefined)?.directory)
+        // A failed `directories` read leaves `mainDir` unknown rather than
+        // inventing one. `dialog-move-session` uses it as the destination to
+        // move a session back to.
+        setStore(
+          "project",
+          "mainDir",
+          directories?.ok ? directories.data.findLast((item) => item.strategy === undefined)?.directory : undefined,
+        )
+        setStore("unreadable", undefined)
       })
     }
 
     async function syncWorkspace() {
-      const listed = await sdk.client.experimental.workspace.list().catch(() => undefined)
-      if (!listed?.data) return
-      const status = await sdk.client.experimental.workspace.status().catch(() => undefined)
-      const next = Object.fromEntries((status?.data ?? []).map((item) => [item.workspaceID, item.status]))
+      const listed = await readRemote(() => sdk.client.experimental.workspace.list(), undefined)
+      // No data means the list could not be read, which is not the same as
+      // there being no workspaces. Bailing keeps the previous list.
+      if (!listed.ok) return
+      const status = await readRemote(
+        () => sdk.client.experimental.workspace.status(),
+        [] as WorkspaceEventConnectionStatus[],
+      )
+      // A failed status read must not blank the map: `workspace.status(id)`
+      // returning undefined already means "unknown", but `{}` makes every
+      // workspace look disconnected at once, and the home footer counts them.
+      if (!status.ok) return
+
+      const next = Object.fromEntries(status.data.map((item) => [item.workspaceID, item.status]))
 
       batch(() => {
-        setStore("workspace", "list", reconcile(listed.data))
+        setStore("workspace", "list", reconcile(listed.data ?? []))
         setStore("workspace", "status", reconcile(next))
-        if (!listed.data.some((item) => item.id === store.workspace.current)) {
+        if (!(listed.data ?? []).some((item) => item.id === store.workspace.current)) {
           setStore("workspace", "current", undefined)
         }
       })
