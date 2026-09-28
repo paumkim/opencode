@@ -1,9 +1,9 @@
-import { afterEach, describe, expect } from "bun:test"
+import { afterEach, describe, expect, it as plainIt } from "bun:test"
 import path from "path"
 import fs from "fs/promises"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Cause, Deferred, Effect, Exit, Fiber, Layer } from "effect"
-import { EditTool } from "../../src/tool/edit"
+import { EditTool, replace } from "../../src/tool/edit"
 import { disposeAllInstances, TestInstance } from "../fixture/fixture"
 import { LSP } from "@/lsp/lsp"
 import { FSUtil } from "@opencode-ai/core/fs-util"
@@ -571,4 +571,60 @@ describe("tool.edit", () => {
       }),
     )
   })
+})
+describe("tool.edit replacement is literal", () => {
+  // `String.prototype.replaceAll`/`replace` treat `$` sequences in the REPLACEMENT
+  // as substitution patterns: `$&` re-inserts the match, `$` + backtick re-inserts
+  // everything before it, `$'` everything after it, `$$` collapses to `$`. The edit
+  // tool writes model-authored text and models write `$` constantly, so interpreting
+  // those sequences silently corrupts the file instead of writing what the model
+  // asked for. `$&` smuggles the old text back in; `$`+backtick and `$'` splice
+  // surrounding file content into the middle of the edit.
+  const CONTENT = "before\nOLD\nafter"
+
+  const cases: [label: string, replacement: string, expected: string][] = [
+    ["$&", "X$&Y", "before\nX$&Y\nafter"],
+    ["$`", "head$`", "before\nhead$`\nafter"],
+    ["$'", "tail$'", "before\ntail$'\nafter"],
+    ["$$", "a$$b", "before\na$$b\nafter"],
+    ["a lone dollar", "cost: $5", "before\ncost: $5\nafter"],
+    ["a template literal", "const s = `${a}`", "before\nconst s = `${a}`\nafter"],
+  ]
+
+  for (const [label, replacement, expected] of cases) {
+    // One shared expectation across both branches is the point: before the fix the
+    // two disagreed, because only the replaceAll path went through replaceAll().
+    plainIt(`writes ${label} verbatim with replaceAll`, () => {
+      expect(replace(CONTENT, "OLD", replacement, true)).toBe(expected)
+    })
+
+    plainIt(`writes ${label} verbatim without replaceAll`, () => {
+      expect(replace(CONTENT, "OLD", replacement)).toBe(expected)
+    })
+  }
+
+  // Every occurrence, replacement still literal: `$&` must stay `$&` rather than
+  // expanding to the matched `x`.
+  plainIt("applies a literal replacement to every occurrence", () => {
+    expect(replace("x y x y", "x", "a$&b", true)).toBe("a$&b y a$&b y")
+  })
+
+  // End-to-end through the real tool, so this is pinned as the behaviour a session
+  // observes rather than only as a property of the helper.
+  it.instance("writes dollar sequences verbatim to the file with replaceAll", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const filepath = path.join(test.directory, "code.ts")
+      yield* put(filepath, 'const a = "OLD"\nconst b = "OLD"\n')
+
+      yield* run({
+        filePath: filepath,
+        oldString: "OLD",
+        newString: "prefix$&suffix",
+        replaceAll: true,
+      })
+
+      expect(yield* load(filepath)).toBe('const a = "prefix$&suffix"\nconst b = "prefix$&suffix"\n')
+    }),
+  )
 })

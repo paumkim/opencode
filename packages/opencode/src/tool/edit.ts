@@ -738,7 +738,14 @@ export function replace(content: string, oldString: string, newString: string, r
         )
       }
       if (replaceAll) {
-        return content.replaceAll(search, newString)
+        // A replacer function, not a string: a string replacement is a pattern,
+        // so `$&`, `$`+backtick, `$'` and `$$` in newString would be substituted
+        // (`$&` re-inserting the match, the other two splicing the surrounding
+        // file into the middle of the edit) instead of written as the model
+        // asked. The single-occurrence branch below builds the result with
+        // substring(), which has always been literal, so the two branches
+        // disagreed. A function's return value is used verbatim.
+        return content.replaceAll(search, () => newString)
       }
       const lastIndex = content.lastIndexOf(search)
       if (index !== lastIndex) continue
