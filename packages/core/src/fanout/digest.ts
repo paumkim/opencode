@@ -43,6 +43,23 @@ export const ofSession = Effect.fn("FanoutDigest.ofSession")(function* (
   return text === undefined ? undefined : bound(text)
 })
 
+/**
+ * Neutralises markup in text a worker authored.
+ *
+ * A digest is model-authored AND the worker has read attacker-controllable
+ * bytes (repository files, web pages, issue bodies), so the payload is untrusted
+ * data. It is delivered inside a tagged block in the parent's context, and raw
+ * `<`/`>` would let that text close the tag early and append what reads as
+ * harness-level instruction -- turning data into a privilege escalation against
+ * the parent, which holds the real permissions. Escaping makes the payload
+ * structurally incapable of changing the frame around it.
+ *
+ * The parent is told separately, in prose, that the block is data and not
+ * instructions. Escaping defeats the structural attack; the prose defeats the
+ * social one. Neither alone is sufficient.
+ */
+export const neutralise = (text: string) => text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
+
 /** Collapses a worker's answer to one bounded paragraph. */
 export const bound = (text: string, limit = maxLength) => {
   const paragraph = text.replaceAll(/\s+/g, " ").trim()
