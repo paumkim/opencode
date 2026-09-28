@@ -130,7 +130,7 @@ export const goalTitleArg = z
   .min(1)
   .optional()
   .describe(
-    "Optional SHORT one-line label for the session status bar, a few words and not a sentence. This is what the bar shows instead of the objective, which is the durable record and may be as detailed as the work needs. Omit it if you have no better short label; the objective is then used as before.",
+    "Optional SHORT one-line label for the session status bar, a few words and not a sentence. This is what the bar shows instead of the objective, which carries the outcome and anything a later turn could not cheaply re-derive. Omit it if you have no better short label; the objective is then used as before.",
   )
 
 const PLAN_MODE_CREATE_NOTICE =
@@ -266,7 +266,7 @@ export function goalTools(deps: Deps): Record<string, Tool.Def<Schema.Decoder<un
     ),
     create_goal: defineTool(
       "create_goal",
-      "Create a goal only when explicitly requested by the user or system/developer instructions; do not infer goals from ordinary tasks. Fails while a goal is still open (active, paused, budgetLimited, or usageLimited); a goal that is complete or unmet does not block a new one, so do not try to close or clear it first. Limits are unlimited by default: omitting a limit arg (or passing null) means no token budget, no auto-continue cap, and no duration cap, so only pass numbers the user explicitly asked for. While the session is in Plan mode, the goal is recorded as paused and execution requires the user to switch to Build mode. The objective is the durable record and may be as detailed as the work needs; `title` is the short one-line label the session status bar shows, so pass a few words (not a whole clause) whenever you can.",
+      "Create a goal only when explicitly requested by the user or system/developer instructions; do not infer goals from ordinary tasks. Fails while a goal is still open (active, paused, budgetLimited, or usageLimited); a goal that is complete or unmet does not block a new one, so do not try to close or clear it first. Limits are unlimited by default: omitting a limit arg (or passing null) means no token budget, no auto-continue cap, and no duration cap, so only pass numbers the user explicitly asked for. While the session is in Plan mode, the goal is recorded as paused and execution requires the user to switch to Build mode. The objective is the durable record: the outcome to reach, plus anything a later turn could not cheaply re-derive from the repo, and not the backlog. `title` is the short one-line label the status bar shows, so pass a few words whenever you can.",
       {
         objective: goalObjectiveArg.describe("The concrete objective to start pursuing."),
         title: goalTitleArg,
@@ -277,7 +277,7 @@ export function goalTools(deps: Deps): Record<string, Tool.Def<Schema.Decoder<un
     ),
     set_goal: defineTool(
       "set_goal",
-      "Set a new goal when the user explicitly asks the AGENT to formulate and set its own goal (the model writes the objective itself). Prefer create_goal when passing the user's own words. Fails while a goal is still open (active, paused, budgetLimited, or usageLimited); a goal that is complete or unmet does not block a new one, so do not try to close or clear it first. Limits are unlimited by default: omitting a limit arg (or passing null) means no token budget, no auto-continue cap, and no duration cap, so only pass numbers the user explicitly asked for. While the session is in Plan mode, the goal is recorded as paused and execution requires the user to switch to Build mode. The objective is the durable record and may be as detailed as the work needs; `title` is the short one-line label the session status bar shows, so pass a few words (not a whole clause) whenever you can.",
+      "Set a new goal when the user explicitly asks the AGENT to formulate and set its own goal (the model writes the objective itself). Prefer create_goal when passing the user's own words. Fails while a goal is still open (active, paused, budgetLimited, or usageLimited); a goal that is complete or unmet does not block a new one, so do not try to close or clear it first. Limits are unlimited by default: omitting a limit arg (or passing null) means no token budget, no auto-continue cap, and no duration cap, so only pass numbers the user explicitly asked for. While the session is in Plan mode, the goal is recorded as paused and execution requires the user to switch to Build mode. The objective is the durable record: the outcome to reach, plus anything a later turn could not cheaply re-derive from the repo, and not the backlog. `title` is the short one-line label the status bar shows, so pass a few words whenever you can.",
       {
         objective: goalObjectiveArg.describe("The model-formulated concrete objective to start pursuing."),
         title: goalTitleArg,
@@ -288,7 +288,7 @@ export function goalTools(deps: Deps): Record<string, Tool.Def<Schema.Decoder<un
     ),
     update_goal_objective: defineTool(
       "update_goal_objective",
-      "Edit the current OpenCode goal objective when the user explicitly asks to edit or replace it. The objective is the durable record and may be as detailed as the work needs; `title` is the short one-line label the session status bar shows, so pass a few words (not a whole clause) whenever you can.",
+      "Edit the current OpenCode goal objective when the user explicitly asks to edit or replace it. The objective is the durable record: the outcome to reach, plus anything a later turn could not cheaply re-derive from the repo, and not the backlog. `title` is the short one-line label the status bar shows, so pass a few words whenever you can.",
       {
         objective: goalObjectiveArg.describe("The updated concrete objective."),
         title: goalTitleArg,
