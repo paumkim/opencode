@@ -15,7 +15,7 @@ import { useToast } from "../ui/toast"
 import { useCommandShortcut } from "../keymap"
 import { useProject } from "../context/project"
 import { Spinner } from "./spinner"
-import { DialogWorkspaceFileChanges } from "./dialog-workspace-file-changes"
+import { DialogWorkspaceFileChanges, readWorkspaceFileChanges } from "./dialog-workspace-file-changes"
 import type { ProjectDirectories } from "@opencode-ai/sdk/v2"
 import { useRoute } from "../context/route"
 
@@ -233,10 +233,12 @@ export function DialogMoveSession(props: DialogMoveSessionProps) {
       setRemoving(undefined)
       setWorking(false)
       if ("data" in result.error && result.error.data.forceRequired) {
-        const status = await sdk.client.vcs.status({ directory: selected.directory }).catch(() => undefined)
-        const choice = await DialogWorkspaceFileChanges.show(dialog, status?.data ?? [], {
+        const status = await readWorkspaceFileChanges(sdk.client, { directory: selected.directory })
+        const choice = await DialogWorkspaceFileChanges.show(dialog, status.ok ? status.data : [], {
           title: "Delete working copy?",
-          message: "This working copy has file changes. Do you want to delete it anyway?",
+          message: status.ok
+            ? "This working copy has file changes. Do you want to delete it anyway?"
+            : `This working copy has file changes that could not be listed, because git could not be read: ${status.reason}. Do you want to delete it anyway?`,
         })
         if (choice !== "yes") {
           reopen()

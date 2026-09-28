@@ -8,6 +8,7 @@ import { useTheme } from "../context/theme"
 import { useTuiConfig } from "../config"
 import { useDialog, type DialogContext } from "../ui/dialog"
 import { getScrollAcceleration } from "../util/scroll"
+import { errorMessage } from "../util/error"
 
 const options = ["no", "yes"] as const
 
@@ -141,4 +142,41 @@ DialogWorkspaceFileChanges.show = (
       () => resolve(undefined),
     )
   })
+}
+
+export type WorkspaceFileChanges = { ok: true; data: VcsFileStatus[] } | { ok: false; reason: string }
+
+/**
+ * Read the changed files for a working tree, keeping "git could not be read"
+ * distinct from "the working tree is clean".
+ *
+ * The client returns `{ data, error }` rather than rejecting, so a `VcsReadError`
+ * on `/vcs/status` — a worktree that is no longer a repo, a corrupt `.git`, a
+ * git that is not installed — arrives as `error` with `data` undefined. Callers
+ * that only look at `data` therefore read it as a clean tree and quietly skip
+ * the "copy these changes?" prompt, so uncommitted work is left behind without
+ * a word. A trailing `.catch(() => undefined)` does not help: it only sees
+ * transport failures, never the typed 500.
+ *
+ * The union is the point. `data` does not exist on the failure branch, so a
+ * caller cannot reach it without first handling `ok: false`.
+ */
+export async function readWorkspaceFileChanges(
+  client: {
+    vcs: {
+      status: (
+        query: { directory?: string; workspace?: string },
+        options?: { throwOnError?: boolean },
+      ) => Promise<{ data?: Array<VcsFileStatus>; error?: unknown }>
+    }
+  },
+  query: { directory?: string; workspace?: string },
+): Promise<WorkspaceFileChanges> {
+  try {
+    const result = await client.vcs.status(query)
+    if (result.error) return { ok: false, reason: errorMessage(result.error) }
+    return { ok: true, data: result.data ?? [] }
+  } catch (err) {
+    return { ok: false, reason: errorMessage(err) }
+  }
 }

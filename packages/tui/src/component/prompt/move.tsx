@@ -7,7 +7,8 @@ import { useSDK } from "../../context/sdk"
 import { useSync } from "../../context/sync"
 import { useToast } from "../../ui/toast"
 import { DialogMoveSession, type MoveSessionSelection } from "../dialog-move-session"
-import { DialogWorkspaceFileChanges } from "../dialog-workspace-file-changes"
+import { DialogWorkspaceFileChanges, readWorkspaceFileChanges } from "../dialog-workspace-file-changes"
+import { DialogAlert } from "../../ui/dialog-alert"
 import { useHomeSessionDestination } from "../../routes/home/session-destination"
 import { useProject } from "../../context/project"
 
@@ -116,8 +117,18 @@ export function usePromptMove(input: { projectID: () => string | undefined; sess
 
   async function moveExistingSession(sessionID: string, selection: MoveSessionSelection) {
     const session = sync.session.get(sessionID)
-    const status = await sdk.client.vcs.status({ directory: session?.directory }).catch(() => undefined)
-    const choice = status?.data?.length ? await DialogWorkspaceFileChanges.show(dialog, status.data) : "no"
+    const status = await readWorkspaceFileChanges(sdk.client, { directory: session?.directory })
+    if (!status.ok) {
+      // Same reasoning as creating a workspace: an unreadable tree is not a
+      // clean one, and moving on would strand whatever was uncommitted in it.
+      await DialogAlert.show(
+        dialog,
+        "Unable to read file changes",
+        `Could not read the session's working tree: ${status.reason}`,
+      )
+      return
+    }
+    const choice = status.data.length ? await DialogWorkspaceFileChanges.show(dialog, status.data) : "no"
     if (!choice) return
     dialog.clear()
     const directory = selection.type === "new" ? await create(sessionContext(sessionID)) : selection.directory
