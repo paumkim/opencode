@@ -1423,7 +1423,7 @@ it.instance("loop continues when finish is stop but assistant has tool parts", (
   }),
 )
 
-it.instance("failed subtask preserves metadata on error tool state", () =>
+it.instance("failed subtask preserves metadata on the tool state and reports the failure later", () =>
   Effect.gen(function* () {
     const { llm } = yield* useServerConfig((url) => ({
       ...providerCfg(url),
@@ -1447,23 +1447,37 @@ it.instance("failed subtask preserves metadata on error tool state", () =>
 
     const result = yield* prompt.loop({ sessionID: chat.id })
     expect(result.info.role).toBe("assistant")
-    expect(yield* llm.calls).toBe(2)
 
     const msgs = yield* MessageV2.filterCompactedEffect(chat.id)
     const taskMsg = msgs.find((item) => item.info.role === "assistant" && item.info.agent === "general")
     expect(taskMsg?.info.role).toBe("assistant")
     if (!taskMsg || taskMsg.info.role !== "assistant") return
 
-    const tool = errorTool(taskMsg.parts)
+    // Delegation does not block, so the parent's turn is finished -- and its
+    // tool call settled -- while the subagent is still working out that its
+    // model does not exist. What the tool state still has to carry is which
+    // session and which model the result, or the failure, will come from.
+    const tool = completedTool(taskMsg.parts)
     if (!tool) return
 
-    expect(tool.state.error).toContain("Tool execution failed")
-    expect(tool.state.metadata).toBeDefined()
     expect(tool.state.metadata?.sessionId).toBeDefined()
     expect(tool.state.metadata?.model).toEqual({
       providerID: ProviderV2.ID.make("test"),
       modelID: ModelV2.ID.make("missing-model"),
     })
+
+    // And the failure is not lost with the tool call that no longer waits for
+    // it: the parent is handed it as untrusted data, at its own next turn.
+    const delivered = yield* pollWithTimeout(
+      Effect.gen(function* () {
+        const current = yield* MessageV2.filterCompactedEffect(chat.id)
+        return current
+          .flatMap((item) => item.parts)
+          .find((part) => part.type === "text" && part.synthetic === true && part.text.includes('state="error"'))
+      }),
+      "a failed subtask never reported its failure to the parent",
+    )
+    expect(delivered?.type === "text" ? delivered.text : "").toContain("<task_error>")
   }),
 )
 
@@ -1539,16 +1553,20 @@ it.instance(
         Effect.gen(function* () {
           const msgs = yield* MessageV2.filterCompactedEffect(chat.id)
           const taskMsg = msgs.find((item) => item.info.role === "assistant" && item.info.agent === "general")
-          const tool = taskMsg?.parts.find((part): part is SessionV1.ToolPart => part.type === "tool")
-          if (tool?.state.status === "running" && tool.state.metadata?.sessionId) return tool
+          const part = taskMsg ? toolPart(taskMsg.parts) : undefined
+          if (part?.state.status !== "completed" || !part.state.metadata?.sessionId) return
+          return part as CompletedToolPart
         }),
-        "timed out waiting for running subtask metadata",
+        "timed out waiting for the delegated subtask to be recorded",
       )
 
-      if (tool.state.status !== "running") return
+      // The tool call is settled while the subagent it launched is still
+      // working: delegation does not park the parent, and everything the parent
+      // needs to find that subagent again survives on the tool state.
       expect(typeof tool.state.metadata?.sessionId).toBe("string")
       expect(tool.state.title).toBeDefined()
       expect(tool.state.metadata?.model).toBeDefined()
+      expect(yield* waitForBusy(SessionID.make(tool.state.metadata!.sessionId as SessionID))).toBe(true)
 
       yield* prompt.cancel(chat.id)
       yield* Fiber.await(fiber)
@@ -1581,18 +1599,22 @@ it.instance(
         Effect.gen(function* () {
           const msgs = yield* MessageV2.filterCompactedEffect(chat.id)
           const assistant = msgs.findLast((item) => item.info.role === "assistant" && item.info.agent === "build")
-          const tool = assistant?.parts.find(
+          const part = assistant?.parts.find(
             (part): part is SessionV1.ToolPart => part.type === "tool" && part.tool === "task",
           )
-          if (tool?.state.status === "running" && tool.state.metadata?.sessionId) return tool
+          if (part?.state.status !== "completed" || !part.state.metadata?.sessionId) return
+          return part as CompletedToolPart
         }),
-        "timed out waiting for running task metadata",
+        "timed out waiting for the delegated task to be recorded",
       )
 
-      if (tool.state.status !== "running") return
+      // The call is settled while the subagent it launched is still working --
+      // waiting for that result is what `wait: true` is for now. The session it
+      // recorded is what cancelling the parent has to reach.
       expect(typeof tool.state.metadata?.sessionId).toBe("string")
       expect(tool.state.title).toBe("inspect bug")
       expect(tool.state.metadata?.model).toBeDefined()
+      expect(yield* waitForBusy(SessionID.make(tool.state.metadata!.sessionId as SessionID))).toBe(true)
 
       yield* prompt.cancel(chat.id)
       yield* Fiber.await(fiber)
@@ -1826,14 +1848,24 @@ it.instance(
       const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
       yield* llm.wait(1)
 
-      const msgs = yield* MessageV2.filterCompactedEffect(chat.id)
-      const taskMsg = msgs.find((item) => item.info.role === "assistant" && item.info.agent === "general")
-      const tool = taskMsg ? toolPart(taskMsg.parts) : undefined
-      const sessionID = tool?.state.status === "running" ? tool.state.metadata?.sessionId : undefined
+      // The delegation is non-blocking, so the parent's tool call has already
+      // settled by the time the parent is hanging on the model. The child
+      // session it recorded is what cancelling the parent has to reach.
+      const tool = yield* pollWithTimeout(
+        Effect.gen(function* () {
+          const current = yield* MessageV2.filterCompactedEffect(chat.id)
+          const taskMsg = current.find((item) => item.info.role === "assistant" && item.info.agent === "general")
+          const part = taskMsg ? toolPart(taskMsg.parts) : undefined
+          if (part?.state.status !== "completed") return
+          return part as CompletedToolPart
+        }),
+        "timed out waiting for the delegated subtask to be recorded",
+      )
+      const sessionID = tool.state.metadata?.sessionId
       expect(typeof sessionID).toBe("string")
       if (typeof sessionID !== "string") throw new Error("missing child session id")
       const childID = SessionID.make(sessionID)
-      expect((yield* status.get(childID)).type).toBe("busy")
+      expect(yield* waitForBusy(childID)).toBe(true)
 
       yield* prompt.cancel(chat.id)
       const exit = yield* Fiber.await(fiber)
