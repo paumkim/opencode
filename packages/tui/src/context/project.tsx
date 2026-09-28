@@ -36,10 +36,25 @@ type ProjectStore = {
     status: Record<string, WorkspaceStatus>
   }
   /**
-   * Set when the last `sync` could not read the server's answer. Distinguishes
-   * "the server says this directory has no project" from "we could not ask".
+   * A key per read that could not be answered, set to the reason.
+   *
+   * A key that is absent was genuinely empty; one present here is *unknown*, and the UI must not
+   * claim it has none. This is the same shape and the same reasoning as `sync.data.unreadable`.
+   *
+   * It used to be a single slot, which could only describe the project read. That was enough to
+   * stop a failed `/path` or `/project/current` from being written as an answer, and not enough to
+   * say anything about the workspace reads: `syncWorkspace` preserves the previous list on failure
+   * but had nowhere to record that it had, so on a first run the preserved list is empty and the
+   * workspace picker is indistinguishable from "you have no workspaces".
    */
-  unreadable: Read<never> | undefined
+  unreadable: {
+    /** `/path` or `/project/current` - "this directory has no project" versus "we could not ask". */
+    project?: string
+    /** `workspace.list()` - the list the workspace picker offers. */
+    workspaceList?: string
+    /** `workspace.status()` - the per-workspace connection dots, and the home footer count. */
+    workspaceStatus?: string
+  }
 }
 
 export const { use: useProject, provider: ProjectProvider } = createSimpleContext({
@@ -69,7 +84,7 @@ export const { use: useProject, provider: ProjectProvider } = createSimpleContex
         list: [],
         status: {},
       },
-      unreadable: undefined,
+      unreadable: {} as ProjectStore["unreadable"],
     })
 
     async function sync() {
@@ -84,7 +99,7 @@ export const { use: useProject, provider: ProjectProvider } = createSimpleContex
       // recoverable, a fabricated one silently misroutes sessions.
       if (!instancePath.ok || !project.ok) {
         const reason = !instancePath.ok ? instancePath.reason : (project as { ok: false; reason: string }).reason
-        batch(() => setStore("unreadable", { ok: false, reason }))
+        batch(() => setStore("unreadable", "project", reason))
         return
       }
 
@@ -108,7 +123,7 @@ export const { use: useProject, provider: ProjectProvider } = createSimpleContex
           "mainDir",
           directories?.ok ? directories.data.findLast((item) => item.strategy === undefined)?.directory : undefined,
         )
-        setStore("unreadable", undefined)
+        setStore("unreadable", { ...store.unreadable, project: undefined })
       })
     }
 
@@ -116,7 +131,10 @@ export const { use: useProject, provider: ProjectProvider } = createSimpleContex
       const listed = await readRemote(() => sdk.client.experimental.workspace.list(), undefined)
       // No data means the list could not be read, which is not the same as
       // there being no workspaces. Bailing keeps the previous list.
-      if (!listed.ok) return
+      if (!listed.ok) {
+        setStore("unreadable", "workspaceList", listed.reason)
+        return
+      }
       const status = await readRemote(
         () => sdk.client.experimental.workspace.status(),
         [] as WorkspaceEventConnectionStatus[],
@@ -124,11 +142,15 @@ export const { use: useProject, provider: ProjectProvider } = createSimpleContex
       // A failed status read must not blank the map: `workspace.status(id)`
       // returning undefined already means "unknown", but `{}` makes every
       // workspace look disconnected at once, and the home footer counts them.
-      if (!status.ok) return
+      if (!status.ok) {
+        setStore("unreadable", "workspaceStatus", status.reason)
+        return
+      }
 
       const next = Object.fromEntries(status.data.map((item) => [item.workspaceID, item.status]))
 
       batch(() => {
+        setStore("unreadable", { ...store.unreadable, workspaceList: undefined, workspaceStatus: undefined })
         setStore("workspace", "list", reconcile(listed.data ?? []))
         setStore("workspace", "status", reconcile(next))
         if (!(listed.data ?? []).some((item) => item.id === store.workspace.current)) {
