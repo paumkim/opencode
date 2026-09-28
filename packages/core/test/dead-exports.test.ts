@@ -108,7 +108,14 @@ async function corpus() {
   for (const name of text.match(/[A-Za-z_$][\w$]*/g) ?? []) {
     counts.set(name, (counts.get(name) ?? 0) + 1)
   }
-  return { count: ts.length, text, counts }
+  // Modules reached through a namespace binding. Their exports are consumed by enumerating the
+  // namespace (`Object.values(NS)`), never by name, so no identifier count can say whether one is
+  // used -- and every one of them looks unreferenced.
+  const namespaces = new Set<string>()
+  for (const match of text.matchAll(/\bimport\s*\*\s*as\s+[A-Za-z_$][\w$]*\s*from\s*"([^"]+)"/g)) {
+    namespaces.add(moduleName(match[1]!))
+  }
+  return { count: ts.length, text, counts, namespaces }
 }
 
 const DECLARATION = /^export\s+(?:async\s+)?(?:function|const|class|let)\s+([A-Za-z_$][\w$]*)/gm
@@ -138,7 +145,7 @@ const SPECIFIER = /\b(?:from\s*|import\s*(?:\(\s*)?)"([^"]+)"/g
 
 describe("no dead exports in core", () => {
   test("every exported function or const in core/src is referenced somewhere", async () => {
-    const { count, counts } = await corpus()
+    const { count, counts, namespaces } = await corpus()
     expect(count).toBeGreaterThan(0)
 
     // A name mentioned only by its own declaration cannot be called by anything: not another module,
@@ -146,6 +153,7 @@ describe("no dead exports in core", () => {
     const unreferenced: string[] = []
     for (const file of await sources()) {
       if (EXEMPT_FILES.has(file.relative)) continue
+      if (namespaces.has(moduleName(file.absolute))) continue
       const source = await fs.readFile(file.absolute, "utf8")
       for (const match of source.matchAll(DECLARATION)) {
         const name = match[1]!
@@ -156,7 +164,7 @@ describe("no dead exports in core", () => {
   })
 
   test("every core/src module is imported by something other than its own directory", async () => {
-    const { text, count } = await corpus()
+    const { text, count, namespaces } = await corpus()
     expect(count).toBeGreaterThan(0)
 
     // One pass for every import specifier in the repo. Each specifier's basename is a module some
@@ -169,6 +177,7 @@ describe("no dead exports in core", () => {
     for (const file of await sources()) {
       if (EXEMPT_FILES.has(file.relative)) continue
       if (BARRELS.test(path.basename(file.absolute))) continue
+      if (namespaces.has(moduleName(file.absolute))) continue
 
       if (!imported.has(moduleName(file.absolute))) orphans.push(file.relative)
     }
