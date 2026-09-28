@@ -34,3 +34,22 @@ test("both workspace list refreshes report a failure instead of leaving an empty
     expect(window).toContain("toast.show")
   }
 })
+
+test("the picker says the list may be incomplete when the read failed, and nothing when it did not", () => {
+  // Recording a reason is only half the fix - the picker has to show it. The mount-time toast
+  // covers the open that failed; this covers the one that did not, where a reason recorded on an
+  // earlier open is still sitting in the store and the list is quietly short.
+  const code = strip("dialog-workspace-list.tsx")
+  const footer = code.indexOf("footer=")
+  expect(footer).toBeGreaterThan(-1)
+  const window = code.slice(footer, footer + 200)
+  expect(window).toContain("staleness()")
+  expect(window).toContain("theme.warning")
+
+  // And it reads the two keys the store now keeps, rather than the whole record.
+  expect(code).toContain("project.data.unreadable.workspaceList")
+  expect(code).toContain("project.data.unreadable.workspaceStatus")
+  // The two are different failures: a missing list and a stale status dot are not the same warning.
+  expect(code).toContain("This list may be incomplete:")
+  expect(code).toContain("Connection status may be out of date:")
+})

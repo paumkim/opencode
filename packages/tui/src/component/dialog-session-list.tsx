@@ -59,7 +59,7 @@ export function SessionListStaleness() {
   const reason = createMemo(() => {
     const session = sync.data.unreadable.session
     if (session) return `Session list may be out of date: ${session}`
-    const projectReason = project.data.unreadable?.ok === false ? project.data.unreadable.reason : undefined
+    const projectReason = project.data.unreadable.project
     if (projectReason) return `Project could not be read, so this list may be incomplete: ${projectReason}`
     return undefined
   })

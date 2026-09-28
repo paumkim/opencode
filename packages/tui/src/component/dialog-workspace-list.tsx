@@ -5,7 +5,7 @@ import { useProject } from "../context/project"
 import { useRoute } from "../context/route"
 import { useSync } from "../context/sync"
 import { useTheme } from "../context/theme"
-import { createMemo, createSignal, onMount } from "solid-js"
+import { createMemo, createSignal, onMount, Show } from "solid-js"
 import { createStore } from "solid-js/store"
 import { errorMessage } from "../util/error"
 import { useSDK } from "../context/sdk"
@@ -99,10 +99,23 @@ export function DialogWorkspaceList() {
     void project.workspace.sync()
   })
 
+  // The list is still rendered when it may be incomplete; the point is to say so, not to hide the
+  // workspaces the user has. Mirrors `SessionListStaleness`, which solves the same problem for the
+  // session list, and covers the case the mount-time toast cannot: a read that failed on an earlier
+  // open leaves a reason recorded here, and one that recovers clears it.
+  const staleness = createMemo(() => {
+    const list = project.data.unreadable.workspaceList
+    if (list) return `This list may be incomplete: ${list}`
+    const status = project.data.unreadable.workspaceStatus
+    if (status) return `Connection status may be out of date: ${status}`
+    return undefined
+  })
+
   return (
     <DialogSelect
       title="Workspaces"
       options={options()}
+      footer={<Show when={staleness()}>{(text) => <text fg={theme.warning}>{text()}</text>}</Show>}
       onMove={(_option) => {
         setDeleting(undefined)
       }}

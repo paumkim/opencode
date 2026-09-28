@@ -78,7 +78,9 @@ test("a good read populates the path and the project", async () => {
     expect(ctx.instance.directory()).toBe("/repo/src")
     expect(ctx.project()).toBe("prj_1")
     expect(ctx.data.project.mainDir).toBe("/repo")
-    expect(ctx.data.unreadable).toBeUndefined()
+    // Per-key rather than on the whole record: the record now holds one slot per read, and a later
+    // workspace failure must not be conflated with the project read or make this fail.
+    expect(ctx.data.unreadable.project).toBeUndefined()
   } finally {
     dispose()
   }
@@ -97,7 +99,7 @@ test("a failed path read does not invent a directory", async () => {
   )
   try {
     await ctx.sync()
-    expect(ctx.data.unreadable).toEqual({ ok: false, reason: "boom" })
+    expect(ctx.data.unreadable.project).toBe("boom")
     // The pre-read placeholder is all there is, and it must stay visibly
     // unconfirmed rather than being presented as an answer.
     expect(ctx.data.instance.path.directory).toBe("/client/cwd")
@@ -133,7 +135,7 @@ test("a failed read after a good one keeps the known-good state", async () => {
 
     fail = true
     await ctx.sync()
-    expect(ctx.data.unreadable).toEqual({ ok: false, reason: "later boom" })
+    expect(ctx.data.unreadable.project).toBe("later boom")
     expect(ctx.instance.path().worktree).toBe("/repo")
     expect(ctx.instance.directory()).toBe("/repo/src")
     expect(ctx.project()).toBe("prj_1")
@@ -149,7 +151,7 @@ test("a failed project.current read does not claim there is no project", async (
   )
   try {
     await ctx.sync()
-    expect(ctx.data.unreadable).toEqual({ ok: false, reason: "no instance" })
+    expect(ctx.data.unreadable.project).toBe("no instance")
     expect(ctx.data.project.id).toBeUndefined()
   } finally {
     dispose()
@@ -162,7 +164,9 @@ test("a directory with no project is a real answer, not a failure", async () => 
   const { ctx, dispose } = await mount(clientOf({ project: { data: { id: undefined, worktree: undefined } } }))
   try {
     await ctx.sync()
-    expect(ctx.data.unreadable).toBeUndefined()
+    // Per-key rather than on the whole record: the record now holds one slot per read, and a later
+    // workspace failure must not be conflated with the project read or make this fail.
+    expect(ctx.data.unreadable.project).toBeUndefined()
     expect(ctx.project()).toBeUndefined()
     expect(ctx.instance.path().worktree).toBe("/repo")
   } finally {
@@ -178,7 +182,9 @@ test("a failed directories read leaves mainDir unknown rather than fabricated", 
     await ctx.sync()
     expect(ctx.data.project.mainDir).toBeUndefined()
     // The rest of the sync still succeeded, so it is not marked unreadable.
-    expect(ctx.data.unreadable).toBeUndefined()
+    // Per-key rather than on the whole record: the record now holds one slot per read, and a later
+    // workspace failure must not be conflated with the project read or make this fail.
+    expect(ctx.data.unreadable.project).toBeUndefined()
   } finally {
     dispose()
   }
