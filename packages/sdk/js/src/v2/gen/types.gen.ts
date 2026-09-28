@@ -2163,6 +2163,14 @@ export type Config = {
   }
 }
 
+export type InstanceLoadError = {
+  name: "InstanceLoadError"
+  data: {
+    message: string
+    directory: string
+  }
+}
+
 export type Model = {
   id: string
   providerID: string
@@ -7889,6 +7897,15 @@ export type EventSubscribeData = {
   url: "/event"
 }
 
+export type EventSubscribeErrors = {
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
+}
+
+export type EventSubscribeError = EventSubscribeErrors[keyof EventSubscribeErrors]
+
 export type EventSubscribeResponses = {
   /**
    * Event stream
@@ -7913,6 +7930,10 @@ export type ConfigGetErrors = {
    * Bad request
    */
   400: BadRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type ConfigGetError = ConfigGetErrors[keyof ConfigGetErrors]
@@ -7941,6 +7962,10 @@ export type ConfigUpdateErrors = {
    * BadRequest | InvalidRequestError
    */
   400: EffectHttpApiErrorBadRequest | InvalidRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type ConfigUpdateError = ConfigUpdateErrors[keyof ConfigUpdateErrors]
@@ -7969,6 +7994,10 @@ export type ConfigProvidersErrors = {
    * Bad request
    */
   400: BadRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type ConfigProvidersError = ConfigProvidersErrors[keyof ConfigProvidersErrors]
@@ -8002,6 +8031,10 @@ export type ExperimentalCapabilitiesGetErrors = {
    * Bad request
    */
   400: BadRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type ExperimentalCapabilitiesGetError =
@@ -8033,9 +8066,9 @@ export type ExperimentalConsoleGetErrors = {
    */
   400: BadRequestError
   /**
-   * InternalServerError
+   * InternalServerError | InstanceLoadError
    */
-  500: EffectHttpApiErrorInternalServerError
+  500: EffectHttpApiErrorInternalServerError | InstanceLoadError
 }
 
 export type ExperimentalConsoleGetError = ExperimentalConsoleGetErrors[keyof ExperimentalConsoleGetErrors]
@@ -8065,9 +8098,9 @@ export type ExperimentalConsoleListOrgsErrors = {
    */
   400: BadRequestError
   /**
-   * InternalServerError
+   * InternalServerError | InstanceLoadError
    */
-  500: EffectHttpApiErrorInternalServerError
+  500: EffectHttpApiErrorInternalServerError | InstanceLoadError
 }
 
 export type ExperimentalConsoleListOrgsError =
@@ -8105,6 +8138,16 @@ export type ExperimentalConsoleSwitchOrgData = {
   url: "/experimental/console/switch"
 }
 
+export type ExperimentalConsoleSwitchOrgErrors = {
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
+}
+
+export type ExperimentalConsoleSwitchOrgError =
+  ExperimentalConsoleSwitchOrgErrors[keyof ExperimentalConsoleSwitchOrgErrors]
+
 export type ExperimentalConsoleSwitchOrgResponses = {
   /**
    * Switch success
@@ -8132,6 +8175,10 @@ export type ToolListErrors = {
    * BadRequest | InvalidRequestError
    */
   400: EffectHttpApiErrorBadRequest | InvalidRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type ToolListError = ToolListErrors[keyof ToolListErrors]
@@ -8160,6 +8207,10 @@ export type ToolIdsErrors = {
    * BadRequest | InvalidRequestError
    */
   400: EffectHttpApiErrorBadRequest | InvalidRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type ToolIdsError = ToolIdsErrors[keyof ToolIdsErrors]
@@ -8188,6 +8239,10 @@ export type WorktreeRemoveErrors = {
    * WorktreeError | InvalidRequestError
    */
   400: WorktreeError | InvalidRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type WorktreeRemoveError = WorktreeRemoveErrors[keyof WorktreeRemoveErrors]
@@ -8216,6 +8271,10 @@ export type WorktreeListErrors = {
    * WorktreeError | InvalidRequestError
    */
   400: WorktreeError | InvalidRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type WorktreeListError = WorktreeListErrors[keyof WorktreeListErrors]
@@ -8244,6 +8303,10 @@ export type WorktreeCreateErrors = {
    * WorktreeError | InvalidRequestError
    */
   400: WorktreeError | InvalidRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type WorktreeCreateError = WorktreeCreateErrors[keyof WorktreeCreateErrors]
@@ -8272,6 +8335,10 @@ export type WorktreeResetErrors = {
    * WorktreeError | InvalidRequestError
    */
   400: WorktreeError | InvalidRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type WorktreeResetError = WorktreeResetErrors[keyof WorktreeResetErrors]
@@ -8306,6 +8373,10 @@ export type ExperimentalSessionListErrors = {
    * Bad request
    */
   400: BadRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type ExperimentalSessionListError = ExperimentalSessionListErrors[keyof ExperimentalSessionListErrors]
@@ -8336,6 +8407,10 @@ export type ExperimentalSessionBackgroundErrors = {
    * BadRequest | InvalidRequestError
    */
   400: EffectHttpApiErrorBadRequest | InvalidRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type ExperimentalSessionBackgroundError =
@@ -8366,6 +8441,10 @@ export type ExperimentalResourceListErrors = {
    * Bad request
    */
   400: BadRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type ExperimentalResourceListError = ExperimentalResourceListErrors[keyof ExperimentalResourceListErrors]
@@ -8398,6 +8477,10 @@ export type FindTextErrors = {
    * Bad request
    */
   400: BadRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type FindTextError = FindTextErrors[keyof FindTextErrors]
@@ -8446,6 +8529,10 @@ export type FindFilesErrors = {
    * Bad request
    */
   400: BadRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type FindFilesError = FindFilesErrors[keyof FindFilesErrors]
@@ -8475,6 +8562,10 @@ export type FindSymbolsErrors = {
    * Bad request
    */
   400: BadRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type FindSymbolsError = FindSymbolsErrors[keyof FindSymbolsErrors]
@@ -8504,6 +8595,10 @@ export type FileListErrors = {
    * Bad request
    */
   400: BadRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type FileListError = FileListErrors[keyof FileListErrors]
@@ -8533,6 +8628,10 @@ export type FileReadErrors = {
    * Bad request
    */
   400: BadRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type FileReadError = FileReadErrors[keyof FileReadErrors]
@@ -8561,6 +8660,10 @@ export type FileStatusErrors = {
    * Bad request
    */
   400: BadRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type FileStatusError = FileStatusErrors[keyof FileStatusErrors]
@@ -8589,6 +8692,10 @@ export type InstanceDisposeErrors = {
    * Bad request
    */
   400: BadRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type InstanceDisposeError = InstanceDisposeErrors[keyof InstanceDisposeErrors]
@@ -8617,6 +8724,10 @@ export type PathGetErrors = {
    * Bad request
    */
   400: BadRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type PathGetError = PathGetErrors[keyof PathGetErrors]
@@ -8645,6 +8756,10 @@ export type VcsGetErrors = {
    * Bad request
    */
   400: BadRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type VcsGetError = VcsGetErrors[keyof VcsGetErrors]
@@ -8674,9 +8789,9 @@ export type VcsStatusErrors = {
    */
   400: BadRequestError
   /**
-   * VcsReadError
+   * VcsReadError | InstanceLoadError
    */
-  500: VcsReadError
+  500: VcsReadError | InstanceLoadError
 }
 
 export type VcsStatusError = VcsStatusErrors[keyof VcsStatusErrors]
@@ -8708,9 +8823,9 @@ export type VcsDiffErrors = {
    */
   400: BadRequestError
   /**
-   * VcsReadError
+   * VcsReadError | InstanceLoadError
    */
-  500: VcsReadError
+  500: VcsReadError | InstanceLoadError
 }
 
 export type VcsDiffError = VcsDiffErrors[keyof VcsDiffErrors]
@@ -8740,9 +8855,9 @@ export type VcsDiffRawErrors = {
    */
   400: BadRequestError
   /**
-   * VcsReadError
+   * VcsReadError | InstanceLoadError
    */
-  500: VcsReadError
+  500: VcsReadError | InstanceLoadError
 }
 
 export type VcsDiffRawError = VcsDiffRawErrors[keyof VcsDiffRawErrors]
@@ -8773,6 +8888,10 @@ export type VcsApplyErrors = {
    * VcsApplyError | InvalidRequestError
    */
   400: VcsApplyError | InvalidRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type VcsApplyError2 = VcsApplyErrors[keyof VcsApplyErrors]
@@ -8803,6 +8922,10 @@ export type CommandListErrors = {
    * Bad request
    */
   400: BadRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type CommandListError = CommandListErrors[keyof CommandListErrors]
@@ -8831,6 +8954,10 @@ export type AppAgentsErrors = {
    * Bad request
    */
   400: BadRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type AppAgentsError = AppAgentsErrors[keyof AppAgentsErrors]
@@ -8859,6 +8986,10 @@ export type AppSkillsErrors = {
    * Bad request
    */
   400: BadRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type AppSkillsError = AppSkillsErrors[keyof AppSkillsErrors]
@@ -8892,6 +9023,10 @@ export type LspStatusErrors = {
    * Bad request
    */
   400: BadRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type LspStatusError = LspStatusErrors[keyof LspStatusErrors]
@@ -8920,6 +9055,10 @@ export type FormatterStatusErrors = {
    * Bad request
    */
   400: BadRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type FormatterStatusError = FormatterStatusErrors[keyof FormatterStatusErrors]
@@ -8948,6 +9087,10 @@ export type McpStatusErrors = {
    * Bad request
    */
   400: BadRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type McpStatusError = McpStatusErrors[keyof McpStatusErrors]
@@ -8981,6 +9124,10 @@ export type McpAddErrors = {
    * BadRequest | InvalidRequestError
    */
   400: EffectHttpApiErrorBadRequest | InvalidRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type McpAddError = McpAddErrors[keyof McpAddErrors]
@@ -9017,6 +9164,10 @@ export type McpAuthRemoveErrors = {
    * McpServerNotFoundError
    */
   404: McpServerNotFoundError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type McpAuthRemoveError = McpAuthRemoveErrors[keyof McpAuthRemoveErrors]
@@ -9053,6 +9204,10 @@ export type McpAuthStartErrors = {
    * McpServerNotFoundError
    */
   404: McpServerNotFoundError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type McpAuthStartError = McpAuthStartErrors[keyof McpAuthStartErrors]
@@ -9092,6 +9247,10 @@ export type McpAuthCallbackErrors = {
    * McpServerNotFoundError
    */
   404: McpServerNotFoundError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type McpAuthCallbackError = McpAuthCallbackErrors[keyof McpAuthCallbackErrors]
@@ -9126,6 +9285,10 @@ export type McpAuthAuthenticateErrors = {
    * McpServerNotFoundError
    */
   404: McpServerNotFoundError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type McpAuthAuthenticateError = McpAuthAuthenticateErrors[keyof McpAuthAuthenticateErrors]
@@ -9160,6 +9323,10 @@ export type McpConnectErrors = {
    * McpServerNotFoundError
    */
   404: McpServerNotFoundError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type McpConnectError = McpConnectErrors[keyof McpConnectErrors]
@@ -9194,6 +9361,10 @@ export type McpDisconnectErrors = {
    * McpServerNotFoundError
    */
   404: McpServerNotFoundError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type McpDisconnectError = McpDisconnectErrors[keyof McpDisconnectErrors]
@@ -9247,6 +9418,10 @@ export type ProjectListErrors = {
    * Bad request
    */
   400: BadRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type ProjectListError = ProjectListErrors[keyof ProjectListErrors]
@@ -9275,6 +9450,10 @@ export type ProjectCurrentErrors = {
    * Bad request
    */
   400: BadRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type ProjectCurrentError = ProjectCurrentErrors[keyof ProjectCurrentErrors]
@@ -9303,6 +9482,10 @@ export type ProjectInitGitErrors = {
    * Bad request
    */
   400: BadRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type ProjectInitGitError = ProjectInitGitErrors[keyof ProjectInitGitErrors]
@@ -9341,6 +9524,10 @@ export type ProjectUpdateErrors = {
    * ProjectNotFoundError
    */
   404: ProjectNotFoundError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type ProjectUpdateError = ProjectUpdateErrors[keyof ProjectUpdateErrors]
@@ -9371,6 +9558,10 @@ export type ProjectDirectoriesErrors = {
    * Bad request
    */
   400: BadRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type ProjectDirectoriesError = ProjectDirectoriesErrors[keyof ProjectDirectoriesErrors]
@@ -9403,6 +9594,10 @@ export type ExperimentalProjectCopyGenerateNameErrors = {
    * Bad request
    */
   400: BadRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type ExperimentalProjectCopyGenerateNameError =
@@ -9435,6 +9630,10 @@ export type PtyShellsErrors = {
    * Bad request
    */
   400: BadRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type PtyShellsError = PtyShellsErrors[keyof PtyShellsErrors]
@@ -9467,6 +9666,10 @@ export type PtyListErrors = {
    * Bad request
    */
   400: BadRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type PtyListError = PtyListErrors[keyof PtyListErrors]
@@ -9503,6 +9706,10 @@ export type PtyCreateErrors = {
    * BadRequest | InvalidRequestError
    */
   400: EffectHttpApiErrorBadRequest | InvalidRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type PtyCreateError = PtyCreateErrors[keyof PtyCreateErrors]
@@ -9537,6 +9744,10 @@ export type PtyRemoveErrors = {
    * PtyNotFoundError
    */
   404: PtyNotFoundError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type PtyRemoveError = PtyRemoveErrors[keyof PtyRemoveErrors]
@@ -9571,6 +9782,10 @@ export type PtyGetErrors = {
    * PtyNotFoundError
    */
   404: PtyNotFoundError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type PtyGetError = PtyGetErrors[keyof PtyGetErrors]
@@ -9611,6 +9826,10 @@ export type PtyUpdateErrors = {
    * PtyNotFoundError
    */
   404: PtyNotFoundError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type PtyUpdateError = PtyUpdateErrors[keyof PtyUpdateErrors]
@@ -9649,6 +9868,10 @@ export type PtyConnectTokenErrors = {
    * PtyNotFoundError
    */
   404: PtyNotFoundError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type PtyConnectTokenError = PtyConnectTokenErrors[keyof PtyConnectTokenErrors]
@@ -9677,6 +9900,10 @@ export type QuestionListErrors = {
    * Bad request
    */
   400: BadRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type QuestionListError = QuestionListErrors[keyof QuestionListErrors]
@@ -9716,6 +9943,10 @@ export type QuestionReplyErrors = {
    * QuestionNotFoundError
    */
   404: QuestionNotFoundError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type QuestionReplyError = QuestionReplyErrors[keyof QuestionReplyErrors]
@@ -9750,6 +9981,10 @@ export type QuestionRejectErrors = {
    * QuestionNotFoundError
    */
   404: QuestionNotFoundError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type QuestionRejectError = QuestionRejectErrors[keyof QuestionRejectErrors]
@@ -9778,6 +10013,10 @@ export type PermissionListErrors = {
    * Bad request
    */
   400: BadRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type PermissionListError = PermissionListErrors[keyof PermissionListErrors]
@@ -9816,6 +10055,10 @@ export type PermissionReplyErrors = {
    * PermissionNotFoundError
    */
   404: PermissionNotFoundError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type PermissionReplyError = PermissionReplyErrors[keyof PermissionReplyErrors]
@@ -9844,6 +10087,10 @@ export type ProviderListErrors = {
    * Bad request
    */
   400: BadRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type ProviderListError = ProviderListErrors[keyof ProviderListErrors]
@@ -9878,6 +10125,10 @@ export type ProviderAuthErrors = {
    * Bad request
    */
   400: BadRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type ProviderAuthError2 = ProviderAuthErrors[keyof ProviderAuthErrors]
@@ -9918,6 +10169,10 @@ export type ProviderOauthAuthorizeErrors = {
    * ProviderAuthError | InvalidRequestError
    */
   400: ProviderAuthError1 | InvalidRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type ProviderOauthAuthorizeError = ProviderOauthAuthorizeErrors[keyof ProviderOauthAuthorizeErrors]
@@ -9954,6 +10209,10 @@ export type ProviderOauthCallbackErrors = {
    * ProviderAuthError | InvalidRequestError
    */
   400: ProviderAuthError1 | InvalidRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type ProviderOauthCallbackError = ProviderOauthCallbackErrors[keyof ProviderOauthCallbackErrors]
@@ -9988,6 +10247,10 @@ export type SessionListErrors = {
    * Bad request
    */
   400: BadRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type SessionListError = SessionListErrors[keyof SessionListErrors]
@@ -10030,6 +10293,10 @@ export type SessionCreateErrors = {
    * BadRequest | InvalidRequestError
    */
   400: EffectHttpApiErrorBadRequest | InvalidRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type SessionCreateError = SessionCreateErrors[keyof SessionCreateErrors]
@@ -10058,6 +10325,10 @@ export type SessionStatusErrors = {
    * BadRequest | InvalidRequestError
    */
   400: EffectHttpApiErrorBadRequest | InvalidRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type SessionStatusError = SessionStatusErrors[keyof SessionStatusErrors]
@@ -10094,6 +10365,10 @@ export type SessionDeleteErrors = {
    * NotFoundError
    */
   404: NotFoundError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type SessionDeleteError = SessionDeleteErrors[keyof SessionDeleteErrors]
@@ -10128,6 +10403,10 @@ export type SessionGetErrors = {
    * NotFoundError
    */
   404: NotFoundError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type SessionGetError = SessionGetErrors[keyof SessionGetErrors]
@@ -10171,6 +10450,10 @@ export type SessionUpdateErrors = {
    * NotFoundError
    */
   404: NotFoundError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type SessionUpdateError = SessionUpdateErrors[keyof SessionUpdateErrors]
@@ -10205,6 +10488,10 @@ export type SessionChildrenErrors = {
    * NotFoundError
    */
   404: NotFoundError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type SessionChildrenError = SessionChildrenErrors[keyof SessionChildrenErrors]
@@ -10239,6 +10526,10 @@ export type SessionTodoErrors = {
    * NotFoundError
    */
   404: NotFoundError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type SessionTodoError = SessionTodoErrors[keyof SessionTodoErrors]
@@ -10270,6 +10561,10 @@ export type SessionDiffErrors = {
    * Bad request
    */
   400: BadRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type SessionDiffError = SessionDiffErrors[keyof SessionDiffErrors]
@@ -10306,6 +10601,10 @@ export type SessionMessagesErrors = {
    * NotFoundError
    */
   404: NotFoundError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type SessionMessagesError = SessionMessagesErrors[keyof SessionMessagesErrors]
@@ -10358,6 +10657,10 @@ export type SessionPromptErrors = {
    * NotFoundError
    */
   404: NotFoundError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type SessionPromptError = SessionPromptErrors[keyof SessionPromptErrors]
@@ -10400,6 +10703,10 @@ export type SessionDeleteMessageErrors = {
    * SessionBusyError
    */
   409: SessionBusyError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type SessionDeleteMessageError = SessionDeleteMessageErrors[keyof SessionDeleteMessageErrors]
@@ -10435,6 +10742,10 @@ export type SessionMessageErrors = {
    * NotFoundError
    */
   404: NotFoundError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type SessionMessageError = SessionMessageErrors[keyof SessionMessageErrors]
@@ -10474,6 +10785,10 @@ export type SessionForkErrors = {
    * NotFoundError
    */
   404: NotFoundError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type SessionForkError = SessionForkErrors[keyof SessionForkErrors]
@@ -10504,6 +10819,10 @@ export type SessionAbortErrors = {
    * BadRequest | InvalidRequestError
    */
   400: EffectHttpApiErrorBadRequest | InvalidRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type SessionAbortError = SessionAbortErrors[keyof SessionAbortErrors]
@@ -10542,6 +10861,10 @@ export type SessionInitErrors = {
    * NotFoundError
    */
   404: NotFoundError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type SessionInitError = SessionInitErrors[keyof SessionInitErrors]
@@ -10577,9 +10900,9 @@ export type SessionUnshareErrors = {
    */
   404: NotFoundError
   /**
-   * InternalServerError
+   * InternalServerError | InstanceLoadError
    */
-  500: EffectHttpApiErrorInternalServerError
+  500: EffectHttpApiErrorInternalServerError | InstanceLoadError
 }
 
 export type SessionUnshareError = SessionUnshareErrors[keyof SessionUnshareErrors]
@@ -10615,9 +10938,9 @@ export type SessionShareErrors = {
    */
   404: NotFoundError
   /**
-   * InternalServerError
+   * InternalServerError | InstanceLoadError
    */
-  500: EffectHttpApiErrorInternalServerError
+  500: EffectHttpApiErrorInternalServerError | InstanceLoadError
 }
 
 export type SessionShareError = SessionShareErrors[keyof SessionShareErrors]
@@ -10656,6 +10979,10 @@ export type SessionSummarizeErrors = {
    * NotFoundError
    */
   404: NotFoundError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type SessionSummarizeError = SessionSummarizeErrors[keyof SessionSummarizeErrors]
@@ -10705,6 +11032,10 @@ export type SessionPromptAsyncErrors = {
    * NotFoundError
    */
   404: NotFoundError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type SessionPromptAsyncError = SessionPromptAsyncErrors[keyof SessionPromptAsyncErrors]
@@ -10754,6 +11085,10 @@ export type SessionCommandErrors = {
    * NotFoundError
    */
   404: NotFoundError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type SessionCommandError = SessionCommandErrors[keyof SessionCommandErrors]
@@ -10803,6 +11138,10 @@ export type SessionShellErrors = {
    * SessionBusyError
    */
   409: SessionBusyError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type SessionShellError = SessionShellErrors[keyof SessionShellErrors]
@@ -10847,6 +11186,10 @@ export type SessionRevertErrors = {
    * SessionBusyError
    */
   409: SessionBusyError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type SessionRevertError = SessionRevertErrors[keyof SessionRevertErrors]
@@ -10885,6 +11228,10 @@ export type SessionUnrevertErrors = {
    * SessionBusyError
    */
   409: SessionBusyError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type SessionUnrevertError = SessionUnrevertErrors[keyof SessionUnrevertErrors]
@@ -10922,6 +11269,10 @@ export type PermissionRespondErrors = {
    * NotFoundError | PermissionNotFoundError
    */
   404: NotFoundError | PermissionNotFoundError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type PermissionRespondError = PermissionRespondErrors[keyof PermissionRespondErrors]
@@ -10958,6 +11309,10 @@ export type PartDeleteErrors = {
    * NotFoundError
    */
   404: NotFoundError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type PartDeleteError = PartDeleteErrors[keyof PartDeleteErrors]
@@ -10994,6 +11349,10 @@ export type PartUpdateErrors = {
    * NotFoundError
    */
   404: NotFoundError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type PartUpdateError = PartUpdateErrors[keyof PartUpdateErrors]
@@ -11022,6 +11381,10 @@ export type SharedWsErrors = {
    * Bad request
    */
   400: BadRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type SharedWsError = SharedWsErrors[keyof SharedWsErrors]
@@ -11050,6 +11413,10 @@ export type SyncStartErrors = {
    * Bad request
    */
   400: BadRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type SyncStartError = SyncStartErrors[keyof SyncStartErrors]
@@ -11089,6 +11456,10 @@ export type SyncReplayErrors = {
    * BadRequest | InvalidRequestError
    */
   400: EffectHttpApiErrorBadRequest | InvalidRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type SyncReplayError = SyncReplayErrors[keyof SyncReplayErrors]
@@ -11121,6 +11492,10 @@ export type SyncStealErrors = {
    * BadRequest | InvalidRequestError
    */
   400: EffectHttpApiErrorBadRequest | InvalidRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type SyncStealError = SyncStealErrors[keyof SyncStealErrors]
@@ -11153,6 +11528,10 @@ export type SyncHistoryListErrors = {
    * BadRequest | InvalidRequestError
    */
   400: EffectHttpApiErrorBadRequest | InvalidRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type SyncHistoryListError = SyncHistoryListErrors[keyof SyncHistoryListErrors]
@@ -11191,6 +11570,10 @@ export type TuiAppendPromptErrors = {
    * BadRequest | InvalidRequestError
    */
   400: EffectHttpApiErrorBadRequest | InvalidRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type TuiAppendPromptError = TuiAppendPromptErrors[keyof TuiAppendPromptErrors]
@@ -11219,6 +11602,10 @@ export type TuiOpenHelpErrors = {
    * Bad request
    */
   400: BadRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type TuiOpenHelpError = TuiOpenHelpErrors[keyof TuiOpenHelpErrors]
@@ -11247,6 +11634,10 @@ export type TuiOpenSessionsErrors = {
    * Bad request
    */
   400: BadRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type TuiOpenSessionsError = TuiOpenSessionsErrors[keyof TuiOpenSessionsErrors]
@@ -11275,6 +11666,10 @@ export type TuiOpenThemesErrors = {
    * Bad request
    */
   400: BadRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type TuiOpenThemesError = TuiOpenThemesErrors[keyof TuiOpenThemesErrors]
@@ -11303,6 +11698,10 @@ export type TuiOpenModelsErrors = {
    * Bad request
    */
   400: BadRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type TuiOpenModelsError = TuiOpenModelsErrors[keyof TuiOpenModelsErrors]
@@ -11331,6 +11730,10 @@ export type TuiSubmitPromptErrors = {
    * Bad request
    */
   400: BadRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type TuiSubmitPromptError = TuiSubmitPromptErrors[keyof TuiSubmitPromptErrors]
@@ -11359,6 +11762,10 @@ export type TuiClearPromptErrors = {
    * Bad request
    */
   400: BadRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type TuiClearPromptError = TuiClearPromptErrors[keyof TuiClearPromptErrors]
@@ -11389,6 +11796,10 @@ export type TuiExecuteCommandErrors = {
    * BadRequest | InvalidRequestError
    */
   400: EffectHttpApiErrorBadRequest | InvalidRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type TuiExecuteCommandError = TuiExecuteCommandErrors[keyof TuiExecuteCommandErrors]
@@ -11422,6 +11833,10 @@ export type TuiShowToastErrors = {
    * Bad request
    */
   400: BadRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type TuiShowToastError = TuiShowToastErrors[keyof TuiShowToastErrors]
@@ -11450,6 +11865,10 @@ export type TuiPublishErrors = {
    * BadRequest | InvalidRequestError
    */
   400: EffectHttpApiErrorBadRequest | InvalidRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type TuiPublishError = TuiPublishErrors[keyof TuiPublishErrors]
@@ -11487,6 +11906,10 @@ export type TuiSelectSessionErrors = {
    * NotFoundError
    */
   404: NotFoundError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type TuiSelectSessionError = TuiSelectSessionErrors[keyof TuiSelectSessionErrors]
@@ -11515,6 +11938,10 @@ export type TuiControlNextErrors = {
    * Bad request
    */
   400: BadRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type TuiControlNextError = TuiControlNextErrors[keyof TuiControlNextErrors]
@@ -11546,6 +11973,10 @@ export type TuiControlResponseErrors = {
    * Bad request
    */
   400: BadRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type TuiControlResponseError = TuiControlResponseErrors[keyof TuiControlResponseErrors]
@@ -11574,6 +12005,10 @@ export type ExperimentalWorkspaceAdapterListErrors = {
    * Bad request
    */
   400: BadRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type ExperimentalWorkspaceAdapterListError =
@@ -11608,6 +12043,10 @@ export type ExperimentalWorkspaceListErrors = {
    * Bad request
    */
   400: BadRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type ExperimentalWorkspaceListError = ExperimentalWorkspaceListErrors[keyof ExperimentalWorkspaceListErrors]
@@ -11642,6 +12081,10 @@ export type ExperimentalWorkspaceCreateErrors = {
    * WorkspaceCreateError | BadRequest | InvalidRequestError
    */
   400: WorkspaceCreateError | EffectHttpApiErrorBadRequest | InvalidRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type ExperimentalWorkspaceCreateError =
@@ -11672,6 +12115,10 @@ export type ExperimentalWorkspaceSyncListErrors = {
    * Bad request
    */
   400: BadRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type ExperimentalWorkspaceSyncListError =
@@ -11702,6 +12149,10 @@ export type ExperimentalWorkspaceStatusErrors = {
    * Bad request
    */
   400: BadRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type ExperimentalWorkspaceStatusError =
@@ -11734,6 +12185,10 @@ export type ExperimentalWorkspaceRemoveErrors = {
    * BadRequest | InvalidRequestError
    */
   400: EffectHttpApiErrorBadRequest | InvalidRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type ExperimentalWorkspaceRemoveError =
@@ -11772,6 +12227,10 @@ export type ExperimentalWorkspaceWarpErrors = {
    * NotFoundError
    */
   404: NotFoundError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type ExperimentalWorkspaceWarpError = ExperimentalWorkspaceWarpErrors[keyof ExperimentalWorkspaceWarpErrors]
@@ -14167,6 +14626,10 @@ export type PtyConnectErrors = {
    * Not found
    */
   404: NotFoundError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
 }
 
 export type PtyConnectError = PtyConnectErrors[keyof PtyConnectErrors]
