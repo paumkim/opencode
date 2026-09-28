@@ -16,6 +16,7 @@ import { createOpencodeClient } from "@opencode-ai/sdk/v2"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { MessageID } from "@/session/schema"
 import { createRunDemo } from "./demo"
+import { readCatalogList } from "./catalog"
 import { resolveModelInfo, resolveRunTuiConfig, resolveSessionInfo } from "./runtime.boot"
 import { createRuntimeLifecycle } from "./runtime.lifecycle"
 import { trace } from "./trace"
@@ -229,10 +230,15 @@ async function runInteractiveRuntime(input: RunRuntimeInput, deps: RunRuntimeDep
 
   const shell = await (deps.createRuntimeLifecycle ?? createRuntimeLifecycle)({
     directory: ctx.directory,
+    // Unlike the catalog read below, a failed file search still returns `[]`.
+    // This runs per keystroke, so an empty list is the ordinary "nothing
+    // matched" result and the next keystroke retries; degrading to it loses
+    // nothing, whereas the catalog is a one-time snapshot where an empty list
+    // would be a persistent false claim.
     findFiles: (query) =>
       ctx.sdk.find
         .files({ query, directory: ctx.directory })
-        .then((x) => x.data ?? [])
+        .then((x) => (x.error ? [] : (x.data ?? [])))
         .catch(() => []),
     agents: [],
     resources: [],
@@ -388,19 +394,28 @@ async function runInteractiveRuntime(input: RunRuntimeInput, deps: RunRuntimeDep
       return
     }
 
+    // `undefined` means "the read failed", `[]` means "the server said there is
+    // nothing". The old `.catch(() => [])` destroyed that difference, so a
+    // transient error emptied the agent picker, the `@` resources and the `/`
+    // commands — including the user's installed skills — with nothing to
+    // distinguish it from a genuine empty catalog. This is a one-time snapshot
+    // rather than a live query, so an empty list here would sit there
+    // permanently and read as a fact. The generated client resolves typed
+    // failures into `.error` rather than rejecting, so the `.catch` was not
+    // even the path a 404/500 took.
     const [agents, resources, commands] = await Promise.all([
       ctx.sdk.app
         .agents({ directory: ctx.directory })
-        .then((x) => x.data ?? [])
-        .catch(() => []),
+        .then((x) => readCatalogList(x, []))
+        .catch(() => undefined),
       ctx.sdk.experimental.resource
         .list({ directory: ctx.directory })
-        .then((x) => Object.values(x.data ?? {}))
-        .catch(() => []),
+        .then((x) => (x.error ? undefined : Object.values(x.data ?? {})))
+        .catch(() => undefined),
       ctx.sdk.command
         .list({ directory: ctx.directory })
-        .then((x) => x.data ?? [])
-        .catch(() => []),
+        .then((x) => readCatalogList(x, []))
+        .catch(() => undefined),
     ])
     if (footer.isClosed) {
       return
