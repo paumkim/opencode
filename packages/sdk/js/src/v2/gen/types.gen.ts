@@ -2702,6 +2702,19 @@ export type ProviderAuthError1 = {
   }
 }
 
+export type SessionSearchHit = {
+  sessionID: string
+  sessionTitle: string
+  directory: string
+  messageID: string
+  partID: string
+  role: string
+  time: number
+  matches: number
+  snippet: string
+  snippetStart: number
+}
+
 export type NotFoundError = {
   name: "NotFoundError"
   data: {
@@ -10309,6 +10322,44 @@ export type SessionCreateResponses = {
 }
 
 export type SessionCreateResponse = SessionCreateResponses[keyof SessionCreateResponses]
+
+export type SessionSearchData = {
+  body?: never
+  path?: never
+  query: {
+    directory?: string
+    workspace?: string
+    q: string
+    session?: string
+    all?: "true" | "false"
+    case?: "true" | "false"
+    synthetic?: "true" | "false"
+    limit?: string
+  }
+  url: "/session/search"
+}
+
+export type SessionSearchErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+  /**
+   * InstanceLoadError
+   */
+  500: InstanceLoadError
+}
+
+export type SessionSearchError = SessionSearchErrors[keyof SessionSearchErrors]
+
+export type SessionSearchResponses = {
+  /**
+   * Matching message parts
+   */
+  200: Array<SessionSearchHit>
+}
+
+export type SessionSearchResponse = SessionSearchResponses[keyof SessionSearchResponses]
 
 export type SessionStatusData = {
   body?: never

@@ -38,6 +38,7 @@ import { SessionRevert } from "@/session/revert"
 import { SessionRunState } from "@/session/run-state"
 import { Session } from "@/session/session"
 import { SessionStatus } from "@/session/status"
+import { SessionSearch } from "@/session/search"
 import { SessionSummary } from "@/session/summary"
 import { Todo } from "@/session/todo"
 import { SessionShare } from "@/share/session"
@@ -247,6 +248,7 @@ export const app = LayerNode.group([
   SessionV2.node,
   SessionProjector.node,
   SessionStatus.node,
+  SessionSearch.node,
   BackgroundJob.node,
   // Pushes a settled worker's digest to its parent. Nothing else subscribes to
   // `FanoutEvent.WorkerSettled`, so without this node a fanned-out parent is
