@@ -15,6 +15,7 @@ import { Plugin } from "@/plugin"
 import { GhosttyTerminalAvailable, GhosttyTerminalTool, Parameters } from "@/tool/ghostty-terminal"
 import { Tool } from "@/tool/tool"
 import { TerminalSessions, type SessionInfo } from "@opencode-ai/ghostty-terminal/sessions"
+import * as Visible from "@opencode-ai/ghostty-terminal/visible"
 import { MessageID } from "@/session/schema"
 import { InstanceState } from "@/effect/instance-state"
 import { Session } from "@/session/session"
@@ -46,6 +47,41 @@ const sideEffects = Effect.gen(function* () {
   const write = spyOn(TerminalSessions.prototype, "write").mockImplementation(() => {})
   yield* Effect.addFinalizer(() => Effect.sync(() => { create.mockRestore(); write.mockRestore() }))
   return { create, write }
+})
+
+/** In-memory stand-in for the visible backend (tmux session table + ghostty
+ * window). The tool imports the module namespace, so spying on the namespace
+ * intercepts its calls; nothing here needs a display, tmux, or ghostty. */
+const fakeVisible = Effect.gen(function* () {
+  const sessions = new Map<string, Visible.VisibleInfo>()
+  const create = spyOn(Visible, "create").mockImplementation((opts) => {
+    sessions.set(opts.session, {
+      session: opts.session,
+      pid: 4242,
+      cols: opts.cols,
+      rows: opts.rows,
+      attached: true,
+      exited: false,
+      created: "2026-01-01T00:00:00.000Z",
+    })
+  })
+  const exists = spyOn(Visible, "exists").mockImplementation((session) => sessions.has(session))
+  const info = spyOn(Visible, "info").mockImplementation((session) => sessions.get(session))
+  const list = spyOn(Visible, "list").mockImplementation((prefix) =>
+    [...sessions.values()].filter((entry) => entry.session.startsWith(prefix)),
+  )
+  const dispose = spyOn(Visible, "dispose").mockImplementation((session) => {
+    sessions.delete(session)
+  })
+  const write = spyOn(Visible, "write").mockImplementation(() => {})
+  const screen = spyOn(Visible, "screen").mockImplementation(() => "FAKE VISIBLE SCREEN")
+  const resize = spyOn(Visible, "resize").mockImplementation(() => {})
+  const kill = spyOn(Visible, "kill").mockImplementation(() => {})
+  const spies = [create, exists, info, list, dispose, write, screen, resize, kill]
+  // The instance finalizer disposes visible sessions with the real module, so
+  // every test disposes its own windows before this restores the real exports.
+  yield* Effect.addFinalizer(() => Effect.sync(() => { for (const spy of spies) spy.mockRestore() }))
+  return { sessions, create, exists, info, list, dispose, write, screen }
 })
 
 function failure(exit: Exit.Exit<unknown, unknown>) {
@@ -360,5 +396,131 @@ it.instance("invalid action parameters fail before any terminal is created", () 
   }
   expect(() => Schema.decodeUnknownSync(Parameters)({ action: "create", name: "bad/name" })).toThrow()
   expect(() => Schema.decodeUnknownSync(Parameters)({ action: "resize", cols: 999999 })).toThrow()
+  expect((yield* tool.execute({ action: "list" }, ctx)).output).toBe("[]")
+}))
+
+it.instance("display defaults to headless and a headless create says so out loud", () => Effect.gen(function* () {
+  // Omitting display decodes to "headless" for every action, so the default is
+  // the tool's, not something the model has to remember to pass.
+  for (const args of [{ action: "create", name: "shell" }, { action: "screen", name: "shell" }, { action: "list" }] as const) {
+    expect(Schema.decodeUnknownSync(Parameters)(args).display).toBe("headless")
+  }
+  expect(Schema.decodeUnknownSync(Parameters)({ action: "create", name: "shell", display: "visible" }).display).toBe("visible")
+  expect(() => Schema.decodeUnknownSync(Parameters)({ action: "create", name: "shell", display: "fullscreen" })).toThrow()
+  const tool = yield* init
+  const ctx = yield* context
+  const result = yield* tool.execute({ action: "create", name: "hidden" }, ctx)
+  expect(result.output).toContain("This terminal is headless: the user CANNOT see it.")
+  expect(result.metadata.display).toBeUndefined()
+  expect(result.metadata.windowOpen).toBeUndefined()
+  expect((yield* tool.execute({ action: "list" }, ctx)).output).toContain('"display":"headless"')
+  yield* tool.execute({ action: "dispose" }, ctx)
+}))
+
+it.instance("display=visible opens a window and never a native PTY", () => Effect.gen(function* () {
+  const spies = yield* sideEffects
+  const fake = yield* fakeVisible
+  const tool = yield* init
+  const ctx = yield* context
+  const result = yield* tool.execute({ action: "create", name: "watch", display: "visible" }, ctx)
+  expect(fake.create).toHaveBeenCalledTimes(1)
+  const opts = fake.create.mock.calls[0]?.[0]
+  expect(opts?.session).toBe(Visible.sessionName(JSON.stringify([ctx.sessionID, ctx.agent]), "watch"))
+  expect(opts).toMatchObject({ title: "opencode: watch", cols: 80, rows: 24 })
+  expect(result.metadata).toMatchObject({ display: "visible", windowOpen: true })
+  expect(result.output).not.toContain("the user CANNOT see it")
+  // The native registry is never reached, so no invisible PTY shadows the window.
+  expect(spies.create).not.toHaveBeenCalled()
+  expect(spies.write).not.toHaveBeenCalled()
+  // tmux is one global server, so the same short name under another
+  // conversation must land on a different session rather than fight for it.
+  const other = yield* context
+  expect((yield* tool.execute({ action: "list" }, other)).output).toBe("[]")
+  yield* tool.execute({ action: "create", name: "watch", display: "visible" }, other)
+  expect(fake.create).toHaveBeenCalledTimes(2)
+  expect(fake.create.mock.calls[1]?.[0].session).toBe(
+    Visible.sessionName(JSON.stringify([other.sessionID, other.agent]), "watch"),
+  )
+  expect(fake.create.mock.calls[1]?.[0].session).not.toBe(fake.create.mock.calls[0]?.[0].session)
+  yield* tool.execute({ action: "dispose", name: "watch" }, ctx)
+  yield* tool.execute({ action: "dispose", name: "watch" }, other)
+  expect(fake.sessions.size).toBe(0)
+}))
+
+it.instance("an undeliverable window reports NO WINDOW WAS OPENED and never falls back to headless", () => Effect.gen(function* () {
+  const spies = yield* sideEffects
+  const fake = yield* fakeVisible
+  fake.create.mockImplementation(() => {
+    throw new Visible.VisibleUnavailableError("no WAYLAND_DISPLAY and no DISPLAY here", "offer a headless terminal instead")
+  })
+  const tool = yield* init
+  const ctx = yield* context
+  const result = yield* tool.execute({ action: "create", name: "watch", display: "visible" }, ctx)
+  expect(result.output.startsWith("NO WINDOW WAS OPENED")).toBe(true)
+  expect(result.output).toContain("no WAYLAND_DISPLAY and no DISPLAY here")
+  expect(result.output).toContain("offer a headless terminal instead")
+  expect(result.metadata).toMatchObject({ display: "visible", windowOpen: false })
+  // Not a headless terminal in disguise: no native PTY, no tmux session, and
+  // nothing left behind for a later screen/list to mistake for a terminal.
+  expect(spies.create).not.toHaveBeenCalled()
+  expect(fake.sessions.size).toBe(0)
+  expect((yield* tool.execute({ action: "list" }, ctx)).output).toBe("[]")
+  expect(failure(yield* tool.execute({ action: "screen", name: "watch" }, ctx).pipe(Effect.exit))).toContain(
+    "Unknown terminal session 'watch'",
+  )
+  // The failure leaves no half-created state blocking the same name, so the
+  // retry reaches the backend again instead of reporting "already exists".
+  const retry = yield* tool.execute({ action: "create", name: "watch", display: "visible" }, ctx)
+  expect(retry.output.startsWith("NO WINDOW WAS OPENED")).toBe(true)
+  expect(fake.create).toHaveBeenCalledTimes(2)
+  yield* tool.execute({ action: "dispose" }, ctx)
+}))
+
+it.instance("list merges the owner's headless and visible terminals", () => Effect.gen(function* () {
+  const fake = yield* fakeVisible
+  const tool = yield* init
+  const ctx = yield* context
+  yield* tool.execute({ action: "create", name: "hidden" }, ctx)
+  yield* tool.execute({ action: "create", name: "watch", display: "visible" }, ctx)
+  const entries = Schema.decodeUnknownSync(Schema.Array(Schema.Struct({
+    name: Schema.String,
+    display: Schema.Literals(["headless", "visible"]),
+    windowOpen: Schema.optional(Schema.Boolean),
+    pid: Schema.optional(Schema.Number),
+    cols: Schema.optional(Schema.Number),
+    rows: Schema.optional(Schema.Number),
+    exited: Schema.optional(Schema.Boolean),
+  })))(JSON.parse((yield* tool.execute({ action: "list" }, ctx)).output))
+  expect(entries.map((entry) => entry.name).sort()).toEqual(["hidden", "watch"])
+  const byName = Object.fromEntries(entries.map((entry) => [entry.name, entry]))
+  expect(byName.hidden).toMatchObject({ display: "headless" })
+  expect(byName.hidden?.windowOpen).toBeUndefined()
+  expect(byName.watch).toMatchObject({ display: "visible", windowOpen: true, cols: 80, rows: 24 })
+  // Owner-scoped: another conversation sees neither the window nor the terminal.
+  expect((yield* tool.execute({ action: "list" }, yield* context)).output).toBe("[]")
+  yield* tool.execute({ action: "dispose", name: "watch" }, ctx)
+  expect(fake.sessions.size).toBe(0)
+  yield* tool.execute({ action: "dispose" }, ctx)
+  expect((yield* tool.execute({ action: "list" }, ctx)).output).toBe("[]")
+}))
+
+it.instance("display is accepted and ignored by actions other than create", () => Effect.gen(function* () {
+  const fake = yield* fakeVisible
+  const tool = yield* init
+  const ctx = yield* context
+  expect(Schema.decodeUnknownSync(Parameters)({ action: "screen", name: "plain", display: "visible" }).display).toBe("visible")
+  yield* tool.execute({ action: "create", name: "plain" }, ctx)
+  yield* tool.execute({ action: "write", name: "plain", data: "printf 'VISIBLE_IGNORED\\n'\\r" }, ctx)
+  yield* pollWithTimeout(Effect.gen(function* () {
+    const result = yield* tool.execute({ action: "screen", name: "plain", display: "visible" }, ctx)
+    return result.output.includes("VISIBLE_IGNORED") ? true : undefined
+  }), "headless screen did not show the write")
+  // A live-display flag on a screen read must not reroute it to tmux; if it
+  // had, the poll above would have read the fake screen instead of the PTY.
+  expect(fake.screen).not.toHaveBeenCalled()
+  expect(fake.write).not.toHaveBeenCalled()
+  expect(fake.sessions.size).toBe(0)
+  expect((yield* tool.execute({ action: "list", display: "visible" }, ctx)).output).toContain('"display":"headless"')
+  expect((yield* tool.execute({ action: "dispose", display: "visible" }, ctx)).output).toBe("Disposed terminals.")
   expect((yield* tool.execute({ action: "list" }, ctx)).output).toBe("[]")
 }))

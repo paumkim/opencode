@@ -8,6 +8,7 @@
   "scripts": {
     "typecheck": "tsgo --noEmit",
     "test": "bun test --timeout 30000 --only-failures",
+    "test:visible": "OPENCODE_VISIBLE_TEST=1 bun test test/tool/ghostty-terminal-visible-live.test.ts --timeout 120000",
     "test:httpapi": "bun run script/httpapi-exercise.ts --mode coverage --fail-on-missing && bun run script/httpapi-exercise.ts --mode auth --fail-on-missing && bun run script/httpapi-exercise.ts --mode effect --fail-on-missing",
     "bench:test": "bun run script/bench-test-suite.ts",
     "profile:test": "bun run script/profile-test-files.ts",

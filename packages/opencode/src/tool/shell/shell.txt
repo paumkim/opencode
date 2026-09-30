@@ -8,6 +8,8 @@ Use `${tmp}` for temporary work outside the workspace. This directory has alread
 
 IMPORTANT: This tool is for terminal operations like git, npm, docker, etc. DO NOT use it for file operations (reading, writing, editing, searching, finding files) - use the specialized tools for this instead. For interactive, TUI, or persistent processes, use the `ghostty_terminal` tool instead (the default fast path) - do not poll with repeated `bash` calls or shell out to `tmux send-keys`/`capture-pane`.
 
+IMPORTANT: this tool CANNOT show anything to the user. If they ask to see, watch, or follow something ("display live", "show me", "on my screen", "visible"), do not run it here - use `ghostty_terminal` with `display: "visible"`, which opens a real window on their screen. A command run through this tool stays invisible to them no matter how much output it prints.
+
 ${commandSection}
 
 # Git and GitHub
