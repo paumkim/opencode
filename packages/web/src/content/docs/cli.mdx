@@ -463,6 +463,64 @@ opencode stats
 
 ---
 
+### doctor
+
+Diagnose the local setup: agent definitions, configured models, provider
+credentials, MCP servers, and the external binaries the tools rely on.
+
+```bash
+opencode doctor
+```
+
+Doctor exits non-zero when it finds something broken, so it can gate CI.
+
+```bash
+opencode doctor --brief
+```
+
+Doctor checks for configuration that is accepted and then silently ignored —
+a misspelled permission name, a model that does not exist, a deprecated `tools`
+block, a `default_agent` pointing at a subagent.
+
+#### Flags
+
+| Flag                                   | Description                                                   |
+| -------------------------------------- | ------------------------------------------------------------- |
+| <nobr><code>{"--json"}</code></nobr>   | Emit the report as JSON on stdout                             |
+| <nobr><code>{"--brief"}</code></nobr>  | Only report errors and warnings                               |
+| <nobr><code>{"--no-mcp"}</code></nobr> | Skip the MCP check, which connects to every configured server |
+
+---
+
+### search
+
+Search the text of every message in your sessions.
+
+```bash
+opencode search rotate the database password
+```
+
+Everything after `search` is the query, so the phrase does not have to be
+quoted. Results are ordered by the most recently updated session and show a
+snippet around the first match.
+
+```bash
+opencode search "sk-" --limit 5
+```
+
+#### Flags
+
+| Flag                                      | Description                                                    |
+| ----------------------------------------- | -------------------------------------------------------------- |
+| <nobr><code>{"--session"}</code></nobr>   | Only search this session                                       |
+| <nobr><code>{"--all"}</code></nobr>       | Search every project, not just the current one                 |
+| <nobr><code>{"--case"}</code></nobr>      | Match case                                                     |
+| <nobr><code>{"--synthetic"}</code></nobr> | Include text the agent injected (reminders, compaction output) |
+| <nobr><code>{"--limit"}</code></nobr>     | Maximum number of hits (default: 50)                           |
+| <nobr><code>{"--format"}</code></nobr>    | Output format: `text` or `json`                                |
+
+---
+
 ### export
 
 Export session data as JSON.
