@@ -1558,6 +1558,12 @@ it.instance(
           return part as CompletedToolPart
         }),
         "timed out waiting for the delegated subtask to be recorded",
+        // Deliberately not the 5s default. This waits on a child session being created and
+        // dispatching its first model call, and `bun test` runs files in parallel, so a loaded
+        // host spends most of a 5s budget on scheduling rather than on the awaited work. The
+        // wait is on a published signal (the tool part's settled state), not on a sleep, so the
+        // budget only has to cover a slow host, not to paper over a hang.
+        "15 seconds",
       )
 
       // The tool call is settled while the subagent it launched is still
@@ -1566,12 +1572,14 @@ it.instance(
       expect(typeof tool.state.metadata?.sessionId).toBe("string")
       expect(tool.state.title).toBeDefined()
       expect(tool.state.metadata?.model).toBeDefined()
-      expect(yield* waitForBusy(SessionID.make(tool.state.metadata!.sessionId as SessionID))).toBe(true)
+      expect(
+        yield* waitForBusy(SessionID.make(tool.state.metadata!.sessionId as SessionID), "15 seconds"),
+      ).toBe(true)
 
       yield* prompt.cancel(chat.id)
       yield* Fiber.await(fiber)
     }),
-  5_000,
+  30_000,
 )
 
 it.instance(
@@ -1585,28 +1593,56 @@ it.instance(
         title: "Pinned",
         permission: [{ permission: "*", pattern: "*", action: "allow" }],
       })
-      yield* llm.tool("task", {
+      // Both scripted replies are scoped to the parent's OWN request. Unscoped, they are a
+      // FIFO that any other request on this server can drain first — the mock answers an
+      // unscripted request with a plain "ok" — so under load another request could take the
+      // `task` call and the parent would answer "ok" with no tool part at all. That is exactly
+      // how this test failed: `parts=step-start,text,step-finish text=ok`. Matching on the
+      // user's message makes the order irrelevant, since only the parent's turn carries it.
+      const parentTurn = (hit: { body: Record<string, unknown> }) => JSON.stringify(hit.body).includes("hello")
+      yield* llm.toolMatch(parentTurn, "task", {
         description: "inspect bug",
         prompt: "look into the cache key path",
         subagent_type: "general",
       })
-      yield* llm.hang
+      yield* llm.pushMatch(parentTurn, reply().hang())
       yield* user(chat.id, "hello")
 
       const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
 
+      // The failure this test actually suffers from is a stall, not slowness: the `task` part
+      // never settles, so a bare "timed out" says nothing about how far it got. Recording the
+      // last observed state turns the next occurrence into a diagnosis instead of a mystery.
+      let observed = "no assistant message recorded yet"
+      let calls = 0
       const tool = yield* pollWithTimeout(
         Effect.gen(function* () {
           const msgs = yield* MessageV2.filterCompactedEffect(chat.id)
-          const assistant = msgs.findLast((item) => item.info.role === "assistant" && item.info.agent === "build")
-          const part = assistant?.parts.find(
-            (part): part is SessionV1.ToolPart => part.type === "tool" && part.tool === "task",
-          )
+          // Scan every parent message, not just the last one. The `task` part is recorded in
+          // the turn that made the call; the parent then starts a further turn that hangs on
+          // the scripted reply. Looking only at the last message therefore races the parent's
+          // own progress, and lost that race often enough to be the flake.
+          const parent = msgs.filter((item) => item.info.role === "assistant" && item.info.agent === "build")
+          const part = parent
+            .flatMap((item) => item.parts)
+            .find((p): p is SessionV1.ToolPart => p.type === "tool" && p.tool === "task")
+          const status = part?.state.status ?? (parent.length ? "no task part" : "no assistant message")
+          // `calls` separates "the parent never asked the model" from "the model answered
+          // without a task call" — the two look identical from the session alone. The part
+          // names and text say which reply the mock server actually handed back.
+          calls = yield* llm.calls
+          observed = `parent-msgs=${parent.length} task-part=${status} sessionId=${
+            part?.state.status === "completed" ? String(part.state.metadata?.sessionId) : "-"
+          } llm-calls=${calls} parts=${parent.map((p) => p.parts.map((q) => q.type).join("+")).join(" | ")}`
           if (part?.state.status !== "completed" || !part.state.metadata?.sessionId) return
           return part as CompletedToolPart
         }),
         "timed out waiting for the delegated task to be recorded",
-      )
+        // The heaviest of the three: the parent has to reach the model, emit the `task` call,
+        // create the child session, and the child has to start its own model call before this
+        // tool part settles. The 5s default is under that on a loaded host.
+        "20 seconds",
+      ).pipe(Effect.mapError((error) => new Error(`${error.message}\n  ${observed}`)))
 
       // The call is settled while the subagent it launched is still working --
       // waiting for that result is what `wait: true` is for now. The session it
@@ -1614,12 +1650,14 @@ it.instance(
       expect(typeof tool.state.metadata?.sessionId).toBe("string")
       expect(tool.state.title).toBe("inspect bug")
       expect(tool.state.metadata?.model).toBeDefined()
-      expect(yield* waitForBusy(SessionID.make(tool.state.metadata!.sessionId as SessionID))).toBe(true)
+      expect(
+        yield* waitForBusy(SessionID.make(tool.state.metadata!.sessionId as SessionID), "15 seconds"),
+      ).toBe(true)
 
       yield* prompt.cancel(chat.id)
       yield* Fiber.await(fiber)
     }),
-  10_000,
+  30_000,
 )
 
 it.instance(
@@ -1860,12 +1898,14 @@ it.instance(
           return part as CompletedToolPart
         }),
         "timed out waiting for the delegated subtask to be recorded",
+        // Same reasoning as the other two delegation waits; see the note above.
+        "15 seconds",
       )
       const sessionID = tool.state.metadata?.sessionId
       expect(typeof sessionID).toBe("string")
       if (typeof sessionID !== "string") throw new Error("missing child session id")
       const childID = SessionID.make(sessionID)
-      expect(yield* waitForBusy(childID)).toBe(true)
+      expect(yield* waitForBusy(childID, "15 seconds")).toBe(true)
 
       yield* prompt.cancel(chat.id)
       const exit = yield* Fiber.await(fiber)
@@ -1874,7 +1914,7 @@ it.instance(
       expect((yield* status.get(chat.id)).type).toBe("idle")
       expect((yield* status.get(childID)).type).toBe("idle")
     }),
-  10_000,
+  30_000,
 )
 
 it.instance(
