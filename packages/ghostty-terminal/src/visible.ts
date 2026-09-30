@@ -304,7 +304,7 @@ CONTROL["\t"] = "Tab"
 CONTROL["\x7f"] = "BSpace"
 
 /**
- * Split agent input into tmux arguments.
+ * Split agent input into tmux invocations, one inner array per `send-keys` call.
  *
  * `write` takes raw keystrokes, not text to paste, so control characters must
  * become real key presses. Literal runs go through `send-keys -l` (the `--`
@@ -314,14 +314,32 @@ CONTROL["\x7f"] = "BSpace"
  * recognise is forwarded as its original bytes instead of being shredded into
  * `Escape` plus typed-out bracket text, so a raw CSI still reaches the process
  * as a raw CSI.
+ *
+ * The nesting is the whole contract: `-l` is a *command-scoped* flag, not a
+ * per-argument one. Once it appears anywhere on a `send-keys` command line, tmux
+ * sends every argument on that line as literal characters and never looks up a
+ * key name. One flat argument list therefore made `ls -la\r` type the eleven
+ * characters `ls -laEnter` into the pane, and bash then reported
+ * `ls -laEnter: command not found` — the user saw the word "Enter" instead of a
+ * command running. Literal runs and key names cannot share an invocation, so
+ * they are returned as separate groups and `write` sends them in separate calls.
+ * Key names may be merged with each other, because they all belong to the same
+ * non-`-l` invocation.
  */
-export function toTmuxArgs(data: string): string[] {
-  const args: string[] = []
+export function toTmuxArgs(data: string): string[][] {
+  const groups: string[][] = []
   let literal = ""
   const flush = () => {
     if (!literal) return
-    args.push("-l", "--", literal)
+    groups.push(["-l", "--", literal])
     literal = ""
+  }
+  // A key name joins the previous group only when that group is already a
+  // key-name group; a literal group carries `-l` and must never gain one.
+  const key = (name: string) => {
+    const last = groups[groups.length - 1]
+    if (last && last[0] !== "-l") last.push(name)
+    else groups.push([name])
   }
   const isParam = (char: string) => char >= "\x30" && char <= "\x3f"
   const isIntermediate = (char: string) => char >= "\x20" && char <= "\x2f"
@@ -350,23 +368,23 @@ export function toTmuxArgs(data: string): string[] {
       }
       if (end > 0) {
         const sequence = data.slice(i, end)
-        const key = SEQUENCE_KEYS.get(sequence)
+        const sequenceKey = SEQUENCE_KEYS.get(sequence)
         flush()
-        if (key) args.push(key)
-        else args.push("-l", "--", sequence)
+        if (sequenceKey) key(sequenceKey)
+        else groups.push(["-l", "--", sequence])
         i = end
         continue
       }
       // A lone ESC, or one in front of ordinary text: the Escape key.
       flush()
-      args.push("Escape")
+      key("Escape")
       i += 1
       continue
     }
     const control = CONTROL[char]
     if (control) {
       flush()
-      args.push(control)
+      key(control)
       i += 1
       continue
     }
@@ -374,13 +392,15 @@ export function toTmuxArgs(data: string): string[] {
     i += 1
   }
   flush()
-  return args
+  return groups
 }
 
+/** One `send-keys` call per group, in order. The calls cannot be merged: see
+ *  `toTmuxArgs` on why `-l` and key names must not share a command line. */
 export function write(session: string, data: string): void {
-  const args = toTmuxArgs(data)
-  if (!args.length) return
-  tmuxCommand(["send-keys", "-t", session, ...args])
+  const groups = toTmuxArgs(data)
+  if (!groups.length) return
+  for (const group of groups) tmuxCommand(["send-keys", "-t", session, ...group])
 }
 
 export function screen(session: string, format: "plain" | "html" = "plain"): string {

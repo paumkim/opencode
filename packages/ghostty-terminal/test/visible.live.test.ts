@@ -59,6 +59,20 @@ describe.skipIf(!optIn)("visible window (live)", () => {
     expect(visible.screen(session)).toContain("AGENT_SAW_THIS")
   })
 
+  test("one write of text plus a return runs it instead of typing 'Enter'", async () => {
+    // The user-facing symptom of the `-l` bug: a single write carrying both a
+    // literal run and a key name put them on one `send-keys` command line, so
+    // the word "Enter" was typed into the window. The marker is computed by the
+    // shell, so it only reaches the window when the command really ran.
+    visible.write(session, "\r")
+    await sleep(400)
+    visible.write(session, "echo live-$((4*4))\r")
+    await sleep(1200)
+    const screen = visible.screen(session)
+    expect(screen).toContain("live-16")
+    expect(screen).not.toContain("Enter")
+  })
+
   test("C-c cancels a running process and the screen survives", async () => {
     visible.write(session, "sleep 30\r")
     await sleep(700)
