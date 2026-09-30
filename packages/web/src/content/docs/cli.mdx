@@ -463,6 +463,37 @@ opencode stats
 
 ---
 
+### usage
+
+Break a session's cost and tokens down by turn.
+
+```bash
+opencode session usage
+opencode session usage <sessionID>
+```
+
+With no session id this reports on the most recently updated session in the
+current project. Every assistant turn gets a row, and the totals are compared
+against what the session itself recorded.
+
+The findings under the table are the point of the command. A conversation can be
+expensive for reasons the transcript does not show: a prompt cache that is
+invalidated every turn re-bills the whole context, and context that only grows
+makes each turn cost more than the last. Both are silent while they happen.
+
+```bash
+opencode session usage --limit 10
+```
+
+#### Flags
+
+| Flag                                   | Description                         |
+| -------------------------------------- | ----------------------------------- |
+| <nobr><code>{"--limit"}</code></nobr>  | Only report the most recent N turns |
+| <nobr><code>{"--format"}</code></nobr> | Output format: `table` or `json`    |
+
+---
+
 ### doctor
 
 Diagnose the local setup: agent definitions, configured models, provider
