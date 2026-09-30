@@ -16,6 +16,7 @@ import { DebugCommand } from "./cli/cmd/debug"
 import { StatsCommand } from "./cli/cmd/stats"
 import { DoctorCommand } from "./cli/cmd/doctor"
 import { SearchCommand } from "./cli/cmd/search"
+import { PromptCommand } from "./cli/cmd/prompt"
 import { PermissionCommand } from "./cli/cmd/permission"
 import { McpCommand } from "./cli/cmd/mcp"
 import { GithubCommand } from "./cli/cmd/github"
@@ -116,7 +117,10 @@ const cli = yargs(args)
         if (daemonDir && existsSync(daemonDir)) {
           const pidFile = path.join(daemonDir, "daemon.pid")
           if (existsSync(pidFile)) {
-            const pid = Number.parseInt((await (await import("node:fs/promises")).readFile(pidFile, "utf-8")).trim(), 10)
+            const pid = Number.parseInt(
+              (await (await import("node:fs/promises")).readFile(pidFile, "utf-8")).trim(),
+              10,
+            )
             if (!Number.isInteger(pid) || pid <= 0) throw new Error("invalid daemon pid")
             try {
               process.kill(pid, 0)
@@ -125,7 +129,9 @@ const cli = yargs(args)
               return
             }
             const healthUrl = `${process.env.SYSTEM_ONE_URL ?? "http://127.0.0.1:9999"}/health`
-            const health = (await fetch(healthUrl, { signal: AbortSignal.timeout(500) }).then((response) => response.json())) as {
+            const health = (await fetch(healthUrl, { signal: AbortSignal.timeout(500) }).then((response) =>
+              response.json(),
+            )) as {
               status?: string
               model_loaded?: boolean
             }
@@ -164,6 +170,7 @@ const cli = yargs(args)
   .command(StatsCommand)
   .command(DoctorCommand)
   .command(SearchCommand)
+  .command(PromptCommand)
   .command(PermissionCommand)
   .command(ExportCommand)
   .command(ImportCommand)
@@ -220,7 +227,10 @@ async function startDaemon(daemonDir: string) {
     }
     child.once("error", () => finish(new Error("System One daemon startup command failed")))
     child.once("exit", (code, signal) => {
-      if (code !== 0) finish(new Error(`System One daemon startup command failed (code=${code ?? "null"}, signal=${signal ?? "none"})`))
+      if (code !== 0)
+        finish(
+          new Error(`System One daemon startup command failed (code=${code ?? "null"}, signal=${signal ?? "none"})`),
+        )
       else finish()
     })
   })
@@ -233,7 +243,8 @@ async function startDaemon(daemonDir: string) {
       process.kill(pid, 0)
       const response = await fetch(healthUrl, { signal: AbortSignal.timeout(500) })
       const health = (await response.json()) as { status?: string; model_loaded?: boolean }
-      if (!response.ok || health.status !== "ok" || health.model_loaded !== true) return new Promise<void>((resolve) => setTimeout(resolve, 100)).then(check)
+      if (!response.ok || health.status !== "ok" || health.model_loaded !== true)
+        return new Promise<void>((resolve) => setTimeout(resolve, 100)).then(check)
     } catch {
       return new Promise<void>((resolve) => setTimeout(resolve, 100)).then(check)
     }
