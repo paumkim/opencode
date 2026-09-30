@@ -31,6 +31,7 @@
 - Running `bun dev` (shorthand for `bun run ./src/index.ts`, see the `dev` script in `package.json`) from `packages/opencode` starts the live interactive TUI. Do not run it as a blocking foreground command when you need to inspect the result.
 - Use the `ghostty_terminal` tool instead of `tmux`: `create` a named terminal running `bun dev`, then `write` input and `screen` to inspect the TUI viewport.
 - Prefer `ghostty_terminal create/write/screen` over `tmux send-keys` / `tmux capture-pane` polling: it is the default fast path for interactive, TUI, and persistent process work.
+- Add `display: "visible"` when the user asks to watch it ("display live", "show me", "on my screen"). That opens a real Ghostty window on their screen; the default is headless and invisible to them.
 - Dispose the named terminal when done.
 
 # Module shape

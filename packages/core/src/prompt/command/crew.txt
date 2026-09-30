@@ -50,6 +50,10 @@ state at launch time, and the window is told to treat `git log` as the contract
 and the prompt's summary as orientation only — which is why it does not go stale
 the moment the agent commits.
 
+This ban is about the crew's own windows, not about your terminal work. A single
+`ghostty_terminal` created with `display: "visible"` is still fine when the user
+asks you to show them something.
+
 ## How each window is driven
 
 Each window is an opencode session with a bootstrap prompt that makes it:

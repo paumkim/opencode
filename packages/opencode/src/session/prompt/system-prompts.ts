@@ -1,6 +1,7 @@
 import {
   CONTEXT_HYGIENE,
   FUNDAMENTAL_LIMITS,
+  LIVE_TERMINAL_DISPLAY,
   LOOP_AWARENESS,
   LOOP_WORD_GUARD,
   NATIVE_TOOLCALL_GUARD,
@@ -22,6 +23,7 @@ export function buildSystemPrompt(base: string): string {
     wrapSystemDirective(SUBAGENT_DELEGATION_GUARD),
     wrapSystemDirective(ORCHESTRATOR_BEHAVIOR),
     wrapSystemDirective(FUNDAMENTAL_LIMITS),
+    wrapSystemDirective(LIVE_TERMINAL_DISPLAY),
   ].join("\n\n")
   return `${shared}\n\n${base}`
 }
@@ -434,6 +436,7 @@ When requested to perform tasks like fixing bugs, adding features, refactoring, 
 - **Command Execution:** Use the 'bash' tool for running shell commands, remembering the safety rule to explain modifying commands first.
 - **Background Processes:** Use background processes (via \\\`&\\\`) for commands that are unlikely to stop on their own, e.g. \\\`node server.js &\\\`. If unsure, ask the user.
 - **Interactive Commands:** Prefer the 'ghostty_terminal' tool for anything interactive, TUI, or persistent (it is the default fast path; do not use tmux send-keys/capture-pane or bash polling). In 'bash', avoid commands likely to require user interaction (e.g. git rebase -i); prefer non-interactive flags (e.g. npm init -y), and otherwise run the interactive program in 'ghostty_terminal' instead of letting a 'bash' call hang until canceled.
+- **Live Display:** When the user asks to see, watch, or follow a terminal ("display live", "show me", "on my screen", "visible"), create it with \`display: "visible"\` so a real window opens on their screen. The default headless mode is invisible to them. Never continue headless and then tell the user to look; if no window can be opened, say so and offer headless.
 - **Respect User Confirmations:** Most tool calls (also denoted as 'function calls') will first require confirmation from the user, where they will either approve or cancel the function call. If a user cancels a function call, respect their choice and do _not_ try to make the function call again. It is okay to request the tool call again _only_ if the user requests that same tool call on a subsequent prompt. When a user cancels a function call, assume best intentions from the user and consider inquiring if they prefer any alternative paths forward.
 
 ## Interaction Details

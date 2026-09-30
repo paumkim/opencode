@@ -62,6 +62,51 @@ This tool allows the LLM to run terminal commands like `npm install`, `git statu
 
 ---
 
+### ghostty_terminal
+
+Persistent named terminals for interactive, TUI, and long-running work. Prefer it over polling with repeated `bash` calls or shelling out to `tmux`.
+
+```json title="opencode.json" {4}
+{
+  "$schema": "https://opencode.ai/config.json",
+  "permission": {
+    "ghostty_terminal": "allow"
+  }
+}
+```
+
+Create a terminal, write to it, and read the current screen back:
+
+```
+create  name=dev workdir=~/Projects/app cols=100 rows=30
+write   name=dev data="bun run dev\r"
+screen  name=dev wait=2000
+```
+
+#### Headless and visible
+
+`display` decides whether you can see the terminal.
+
+| `display` | Window on your screen | Use for |
+| --- | --- | --- |
+| `headless` (default) | No | Almost everything. Faster, and the agent reads the screen directly. |
+| `visible` | Yes | When you want to watch: "display live", "show me", "let me watch this". |
+
+`display` is set on `create` and applies to the life of that terminal.
+
+In `visible` mode a real Ghostty window opens on your display, and `screen` returns the same viewport you are looking at, so you and the agent read one shared terminal. The window is yours: you can resize it, and you can close it. Closing the window leaves the terminal running but no longer visible, so the agent needs to open a new window before you can see it again.
+
+Visible terminals share one `tmux` server on a socket named `opencode-agent`, separate from any `tmux` sessions of your own. If you want to attach to one yourself:
+
+```bash
+tmux -L opencode-agent list-sessions
+tmux -L opencode-agent attach -t <session>
+```
+
+`display: "visible"` needs a graphical session and the `ghostty` application on your `PATH`. Without them the tool reports that no window was opened rather than quietly running headless, so you are never told to look at a terminal you cannot see.
+
+---
+
 ### edit
 
 Modify existing files using exact string replacements.
