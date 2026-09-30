@@ -5,12 +5,15 @@ import { Effect } from "effect"
 import { testEffect } from "../lib/effect"
 import { Session as SessionNs } from "@/session/session"
 import { SessionUsage } from "../../src/session/usage"
+import { SessionTimeline } from "../../src/session/timeline"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
 import { MessageID, PartID, SessionID } from "../../src/session/schema"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 
-const it = testEffect(LayerNode.compile(LayerNode.group([SessionNs.node, SessionUsage.node, SessionProjector.node])))
+const it = testEffect(
+  LayerNode.compile(LayerNode.group([SessionNs.node, SessionUsage.node, SessionTimeline.node, SessionProjector.node])),
+)
 
 const turn = (over: Partial<SessionUsage.Untotalled> = {}): SessionUsage.Turn =>
   SessionUsage.withTotal({
@@ -194,6 +197,8 @@ describe("sessionUsage.analyze", () => {
 const assistantMessage = (input: {
   sessionID: SessionID
   parentID: MessageID
+  /** Defaults to the parent, which is what a single-reply exchange looks like. */
+  id?: MessageID
   time: number
   completed?: number
   modelID?: string
@@ -202,7 +207,7 @@ const assistantMessage = (input: {
   tokens: { input: number; output: number; reasoning: number; read: number; write: number }
 }) =>
   ({
-    id: input.parentID,
+    id: input.id ?? input.parentID,
     sessionID: input.sessionID,
     role: "assistant",
     time: { created: input.time, ...(input.completed ? { completed: input.completed } : {}) },
@@ -361,6 +366,205 @@ describe("sessionUsage.report", () => {
           svc.report({ sessionID: SessionID.make("ses_missing_usage") }),
         ).pipe(Effect.exit)
         expect(exit._tag).toBe("Failure")
+      }),
+    { git: true },
+  )
+})
+
+describe("sessionTimeline.report", () => {
+  /** A prompt, a reply, and a tool call whose output dwarfs both. */
+  const conversation = (sessionID: SessionID, output: string) =>
+    Effect.gen(function* () {
+      const session = yield* SessionNs.Service
+      const at = Date.now()
+      const promptID = MessageID.ascending()
+      const replyID = MessageID.ascending()
+      const toolPartID = PartID.ascending()
+      yield* session.updateMessage({
+        id: promptID,
+        sessionID,
+        role: "user",
+        time: { created: at },
+        agent: "build",
+        model: { providerID: ProviderV2.ID.make("anthropic"), modelID: ModelV2.ID.make("claude-sonnet-4-5") },
+      } as unknown as SessionV1.Info)
+      yield* session.updatePart({
+        id: PartID.ascending(),
+        sessionID,
+        messageID: promptID,
+        type: "text",
+        text: "what does this repo do",
+      } as unknown as SessionV1.Part)
+      // The reply is stored before its parts because a part row carries a
+      // foreign key to its message: this is an ordering the schema requires, not
+      // a style choice.
+      yield* session.updateMessage(
+        assistantMessage({
+          sessionID,
+          id: replyID,
+          parentID: promptID,
+          time: at + 40,
+          cost: 0.2,
+          tokens: { input: 12_500, output: 80, reasoning: 0, read: 87_500, write: 0 },
+        }),
+      )
+      yield* session.updatePart({
+        id: toolPartID,
+        sessionID,
+        messageID: replyID,
+        type: "tool",
+        tool: "bash",
+        callID: "call_1",
+        state: {
+          status: "completed",
+          input: { command: "cat big.txt" },
+          output,
+          title: "cat big.txt",
+          metadata: {},
+          time: { start: at + 20, end: at + 30 },
+        },
+      } as unknown as SessionV1.Part)
+      yield* session.updatePart({
+        id: PartID.ascending(),
+        sessionID,
+        messageID: replyID,
+        type: "text",
+        text: "it is a harness",
+      } as unknown as SessionV1.Part)
+      return { toolPartID }
+    })
+
+  it.instance(
+    "sizes a real session's parts and names what dominates the window",
+    () =>
+      Effect.gen(function* () {
+        const session = yield* SessionNs.Service
+        const created = yield* session.create({ title: "timeline" })
+        const { toolPartID } = yield* conversation(created.id, "x".repeat(4_000))
+
+        const report = yield* SessionTimeline.Service.use((svc) => svc.report({ sessionID: created.id }))
+        expect(report.title).toBe("timeline")
+        expect(report.shares[0].bucket).toBe("tool-output")
+        expect(report.shares[0].parts).toBe(1)
+        // The reply is two parts of one turn, not two turns.
+        expect(report.shape.user).toBe(1)
+        expect(report.shape.assistant).toBe(1)
+        expect(report.shape.tools).toBe(1)
+        expect(report.shape.duration).toBeGreaterThan(0)
+
+        const top = report.contributors[0]
+        expect(top.partID).toBe(toolPartID)
+        expect(top.label).toBe("bash")
+        expect(top.share).toBeGreaterThan(0.5)
+        expect(report.findings.map((finding) => finding.id)).toContain("timeline.part-dominates")
+      }),
+    { git: true },
+  )
+
+  it.instance(
+    "reconciles its estimate against the input count the provider reported",
+    () =>
+      Effect.gen(function* () {
+        const session = yield* SessionNs.Service
+        const created = yield* session.create({ title: "coverage" })
+        yield* conversation(created.id, "y".repeat(4_000))
+
+        const report = yield* SessionTimeline.Service.use((svc) => svc.report({ sessionID: created.id }))
+        // The window is the uncached input *and* the cached prefix, because the
+        // cached prefix is still part of the prompt. Taking `tokens.input` alone
+        // would compare a whole conversation against the small remainder the
+        // cache did not cover.
+        expect(report.coverage.measured).toBe(12_500 + 87_500)
+        expect(report.coverage.estimated).toBe(report.shares.reduce((sum, share) => sum + share.tokens, 0))
+        expect(report.coverage.ratio).toBeCloseTo(report.coverage.estimated / 100_000)
+      }),
+    { git: true },
+  )
+
+  it.instance(
+    "says nothing was measured when no turn has reported a token count",
+    () =>
+      Effect.gen(function* () {
+        const session = yield* SessionNs.Service
+        const created = yield* session.create({ title: "unmeasured" })
+        const at = Date.now()
+        const promptID = MessageID.ascending()
+        yield* session.updateMessage({
+          id: promptID,
+          sessionID: created.id,
+          role: "user",
+          time: { created: at },
+          agent: "build",
+          model: { providerID: ProviderV2.ID.make("anthropic"), modelID: ModelV2.ID.make("claude-sonnet-4-5") },
+        } as unknown as SessionV1.Info)
+        yield* session.updatePart({
+          id: PartID.ascending(),
+          sessionID: created.id,
+          messageID: promptID,
+          type: "text",
+          text: "hello",
+        } as unknown as SessionV1.Part)
+
+        const report = yield* SessionTimeline.Service.use((svc) => svc.report({ sessionID: created.id }))
+        expect(report.coverage).toEqual({ measured: 0, estimated: report.coverage.estimated, ratio: 0 })
+        // A zero measurement is not a coverage failure, so it is not reported as
+        // one; there is nothing to be unaccounted for.
+        expect(report.findings.map((finding) => finding.id)).not.toContain("timeline.unaccounted")
+      }),
+    { git: true },
+  )
+
+  it.instance(
+    "keeps measuring the window when the newest turn reported nothing",
+    () =>
+      Effect.gen(function* () {
+        const session = yield* SessionNs.Service
+        const created = yield* session.create({ title: "interrupted" })
+        const at = Date.now()
+        // A turn that errored records zero input: it knows nothing about the
+        // window, and letting it be the newest one must not make a conversation
+        // that was measured thirty times read as unmeasured.
+        yield* exchange(
+          created.id,
+          { id: MessageID.ascending(), time: at },
+          { time: at + 10, cost: 0.1, tokens: { input: 9_000, output: 40, reasoning: 0, read: 0, write: 0 } },
+        )
+        yield* exchange(
+          created.id,
+          { id: MessageID.ascending(), time: at + 100 },
+          { time: at + 110, cost: 0, tokens: { input: 0, output: 0, reasoning: 0, read: 0, write: 0 } },
+        )
+
+        const report = yield* SessionTimeline.Service.use((svc) => svc.report({ sessionID: created.id }))
+        expect(report.coverage.measured).toBe(9_000)
+      }),
+    { git: true },
+  )
+
+  it.instance(
+    "reports a session that has no parts as empty rather than failing",
+    () =>
+      Effect.gen(function* () {
+        const session = yield* SessionNs.Service
+        const created = yield* session.create({ title: "empty" })
+        const report = yield* SessionTimeline.Service.use((svc) => svc.report({ sessionID: created.id }))
+        expect(report.shares).toEqual([])
+        expect(report.contributors).toEqual([])
+        expect(report.shape).toEqual(SessionTimeline.EMPTY_SHAPE)
+      }),
+    { git: true },
+  )
+
+  it.instance(
+    "keeps the largest parts when a limit is given",
+    () =>
+      Effect.gen(function* () {
+        const session = yield* SessionNs.Service
+        const created = yield* session.create({ title: "limited" })
+        yield* conversation(created.id, "z".repeat(8_000))
+        const report = yield* SessionTimeline.Service.use((svc) => svc.report({ sessionID: created.id, limit: 1 }))
+        expect(report.contributors).toHaveLength(1)
+        expect(report.contributors[0].label).toBe("bash")
       }),
     { git: true },
   )
