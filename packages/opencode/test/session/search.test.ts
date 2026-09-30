@@ -166,6 +166,106 @@ describe("sessionSearch.search", () => {
     }),
   )
 
+  it.instance("finds a value inside what a tool printed, which is most of a transcript", () =>
+    Effect.gen(function* () {
+      const session = yield* SessionNs.Service
+      const created = yield* session.create({ title: "build" })
+      const messageID = MessageID.ascending()
+      yield* session.updateMessage(userMessage(messageID, created.id))
+      yield* session.updatePart({
+        id: PartID.ascending(),
+        sessionID: created.id,
+        messageID,
+        type: "tool",
+        tool: "bash",
+        callID: "call_1",
+        state: {
+          status: "completed",
+          input: { command: "cat build.log" },
+          output: "TypeError: brokenImgs is not defined\n    at TopBar",
+          title: "cat build.log",
+          metadata: {},
+          time: { start: 0, end: 1 },
+        },
+      } as unknown as SessionV1.Part)
+
+      const search = yield* SessionSearch.Service
+      const hits = yield* search.search({ query: "brokenImgs" })
+      // The agent printed this in front of the user. A search that cannot find
+      // it says the tool never ran, which is worse than saying nothing.
+      expect(hits).toHaveLength(1)
+      expect(hits[0].snippet).toContain("brokenImgs")
+    }),
+  )
+
+  it.instance("finds a value inside a tool's error text too", () =>
+    Effect.gen(function* () {
+      const session = yield* SessionNs.Service
+      const created = yield* session.create({ title: "failing" })
+      const messageID = MessageID.ascending()
+      yield* session.updateMessage(userMessage(messageID, created.id))
+      yield* session.updatePart({
+        id: PartID.ascending(),
+        sessionID: created.id,
+        messageID,
+        type: "tool",
+        tool: "bash",
+        callID: "call_1",
+        state: {
+          status: "error",
+          input: { command: "rm -rf /" },
+          error: "permission denied by the sandbox",
+          metadata: {},
+          time: { start: 0, end: 1 },
+        },
+      } as unknown as SessionV1.Part)
+
+      const search = yield* SessionSearch.Service
+      const hits = yield* search.search({ query: "sandbox" })
+      expect(hits).toHaveLength(1)
+    }),
+  )
+
+  it.instance("finds a value inside what the model reasoned about", () =>
+    Effect.gen(function* () {
+      const session = yield* SessionNs.Service
+      const created = yield* session.create({ title: "thinking" })
+      const messageID = MessageID.ascending()
+      yield* session.updateMessage(userMessage(messageID, created.id))
+      yield* session.updatePart({
+        id: PartID.ascending(),
+        sessionID: created.id,
+        messageID,
+        type: "reasoning",
+        text: "the retry budget is exhausted, so the loop guard should trip",
+        time: { start: 0, end: 1 },
+      } as unknown as SessionV1.Part)
+
+      const search = yield* SessionSearch.Service
+      expect(yield* search.search({ query: "loop guard" })).toHaveLength(1)
+    }),
+  )
+
+  it.instance("still does not match a part that carries no text at all", () =>
+    Effect.gen(function* () {
+      const session = yield* SessionNs.Service
+      const created = yield* session.create({ title: "steps" })
+      const messageID = MessageID.ascending()
+      yield* session.updateMessage(userMessage(messageID, created.id))
+      yield* session.updatePart({
+        id: PartID.ascending(),
+        sessionID: created.id,
+        messageID,
+        type: "step-start",
+      } as unknown as SessionV1.Part)
+
+      const search = yield* SessionSearch.Service
+      // Every part kind is now a candidate, so the ones with no body must be
+      // filtered out rather than surfacing as empty hits.
+      expect(yield* search.search({ query: "anything" })).toEqual([])
+    }),
+  )
+
   it.instance("is case-insensitive by default and exact with caseSensitive", () =>
     Effect.gen(function* () {
       const session = yield* SessionNs.Service

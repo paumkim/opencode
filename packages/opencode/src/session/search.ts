@@ -124,10 +124,29 @@ export function snippet(input: {
 // Service
 // ---------------------------------------------------------------------------
 
-const body = sql<string>`json_extract(${PartTable.data}, '$.text')`
 const partType = sql<string>`json_extract(${PartTable.data}, '$.type')`
 const isSynthetic = sql<number>`coalesce(json_extract(${PartTable.data}, '$.synthetic'), 0)`
 const messageRole = sql<string>`json_extract(${MessageTable.data}, '$.role')`
+
+/**
+ * The searchable text of a part, whichever kind of part it is.
+ *
+ * A transcript is mostly *not* prose. The answer to a question is usually in
+ * what a tool printed, and the reasoning that led there is not in a text part
+ * either. Matching only `type = 'text'` made the substance of a session
+ * unsearchable: searching for a value the agent had found and printed in front
+ * of you returned nothing, which reads as the tool never having run.
+ */
+const body = sql<string>`case ${partType}
+  when 'text' then json_extract(${PartTable.data}, '$.text')
+  when 'reasoning' then json_extract(${PartTable.data}, '$.text')
+  when 'file' then coalesce(json_extract(${PartTable.data}, '$.text'), json_extract(${PartTable.data}, '$.source.text'))
+  when 'tool' then coalesce(
+    json_extract(${PartTable.data}, '$.state.output'),
+    json_extract(${PartTable.data}, '$.state.error'),
+    json_extract(${PartTable.data}, '$.state.title')
+  )
+  else null end`
 
 export interface Interface {
   readonly search: (input: Input) => Effect.Effect<Hit[]>
@@ -147,7 +166,9 @@ const layer = Layer.effect(
       // `instr` rather than `LIKE`: it takes the query as a literal, so a `%` or
       // `_` in a pasted snippet is searched for instead of acting as a wildcard
       // that matches everything.
-      const conditions: SQL[] = [eq(partType, "text")]
+      // `body` is non-null only for the part kinds above, so this is the filter
+      // that keeps a kind with no searchable text out of the results.
+      const conditions: SQL[] = [sql`${body} is not null`, sql`length(${body}) > 0`]
       conditions.push(
         input.caseSensitive ? sql`instr(${body}, ${query}) > 0` : sql`instr(lower(${body}), lower(${query})) > 0`,
       )
