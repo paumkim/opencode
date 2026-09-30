@@ -84,6 +84,7 @@ const SUBCOMMANDS = [
   ["session", "list"],
   ["session", "delete"],
   ["session", "usage"],
+  ["session", "secrets"],
   ["github", "install"],
   ["github", "run"],
   ["db", "path"],

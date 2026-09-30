@@ -494,6 +494,39 @@ opencode session usage --limit 10
 
 ---
 
+### secrets
+
+Scan a session for credentials that ended up in its transcript.
+
+```bash
+opencode session secrets
+opencode session secrets <sessionID>
+```
+
+A transcript is stored and re-sent to the provider on every later turn, so a
+key an agent read out of a `.env` file is a key handed to a third party, and the
+record outlives the session. Nothing scanned for that before.
+
+```
+assigned-secret (STRIPE_SECRET_KEY) in assistant output from bash tool-output
+```
+
+Fixed-shape keys are recognised by vendor, and a generic `NAME=value` rule
+catches what has no fixed shape. The report names the setting and where it
+came from and never the value, and `--redact` prints the whole transcript with
+every finding replaced, so it is safe to paste into a bug report.
+
+Rotate anything real that turns up.
+
+#### Flags
+
+| Flag                                   | Description                                      |
+| -------------------------------------- | ------------------------------------------------ |
+| <nobr><code>{"--redact"}</code></nobr> | Print the transcript with every finding replaced |
+| <nobr><code>{"--format"}</code></nobr> | Output format: `text` or `json`                  |
+
+---
+
 ### explain
 
 Explain which permission rule decided a request, and why.

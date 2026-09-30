@@ -24,6 +24,7 @@ import { Todo } from "@/session/todo"
 import { Session } from "@/session/session"
 import { SessionSearch } from "@/session/search"
 import { SessionUsage } from "@/session/usage"
+import { SessionSecrets } from "@/session/secrets"
 import { SessionStatus } from "@/session/status"
 import { Watcher } from "@/session/watcher/service"
 import { SessionRunState } from "@/session/run-state"
@@ -84,6 +85,7 @@ export const AppLayer = AppNodeBuilderV1.build(
     SessionStatus.node,
     SessionSearch.node,
     SessionUsage.node,
+    SessionSecrets.node,
     Watcher.node,
     BackgroundJob.node,
     RuntimeFlags.node,
