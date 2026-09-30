@@ -2,6 +2,7 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { ConfigPermissionV1 } from "@opencode-ai/core/v1/config/permission"
 import { InstanceState } from "@/effect/instance-state"
 import { Wildcard } from "@opencode-ai/core/util/wildcard"
+import * as PermissionExplain from "./explain"
 import { Deferred, Effect, Layer, Context } from "effect"
 import os from "os"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
@@ -27,16 +28,13 @@ interface State {
   approved: PermissionV1.Rule[]
 }
 
+/**
+ * The decision itself. The matching is delegated to `PermissionExplain` so
+ * that `opencode permission explain` traces the same rules in the same order
+ * this does, rather than a second implementation that can disagree with it.
+ */
 export function evaluate(permission: string, pattern: string, ...rulesets: PermissionV1.Ruleset[]): PermissionV1.Rule {
-  return (
-    rulesets
-      .flat()
-      .findLast((rule) => Wildcard.match(permission, rule.permission) && Wildcard.match(pattern, rule.pattern)) ?? {
-      action: "ask",
-      permission,
-      pattern: "*",
-    }
-  )
+  return PermissionExplain.winner(permission, pattern, ...rulesets)?.rule ?? PermissionExplain.fallback(permission)
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Permission") {}
@@ -117,72 +115,72 @@ const layer = Layer.effect(
       )
     })
 
-    const reply = Effect.fn("Permission.reply")(
-      function* (input: PermissionV1.ReplyInput & { readonly sessionID?: PermissionV1.Request["sessionID"] }) {
-        if (input.reply !== "once" && input.reply !== "always" && input.reply !== "reject") {
-          return yield* new PermissionV1.NotFoundError({ requestID: input.requestID })
-        }
-        const { approved, pending } = yield* InstanceState.get(state)
-        const existing = pending.get(input.requestID)
-        if (!existing || (input.sessionID !== undefined && existing.info.sessionID !== input.sessionID)) {
-          return yield* new PermissionV1.NotFoundError({ requestID: input.requestID })
-        }
+    const reply = Effect.fn("Permission.reply")(function* (
+      input: PermissionV1.ReplyInput & { readonly sessionID?: PermissionV1.Request["sessionID"] },
+    ) {
+      if (input.reply !== "once" && input.reply !== "always" && input.reply !== "reject") {
+        return yield* new PermissionV1.NotFoundError({ requestID: input.requestID })
+      }
+      const { approved, pending } = yield* InstanceState.get(state)
+      const existing = pending.get(input.requestID)
+      if (!existing || (input.sessionID !== undefined && existing.info.sessionID !== input.sessionID)) {
+        return yield* new PermissionV1.NotFoundError({ requestID: input.requestID })
+      }
 
-        pending.delete(input.requestID)
-        yield* events.publish(Event.Replied, {
-          sessionID: existing.info.sessionID,
-          requestID: existing.info.id,
-          reply: input.reply,
-        })
+      pending.delete(input.requestID)
+      yield* events.publish(Event.Replied, {
+        sessionID: existing.info.sessionID,
+        requestID: existing.info.id,
+        reply: input.reply,
+      })
 
-        if (input.reply === "reject") {
-          yield* Deferred.fail(
-            existing.deferred,
-            input.message
-              ? new PermissionV1.CorrectedError({ feedback: input.message })
-              : new PermissionV1.RejectedError(),
-          )
-
-          for (const [id, item] of pending.entries()) {
-            if (item.info.sessionID !== existing.info.sessionID) continue
-            pending.delete(id)
-            yield* events.publish(Event.Replied, {
-              sessionID: item.info.sessionID,
-              requestID: item.info.id,
-              reply: "reject",
-            })
-            yield* Deferred.fail(item.deferred, new PermissionV1.RejectedError())
-          }
-          return
-        }
-
-        yield* Deferred.succeed(existing.deferred, undefined)
-        if (input.reply === "once") return
-
-        for (const pattern of existing.info.always) {
-          approved.push({
-            permission: existing.info.permission,
-            pattern,
-            action: "allow",
-          })
-        }
+      if (input.reply === "reject") {
+        yield* Deferred.fail(
+          existing.deferred,
+          input.message
+            ? new PermissionV1.CorrectedError({ feedback: input.message })
+            : new PermissionV1.RejectedError(),
+        )
 
         for (const [id, item] of pending.entries()) {
           if (item.info.sessionID !== existing.info.sessionID) continue
-          const ok = item.info.patterns.every(
-            (pattern) => evaluate(item.info.permission, pattern, approved).action === "allow",
-          )
-          if (!ok) continue
           pending.delete(id)
           yield* events.publish(Event.Replied, {
             sessionID: item.info.sessionID,
             requestID: item.info.id,
-            reply: "always",
+            reply: "reject",
           })
-          yield* Deferred.succeed(item.deferred, undefined)
+          yield* Deferred.fail(item.deferred, new PermissionV1.RejectedError())
         }
-      },
-    )
+        return
+      }
+
+      yield* Deferred.succeed(existing.deferred, undefined)
+      if (input.reply === "once") return
+
+      for (const pattern of existing.info.always) {
+        approved.push({
+          permission: existing.info.permission,
+          pattern,
+          action: "allow",
+        })
+      }
+
+      for (const [id, item] of pending.entries()) {
+        if (item.info.sessionID !== existing.info.sessionID) continue
+        const ok = item.info.patterns.every(
+          (pattern) => evaluate(item.info.permission, pattern, approved).action === "allow",
+        )
+        if (!ok) continue
+        pending.delete(id)
+        yield* events.publish(Event.Replied, {
+          sessionID: item.info.sessionID,
+          requestID: item.info.id,
+          reply: "always",
+        })
+        yield* Deferred.succeed(item.deferred, undefined)
+      }
+    })
 
     const list = Effect.fn("Permission.list")(function* () {
       const pending = (yield* InstanceState.get(state)).pending

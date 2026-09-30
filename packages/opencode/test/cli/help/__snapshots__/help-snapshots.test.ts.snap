@@ -701,6 +701,32 @@ Options:
   -m, --model                 model to use in the format of provider/model                  [string]"
 `;
 
+exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode permission explain --help 1`] = `
+"opencode permission explain <permission> [pattern..]
+
+explain which permission rule decided, and why
+
+Positionals:
+  permission  the permission that was asked for, e.g. bash, edit, webfetch       [string] [required]
+  pattern     the thing being permitted, e.g. a file path or a command         [array] [default: []]
+
+Options:
+  -h, --help              show help                                                        [boolean]
+  -v, --version           show version number                                              [boolean]
+      --internal-version  show internal fork build version (separate from compatibility version)
+                                                                                           [boolean]
+      --print-logs        print logs to stderr                                             [boolean]
+      --log-level         log level             [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
+      --debug             debug mode: DEBUG logs, print-logs, JSON streaming, and thinking blocks
+                                                                          [boolean] [default: false]
+      --pure              run without external plugins                                     [boolean]
+      --agent             agent whose rules apply (default: the session's default agent)    [string]
+      --session           session whose own rules apply on top of the agent's               [string]
+      --all               list every rule, not only those covering this permission
+                                                                          [boolean] [default: false]
+      --format            output format         [string] [choices: "text", "json"] [default: "text"]"
+`;
+
 exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode agent list --help 1`] = `
 "opencode agent list
 
