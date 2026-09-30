@@ -174,7 +174,12 @@ const layer = Layer.effect(
         .innerJoin(SessionTable, eq(PartTable.session_id, SessionTable.id))
         .innerJoin(MessageTable, eq(PartTable.message_id, MessageTable.id))
         .where(and(...conditions))
-        .orderBy(desc(SessionTable.time_updated), desc(PartTable.time_created))
+        // Every key is a tiebreak, not just a preference. `time_created` has
+        // millisecond resolution and a burst of parts written in one turn
+        // shares a value, so without the id the order of those rows is whatever
+        // SQLite happens to produce — which is how a `--limit` window can show
+        // the oldest of a burst instead of the newest.
+        .orderBy(desc(SessionTable.time_updated), desc(PartTable.time_created), desc(PartTable.id))
         // Over-fetch, then cut to `cap` below: SQLite's `lower` only folds ASCII,
         // so a row it matched can be one the JS matcher cannot reproduce (and
         // vice versa). Cutting in SQL would silently return fewer than `cap`

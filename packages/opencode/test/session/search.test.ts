@@ -250,6 +250,12 @@ describe("sessionSearch.search", () => {
         ],
       })
       const search = yield* SessionSearch.Service
+      // A burst of parts can share a millisecond, and their ids are monotonic,
+      // so the id tiebreak is what makes this order total rather than a
+      // preference SQLite may or may not honour.
+      const all = yield* search.search({ query: "needle" })
+      expect(all.map((hit) => hit.snippet)).toEqual(["needle three", "needle two", "needle one"])
+
       const hits = yield* search.search({ query: "needle", limit: 2 })
       expect(hits).toHaveLength(2)
       expect(hits.map((hit) => hit.snippet)).toEqual(["needle three", "needle two"])
