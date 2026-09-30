@@ -15,6 +15,7 @@ import path from "path"
 import { which } from "@opencode-ai/core/util/which"
 import { SessionUsageCommand } from "./session-usage"
 import { SessionSecretsCommand } from "./session-secrets"
+import { SessionTimelineCommand } from "./session-timeline"
 
 function pagerCmd(): string[] {
   const lessOptions = ["-R", "-S"]
@@ -47,7 +48,13 @@ export const SessionCommand = cmd({
   command: "session",
   describe: "manage sessions",
   builder: (yargs: Argv) =>
-    yargs.command(SessionListCommand).command(SessionDeleteCommand).command(SessionUsageCommand).command(SessionSecretsCommand).demandCommand(),
+    yargs
+      .command(SessionListCommand)
+      .command(SessionDeleteCommand)
+      .command(SessionUsageCommand)
+      .command(SessionSecretsCommand)
+      .command(SessionTimelineCommand)
+      .demandCommand(),
   async handler() {},
 })
 
