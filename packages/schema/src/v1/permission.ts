@@ -24,6 +24,21 @@ export type Rule = typeof Rule.Type
 export const Ruleset = Schema.Array(Rule).annotate({ identifier: "PermissionRuleset" })
 export type Ruleset = typeof Ruleset.Type
 
+/**
+ * One pattern that needed asking, and the rule that asked.
+ *
+ * `index` and `total` locate the rule in the ruleset that was considered, so a
+ * client can name it the same way `permission explain` does rather than asking
+ * the user to go and find it.
+ */
+export const Matched = Schema.Struct({
+  pattern: Schema.String,
+  rule: Rule,
+  index: Schema.Finite,
+  total: Schema.Finite,
+}).annotate({ identifier: "PermissionMatched" })
+export type Matched = typeof Matched.Type
+
 export const Request = Schema.Struct({
   id: ID,
   sessionID: SessionID,
@@ -32,6 +47,12 @@ export const Request = Schema.Struct({
   metadata: Schema.Record(Schema.String, Schema.Unknown),
   always: Schema.Array(Schema.String),
   tool: Schema.optional(Schema.Struct({ messageID: Schema.String, callID: Schema.String })),
+  /**
+   * The rule that asked, for each pattern that needed asking. A prompt that
+   * cannot say why it stopped is a prompt the user has to guess at, and the
+   * ruleset behind the decision is not otherwise visible from here.
+   */
+  matched: Schema.optional(Schema.Array(Matched)),
 }).annotate({ identifier: "PermissionRequest" })
 export type Request = typeof Request.Type
 

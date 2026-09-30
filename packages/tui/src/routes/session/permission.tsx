@@ -22,6 +22,26 @@ import { mutateRemote } from "../../util/mutate-remote"
 
 type PermissionStage = "permission" | "always" | "reject"
 
+/**
+ * One line naming the rule that asked, or nothing when the server did not say.
+ *
+ * "Allow always" is a decision about a rule, and a prompt that cannot name the
+ * rule makes that decision blind: the user is being asked to widen a permission
+ * without being told which line is about to widen. The index and total are the
+ * same ones `opencode permission explain` prints, so the two can be tied
+ * together.
+ */
+export function describeAsk(matched: PermissionRequest["matched"]): string | undefined {
+  const first = matched?.[0]
+  if (!first) return undefined
+  // A negative index is the implicit default: nothing in the config covers this
+  // question, which is the answer rather than an absence of one.
+  if (first.index < 0) return "no rule covers this, so it defaults to ask"
+  // Spelled the way `opencode permission explain` spells a rule, so a user who
+  // runs that to dig into this prompt recognizes the rule they are looking at.
+  return `Rule ${first.index + 1}/${first.total} (${first.rule.permission} = ${first.rule.action})`
+}
+
 function EditBody(props: { request: PermissionRequest }) {
   const themeState = useTheme()
   const theme = themeState.theme
@@ -451,6 +471,16 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
                 </text>
                 <text fg={theme.text}>{current.title}</text>
               </box>
+              <Show when={describeAsk(props.request.matched)}>
+                {(why) => (
+                  <box flexDirection="row" gap={1} paddingLeft={5} flexShrink={0}>
+                    <text fg={theme.textMuted} flexShrink={0}>
+                      {"because"}
+                    </text>
+                    <text fg={theme.textMuted}>{why()}</text>
+                  </box>
+                )}
+              </Show>
             </box>
           )
 
