@@ -494,6 +494,51 @@ opencode session usage --limit 10
 
 ---
 
+### explain
+
+Explain which permission rule decided a request, and why.
+
+```bash
+opencode permission explain bash "rm -rf /"
+```
+
+Everything after the permission name is the thing being permitted, so a shell
+command can be asked about without quoting it as a flag.
+
+```
+bash for rm -rf /
+agent build
+
+deny Rule 64 of 87 (bash = deny) decided this: it is the last of 4 matching
+rules, so it overrides the 3 above it.
+
+   #  rule                  decision
+  ✔  1  * allow               allow
+  ✔ 46  bash allow            allow
+  → 64  bash deny rm *        deny
+  · 65  bash deny git push *  deny (pattern does not match)
+```
+
+The last matching rule wins, so the order of the rules is what decides a
+request. When nothing matches, the answer says which half of the question failed
+— a rule that covers the tool but not the target, or no rule for the tool at
+all — because those two look identical from the outside and mean different
+things.
+
+Pass `--session` to include a session's own rules, which are merged over the
+agent's when a permission is asked.
+
+#### Flags
+
+| Flag                                    | Description                                          |
+| --------------------------------------- | ---------------------------------------------------- |
+| <nobr><code>{"--agent"}</code></nobr>   | Agent whose rules apply (default: the default agent) |
+| <nobr><code>{"--session"}</code></nobr> | Include this session's own rules                     |
+| <nobr><code>{"--all"}</code></nobr>     | List every rule, not only those covering it          |
+| <nobr><code>{"--format"}</code></nobr>  | Output format: `text` or `json`                      |
+
+---
+
 ### doctor
 
 Diagnose the local setup: agent definitions, configured models, provider
