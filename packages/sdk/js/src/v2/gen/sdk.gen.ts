@@ -211,6 +211,8 @@ import type {
   SessionPromptResponses,
   SessionRevertErrors,
   SessionRevertResponses,
+  SessionSearchErrors,
+  SessionSearchResponses,
   SessionShareErrors,
   SessionShareResponses,
   SessionShellErrors,
@@ -3480,6 +3482,48 @@ export class Session2 extends HeyApiClient {
         ...options?.headers,
         ...params.headers,
       },
+    })
+  }
+
+  /**
+   * Search session transcripts
+   *
+   * Full-text search across the text of every message in your sessions, returning the matching parts with a snippet around each hit.
+   */
+  public search<ThrowOnError extends boolean = false>(
+    parameters: {
+      directory?: string
+      workspace?: string
+      q: string
+      session?: string
+      all?: "true" | "false"
+      case?: "true" | "false"
+      synthetic?: "true" | "false"
+      limit?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+            { in: "query", key: "q" },
+            { in: "query", key: "session" },
+            { in: "query", key: "all" },
+            { in: "query", key: "case" },
+            { in: "query", key: "synthetic" },
+            { in: "query", key: "limit" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).get<SessionSearchResponses, SessionSearchErrors, ThrowOnError>({
+      url: "/session/search",
+      ...options,
+      ...params,
     })
   }
 

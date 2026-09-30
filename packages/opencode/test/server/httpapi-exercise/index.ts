@@ -1184,6 +1184,34 @@ const scenarios: Scenario[] = [
     .get("/session/status", "session.status")
     .seeded((ctx) => ctx.session({ title: "Status session" }))
     .json(200, object),
+  // A literal segment at the depth of `:sessionID` — this route only answers if
+  // the workspace middleware reads "search" as a route name rather than a
+  // session id, which is what the scenario below is really pinning down.
+  http.protected
+    .get("/session/search", "session.search")
+    .seeded((ctx) =>
+      Effect.gen(function* () {
+        const session = yield* ctx.session({ title: "Searchable" })
+        const message = yield* ctx.message(session.id, { text: "rotate the database password" })
+        return { session, message }
+      }),
+    )
+    .at((ctx) => ({ path: "/session/search?q=rotate%20the%20database", headers: ctx.headers() }))
+    .json(200, (body, ctx) => {
+      array(body)
+      check(body.length > 0, "search should return the seeded match")
+      const hit = body.find((item) => isRecord(item) && item.messageID === ctx.state.message.info.id)
+      check(!!hit, "search should return the seeded message")
+      if (isRecord(hit)) {
+        check(hit.sessionID === ctx.state.session.id, "hit should name its session")
+        check(hit.role === "user", "hit should name the message role")
+        check(
+          typeof hit.snippet === "string" && hit.snippet.includes("rotate the database"),
+          "hit should carry a snippet",
+        )
+        check(hit.matches === 1, "hit should count the matches in its part")
+      }
+    }),
   http.protected
     .post("/session", "session.create")
     .mutating()

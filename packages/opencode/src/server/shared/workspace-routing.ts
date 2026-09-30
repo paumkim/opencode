@@ -5,8 +5,19 @@ type Rule = { method?: string; path: string; exact?: boolean; action: "local" | 
 const RULES: Array<Rule> = [
   { path: "/experimental/workspace", action: "local" },
   { path: "/session/status", action: "forward" },
+  { path: "/session/search", action: "forward" },
   { method: "GET", path: "/session", action: "local" },
 ]
+
+/**
+ * Literal segments of `/session/<segment>` that are not session ids. The
+ * workspace middleware resolves the session behind a route so it can find that
+ * session's workspace; for these routes there is no session to resolve, and
+ * reading the literal as an id makes the request fail looking up a session that
+ * was never meant to exist. `/session/search` is here because it searches
+ * across sessions rather than addressing one.
+ */
+const NON_SESSION_SEGMENTS = new Set(["status", "search"])
 
 export function isLocalWorkspaceRoute(method: string, path: string) {
   for (const rule of RULES) {
@@ -18,11 +29,10 @@ export function isLocalWorkspaceRoute(method: string, path: string) {
 }
 
 export function getWorkspaceRouteSessionID(url: URL) {
-  if (url.pathname === "/session/status") return null
+  const segment = url.pathname.match(/^\/session\/([^/]+)(?:\/|$)/)?.[1]
+  if (segment && !NON_SESSION_SEGMENTS.has(segment)) return SessionID.make(segment)
 
-  const id =
-    url.pathname.match(/^\/session\/([^/]+)(?:\/|$)/)?.[1] ??
-    url.pathname.match(/^\/experimental\/session\/([^/]+)\/background$/)?.[1]
+  const id = url.pathname.match(/^\/experimental\/session\/([^/]+)\/background$/)?.[1]
   if (!id) return null
 
   return SessionID.make(id)

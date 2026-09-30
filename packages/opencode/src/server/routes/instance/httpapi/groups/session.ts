@@ -3,6 +3,7 @@ import { Permission } from "@/permission"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 
 import { Session } from "@/session/session"
+import { SessionSearch } from "@/session/search"
 import { MessageV2 } from "@/session/message-v2"
 import { SessionPrompt } from "@/session/prompt"
 import { SessionRevert } from "@/session/revert"
@@ -45,6 +46,17 @@ export const MessagesQuery = Schema.Struct({
   limit: Schema.optional(Schema.NumberFromString.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0))),
   before: Schema.optional(Schema.String),
 })
+export const SearchQuery = Schema.Struct({
+  ...WorkspaceRoutingQueryFields,
+  q: Schema.String,
+  session: Schema.optional(SessionID),
+  all: Schema.optional(QueryBoolean),
+  case: Schema.optional(QueryBoolean),
+  synthetic: Schema.optional(QueryBoolean),
+  limit: Schema.optional(
+    Schema.NumberFromString.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1), Schema.isLessThanOrEqualTo(500)),
+  ),
+})
 export const StatusMap = Schema.Record(Schema.String, SessionStatus.Info)
 export const UpdatePayload = Schema.Struct({
   title: Schema.optional(Schema.String),
@@ -77,6 +89,9 @@ export const PermissionResponsePayload = Schema.Struct({
 
 export const SessionPaths = {
   list: root,
+  // A static segment at the depth of `:sessionID`; `status` already coexists
+  // with it the same way, so the router prefers the literal.
+  search: `${root}/search`,
   status: `${root}/status`,
   get: `${root}/:sessionID`,
   children: `${root}/:sessionID/children`,
@@ -116,6 +131,17 @@ export const SessionApi = HttpApi.make("session")
             identifier: "session.list",
             summary: "List sessions",
             description: "Get a list of all OpenCode sessions, sorted by most recently updated.",
+          }),
+        ),
+        HttpApiEndpoint.get("search", SessionPaths.search, {
+          query: SearchQuery,
+          success: described(Schema.Array(SessionSearch.Hit), "Matching message parts"),
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "session.search",
+            summary: "Search session transcripts",
+            description:
+              "Full-text search across the text of every message in your sessions, returning the matching parts with a snippet around each hit.",
           }),
         ),
         HttpApiEndpoint.get("status", SessionPaths.status, {

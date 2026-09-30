@@ -52,6 +52,7 @@ import { DialogMessage } from "./dialog-message"
 import type { PromptInfo } from "../../component/prompt/history"
 import { DialogConfirm } from "../../ui/dialog-confirm"
 import { DialogTimeline } from "./dialog-timeline"
+import { DialogSearch } from "./dialog-search"
 import { DialogForkFromTimeline } from "./dialog-fork-from-timeline"
 import { DialogSessionRename } from "../../component/dialog-session-rename"
 import { Sidebar } from "./sidebar"
@@ -371,6 +372,24 @@ export function Session() {
     })
   })
 
+  /**
+   * Scroll a message into view. A hit in another conversation has to wait for
+   * that session to mount, so a miss is retried briefly instead of being given
+   * up on: the message box is a child of the scroll box, and there is nothing
+   * that tells us when it arrives. Bounded, and it stops the moment the target
+   * is there, so a deleted message costs a few frames and not a hang.
+   */
+  const jumpToMessage = (messageID: string, attemptsLeft = 20) => {
+    const child = scroll?.getChildren().find((child) => child.id === messageID)
+    if (child) {
+      scroll.scrollBy(child.y - scroll.y - 1)
+      return true
+    }
+    if (attemptsLeft <= 0 || scroll?.isDestroyed) return false
+    setTimeout(() => jumpToMessage(messageID, attemptsLeft - 1), 25)
+    return false
+  }
+
   // Helper: Find next visible message boundary in direction
   const findNextVisibleMessage = (direction: "next" | "prev"): string | null => {
     const children = scroll.getChildren()
@@ -532,14 +551,32 @@ export function Session() {
       run: () => {
         dialog.replace(() => (
           <DialogTimeline
-            onMove={(messageID) => {
-              const child = scroll.getChildren().find((child) => {
-                return child.id === messageID
-              })
-              if (child) scroll.scrollBy(child.y - scroll.y - 1)
-            }}
+            onMove={(messageID) => jumpToMessage(messageID)}
             sessionID={route.sessionID}
             setPrompt={(promptInfo) => prompt?.set(promptInfo)}
+          />
+        ))
+      },
+    },
+    {
+      title: "Search messages",
+      value: "session.search",
+      category: "Session",
+      slash: {
+        name: "search",
+      },
+      run: () => {
+        dialog.replace(() => (
+          <DialogSearch
+            all
+            onSelect={(target) => {
+              dialog.clear()
+              if (target.sessionID !== route.sessionID) {
+                navigate({ type: "session", sessionID: target.sessionID })
+                return jumpToMessage(target.messageID)
+              }
+              return jumpToMessage(target.messageID)
+            }}
           />
         ))
       },
@@ -556,10 +593,7 @@ export function Session() {
           <DialogForkFromTimeline
             onMove={(messageID) => {
               if (!messageID) return
-              const child = scroll.getChildren().find((child) => {
-                return child.id === messageID
-              })
-              if (child) scroll.scrollBy(child.y - scroll.y - 1)
+              jumpToMessage(messageID)
             }}
             sessionID={route.sessionID}
           />
@@ -1571,7 +1605,11 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
       </Show>
       <Switch>
         <Match when={props.last || final() || props.message.error?.name === "MessageAbortedError"}>
-          <box ref={(el: BoxRenderable) => alwaysSeparate.add(el)} paddingLeft={3}>
+          // The id is what makes this message addressable: /timeline, next/prev
+          // navigation, and a search hit all resolve a message by looking for a
+          // scroll child with this id. Without it an assistant reply can be read
+          // but never jumped to.
+          <box id={props.message.id} ref={(el: BoxRenderable) => alwaysSeparate.add(el)} paddingLeft={3}>
             <text marginTop={1}>
               <span
                 style={{

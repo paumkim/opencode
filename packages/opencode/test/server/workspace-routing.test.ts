@@ -24,6 +24,11 @@ describe("isLocalWorkspaceRoute", () => {
     expect(isLocalWorkspaceRoute("POST", "/session/status")).toBe(false)
   })
 
+  test("/session/search is forwarded regardless of method", () => {
+    expect(isLocalWorkspaceRoute("GET", "/session/search")).toBe(false)
+    expect(isLocalWorkspaceRoute("POST", "/session/search")).toBe(false)
+  })
+
   test("unrecognized paths are not local", () => {
     expect(isLocalWorkspaceRoute("GET", "/config")).toBe(false)
     expect(isLocalWorkspaceRoute("POST", "/session/ses_abc/message")).toBe(false)
@@ -49,6 +54,19 @@ describe("getWorkspaceRouteSessionID", () => {
   test("returns null for /session/status", () => {
     const url = new URL("http://localhost/session/status")
     expect(getWorkspaceRouteSessionID(url)).toBeNull()
+  })
+
+  // A literal segment at the depth of `:sessionID` is a collection route, not a
+  // session that happens to be named "search". Resolving it as one makes every
+  // request to it look up a session that cannot exist.
+  test("returns null for /session/search", () => {
+    expect(getWorkspaceRouteSessionID(new URL("http://localhost/session/search"))).toBeNull()
+    expect(getWorkspaceRouteSessionID(new URL("http://localhost/session/search?q=hello"))).toBeNull()
+  })
+
+  test("still resolves a real session whose id follows a literal route", () => {
+    const url = new URL("http://localhost/session/ses_realsearch")
+    expect(getWorkspaceRouteSessionID(url)).toBe(SessionID.make("ses_realsearch"))
   })
 
   test("returns null for non-session paths", () => {

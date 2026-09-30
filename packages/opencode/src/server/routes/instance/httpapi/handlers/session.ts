@@ -6,6 +6,7 @@ import { Command } from "@/command"
 import { Permission } from "@/permission"
 import { SessionShare } from "@/share/session"
 import { Session } from "@/session/session"
+import { SessionSearch } from "@/session/search"
 import { SessionCompaction } from "@/session/compaction"
 import { MessageV2 } from "@/session/message-v2"
 import { SessionPrompt } from "@/session/prompt"
@@ -32,6 +33,7 @@ import {
   PermissionResponsePayload,
   PromptPayload,
   RevertPayload,
+  SearchQuery,
   ShellPayload,
   SummarizePayload,
   UpdatePayload,
@@ -57,6 +59,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     const permissionSvc = yield* Permission.Service
     const statusSvc = yield* SessionStatus.Service
     const todoSvc = yield* Todo.Service
+    const searchSvc = yield* SessionSearch.Service
     const summary = yield* SessionSummary.Service
     const events = yield* EventV2Bridge.Service
     const scope = yield* Scope.Scope
@@ -70,6 +73,17 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
         roots: ctx.query.roots,
         start: ctx.query.start,
         search: ctx.query.search,
+        limit: ctx.query.limit,
+      })
+    })
+
+    const search = Effect.fn("SessionHttpApi.search")(function* (ctx: { query: typeof SearchQuery.Type }) {
+      return yield* searchSvc.search({
+        query: ctx.query.q,
+        sessionID: ctx.query.session,
+        all: ctx.query.all,
+        caseSensitive: ctx.query.case,
+        synthetic: ctx.query.synthetic,
         limit: ctx.query.limit,
       })
     })
@@ -421,6 +435,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
 
     return handlers
       .handle("list", list)
+      .handle("search", search)
       .handle("status", status)
       .handle("get", get)
       .handle("children", children)
