@@ -26,6 +26,7 @@ import { SessionSearch } from "@/session/search"
 import { SessionUsage } from "@/session/usage"
 import { SessionSecrets } from "@/session/secrets"
 import { SessionTimeline } from "@/session/timeline"
+import { SessionPromptSize } from "@/session/prompt-size"
 import { SessionStatus } from "@/session/status"
 import { Watcher } from "@/session/watcher/service"
 import { SessionRunState } from "@/session/run-state"
@@ -88,6 +89,7 @@ export const AppLayer = AppNodeBuilderV1.build(
     SessionUsage.node,
     SessionSecrets.node,
     SessionTimeline.node,
+    SessionPromptSize.node,
     Watcher.node,
     BackgroundJob.node,
     RuntimeFlags.node,

@@ -1194,14 +1194,10 @@ const layer = Layer.effect(
       // agent picks up where it left off instead of starting over.
       const resume = yield* checkpoint.resume(input.sessionID).pipe(Effect.orDie)
       if (resume) {
-        const lines = [
-          `Resuming from checkpoint ${resume.id} created ${new Date(resume.timestamp).toISOString()}.`,
-        ]
+        const lines = [`Resuming from checkpoint ${resume.id} created ${new Date(resume.timestamp).toISOString()}.`]
         if (resume.task) lines.push(`Task: ${resume.task}`)
-        if (resume.accomplishments.length)
-          lines.push("Accomplished: " + resume.accomplishments.join("; "))
-        if (resume.nextSteps.length)
-          lines.push("Next steps: " + resume.nextSteps.join("; "))
+        if (resume.accomplishments.length) lines.push("Accomplished: " + resume.accomplishments.join("; "))
+        if (resume.nextSteps.length) lines.push("Next steps: " + resume.nextSteps.join("; "))
         yield* sessions.updatePart({
           id: PartID.ascending(),
           messageID: input.messageID!,
@@ -1288,427 +1284,466 @@ const layer = Layer.effect(
       throw new Error("Impossible")
     })
 
-    const runLoop: (sessionID: SessionID, systemOneDecision?: { effort: string; category: string; reason: string }) => Effect.Effect<SessionV1.WithParts> = Effect.fn("SessionPrompt.run")(
-      function* (sessionID: SessionID, systemOneDecision?: { effort: string; category: string; reason: string }) {
-        const ctx = yield* InstanceState.context
-        let structured: unknown
-        let step = 0
-        // A large schema/system prompt cannot be shrunk by summarizing history.
-        let preflightAttempted = false
-        const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
-        const cfg = yield* config.get()
-        const progress = new ObservableProgress(cfg.experimental?.observable_progress)
+    const runLoop: (
+      sessionID: SessionID,
+      systemOneDecision?: { effort: string; category: string; reason: string },
+    ) => Effect.Effect<SessionV1.WithParts> = Effect.fn("SessionPrompt.run")(function* (
+      sessionID: SessionID,
+      systemOneDecision?: { effort: string; category: string; reason: string },
+    ) {
+      const ctx = yield* InstanceState.context
+      let structured: unknown
+      let step = 0
+      // A large schema/system prompt cannot be shrunk by summarizing history.
+      let preflightAttempted = false
+      const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
+      const cfg = yield* config.get()
+      const progress = new ObservableProgress(cfg.experimental?.observable_progress)
 
-        while (true) {
-          yield* status.set(sessionID, { type: "busy" })
-          yield* Effect.logInfo("loop", { "session.id": sessionID, step })
+      while (true) {
+        yield* status.set(sessionID, { type: "busy" })
+        yield* Effect.logInfo("loop", { "session.id": sessionID, step })
 
-          // Paged: stops reading history at the compaction anchor instead of
-          // materializing the whole session on every step of the loop.
-          let msgs = yield* MessageV2.filterCompactedPaged(sessionID).pipe(
-            Effect.provideService(Database.Service, database),
+        // Paged: stops reading history at the compaction anchor instead of
+        // materializing the whole session on every step of the loop.
+        let msgs = yield* MessageV2.filterCompactedPaged(sessionID).pipe(
+          Effect.provideService(Database.Service, database),
+        )
+
+        // Capture real turn boundaries before reminders/plugins/model conversion can
+        // append synthetic users. Any tool operation makes replay unsafe, regardless
+        // of its status or whether it was executed by the provider.
+        const realUsers = msgs.filter(
+          (m) =>
+            m.info.role === "user" &&
+            !m.parts.some((p) => p.type === "compaction") &&
+            m.parts.some((p) => !("synthetic" in p && p.synthetic)),
+        )
+        const latestRealUser = realUsers.at(-1)?.info
+        const currentUserID =
+          latestRealUser?.role === "user" ? (latestRealUser.replayOf ?? latestRealUser.id) : undefined
+        progress.user(currentUserID)
+        const continuation = msgs.some(
+          (m) =>
+            m.info.role === "assistant" &&
+            (!currentUserID || m.info.id > currentUserID) &&
+            m.parts.some((p) => p.type === "tool"),
+        )
+        const firstTurn =
+          new Set(realUsers.map((m) => (m.info.role === "user" ? (m.info.replayOf ?? m.info.id) : m.info.id))).size < 2
+
+        const { user: lastUser, assistant: lastAssistant, finished: lastFinished, tasks } = MessageV2.latest(msgs)
+
+        if (!lastUser) throw new Error("No user message found in stream. This should never happen.")
+
+        const lastAssistantMsg = msgs.findLast(
+          (msg) => msg.info.role === "assistant" && msg.info.id === lastAssistant?.id,
+        )
+        // Some providers return "stop" even when the assistant message contains
+        // tool calls. Keep the loop running so tool results can be sent back to
+        // the model, but ignore cleanup-marked interrupted orphans.
+        if (
+          lastAssistant?.parentID === lastUser.id &&
+          lastAssistantMsg?.parts.some((part) => part.type === "text" && part.metadata?.observable_progress === "stop")
+        )
+          break
+        const hasToolCalls =
+          lastAssistantMsg?.parts.some(
+            (part) => part.type === "tool" && !part.metadata?.providerExecuted && !isOrphanedInterruptedTool(part),
+          ) ?? false
+
+        if (
+          lastAssistant?.finish &&
+          !["tool-calls", "unknown"].includes(lastAssistant.finish) &&
+          !hasToolCalls &&
+          lastAssistant.parentID === lastUser.id
+        ) {
+          const orphan = lastAssistantMsg?.parts.find(
+            (part): part is SessionV1.ToolPart => part.type === "tool" && isOrphanedInterruptedTool(part),
           )
-
-          // Capture real turn boundaries before reminders/plugins/model conversion can
-          // append synthetic users. Any tool operation makes replay unsafe, regardless
-          // of its status or whether it was executed by the provider.
-          const realUsers = msgs.filter(
-            (m) =>
-              m.info.role === "user" &&
-              !m.parts.some((p) => p.type === "compaction") &&
-              m.parts.some((p) => !("synthetic" in p && p.synthetic)),
-          )
-          const latestRealUser = realUsers.at(-1)?.info
-          const currentUserID = latestRealUser?.role === "user" ? latestRealUser.replayOf ?? latestRealUser.id : undefined
-          progress.user(currentUserID)
-          const continuation = msgs.some(
-            (m) =>
-              m.info.role === "assistant" &&
-              (!currentUserID || m.info.id > currentUserID) &&
-              m.parts.some((p) => p.type === "tool"),
-          )
-          const firstTurn = new Set(realUsers.map((m) => m.info.role === "user" ? m.info.replayOf ?? m.info.id : m.info.id)).size < 2
-
-          const { user: lastUser, assistant: lastAssistant, finished: lastFinished, tasks } = MessageV2.latest(msgs)
-
-          if (!lastUser) throw new Error("No user message found in stream. This should never happen.")
-
-          const lastAssistantMsg = msgs.findLast(
-            (msg) => msg.info.role === "assistant" && msg.info.id === lastAssistant?.id,
-          )
-          // Some providers return "stop" even when the assistant message contains
-          // tool calls. Keep the loop running so tool results can be sent back to
-          // the model, but ignore cleanup-marked interrupted orphans.
-          if (lastAssistant?.parentID === lastUser.id && lastAssistantMsg?.parts.some(
-            (part) => part.type === "text" && part.metadata?.observable_progress === "stop",
-          )) break
-          const hasToolCalls =
-            lastAssistantMsg?.parts.some(
-              (part) => part.type === "tool" && !part.metadata?.providerExecuted && !isOrphanedInterruptedTool(part),
-            ) ?? false
-
-          if (
-            lastAssistant?.finish &&
-            !["tool-calls", "unknown"].includes(lastAssistant.finish) &&
-            !hasToolCalls &&
-            lastAssistant.parentID === lastUser.id
-          ) {
-            const orphan = lastAssistantMsg?.parts.find(
-              (part): part is SessionV1.ToolPart => part.type === "tool" && isOrphanedInterruptedTool(part),
-            )
-            if (orphan) {
-              yield* Effect.logWarning("loop exit with orphaned interrupted tool", {
-                "session.id": sessionID,
-                messageID: lastAssistant.id,
-                tool: orphan.tool,
-                callID: orphan.callID,
-              })
-            }
-            yield* Effect.logInfo("exiting loop", { "session.id": sessionID })
-            break
-          }
-
-          step++
-          if (step === 1)
-            yield* title({
-              session,
-              modelID: lastUser.model.modelID,
-              providerID: lastUser.model.providerID,
-              history: msgs,
-            }).pipe(Effect.ignore, Effect.forkIn(scope))
-
-          const model = yield* getModel(lastUser.model.providerID, lastUser.model.modelID, sessionID)
-          const task = tasks.pop()
-
-          if (task?.type === "subtask") {
-            yield* handleSubtask({ task, model, lastUser, sessionID, session, msgs })
-            continue
-          }
-
-          if (task?.type === "compaction") {
-            const result = yield* compaction.process({
-              messages: msgs,
-              parentID: lastUser.id,
-              sessionID,
-              auto: task.auto,
-              overflow: task.overflow,
-              preflight: task.preflight,
+          if (orphan) {
+            yield* Effect.logWarning("loop exit with orphaned interrupted tool", {
+              "session.id": sessionID,
+              messageID: lastAssistant.id,
+              tool: orphan.tool,
+              callID: orphan.callID,
             })
-            if (result === "stop") break
-            continue
           }
+          yield* Effect.logInfo("exiting loop", { "session.id": sessionID })
+          break
+        }
 
-          if (lastFinished && lastFinished.summary !== true) {
-            const finished = msgs.find((message) => message.info.id === lastFinished.id)
-            if (yield* compaction.isOverflow({ tokens: contextTokens(finished) ?? lastFinished.tokens, model })) {
-              yield* compaction.create({ sessionID, agent: lastUser.agent, model: lastUser.model, auto: true })
-              continue
-            }
-          }
+        step++
+        if (step === 1)
+          yield* title({
+            session,
+            modelID: lastUser.model.modelID,
+            providerID: lastUser.model.providerID,
+            history: msgs,
+          }).pipe(Effect.ignore, Effect.forkIn(scope))
 
-          const agent = yield* agents.get(lastUser.agent)
-          if (!agent) {
-            const available = (yield* agents.list()).filter((a) => !a.hidden).map((a) => a.name)
-            const hint = available.length ? ` Available agents: ${available.join(", ")}` : ""
-            const error = new NamedError.Unknown({ message: `Agent not found: "${lastUser.agent}".${hint}` })
-            yield* events.publish(Session.Event.Error, { sessionID, error: error.toObject() })
-            throw error
-          }
-          const maxSteps = agent.steps ?? cfg.experimental?.max_steps ?? Infinity
-          const isLastStep = step >= maxSteps
-          msgs = yield* SessionReminders.apply({ messages: msgs, agent, session }).pipe(
-            Effect.provideService(RuntimeFlags.Service, flags),
-            Effect.provideService(FSUtil.Service, fsys),
-            Effect.provideService(Session.Service, sessions),
-          )
+        const model = yield* getModel(lastUser.model.providerID, lastUser.model.modelID, sessionID)
+        const task = tasks.pop()
 
-          const msg: SessionV1.Assistant = {
-            id: MessageID.ascending(),
-            parentID: lastUser.id,
-            role: "assistant",
-            mode: agent.name,
-            agent: agent.name,
-            variant: lastUser.model.variant,
-            path: { cwd: ctx.directory, root: ctx.worktree },
-            cost: 0,
-            tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-            modelID: model.id,
-            providerID: model.providerID,
-            time: { created: Date.now() },
-            sessionID,
-          }
-          yield* sessions.updateMessage(msg)
-
-          const finalizeInterruptedAssistant = Effect.gen(function* () {
-            if (msg.time.completed) return
-            msg.error ??= MessageV2.fromError(new DOMException("Aborted", "AbortError"), {
-              providerID: msg.providerID,
-              aborted: true,
-            })
-            msg.time.completed = Date.now()
-            yield* sessions.updateMessage(msg)
-          })
-
-          const handle = yield* processor
-            .create({
-              assistantMessage: msg,
-              sessionID,
-              model,
-            })
-            .pipe(Effect.onInterrupt(() => finalizeInterruptedAssistant))
-
-          const outcome: "break" | "continue" | "intervene" = yield* Effect.gen(function* () {
-            const lastUserMsg = msgs.findLast((m) => m.info.role === "user")
-            const bypassAgentCheck = lastUserMsg?.parts.some((p) => p.type === "agent") ?? false
-            const promptOps = yield* ops()
-
-            const tools = yield* SessionTools.resolve({
-              agent,
-              session,
-              model,
-              processor: handle,
-              bypassAgentCheck,
-              messages: msgs,
-              promptOps,
-            }).pipe(
-              Effect.provideService(Plugin.Service, plugin),
-              Effect.provideService(GoalDriver.Service, goal),
-              Effect.provideService(Permission.Service, permission),
-              Effect.provideService(ToolRegistry.Service, registry),
-              Effect.provideService(MCP.Service, mcp),
-              Effect.provideService(Truncate.Service, truncate),
-              Effect.provideService(RuntimeFlags.Service, flags),
-            )
-
-            if (lastUser.format?.type === "json_schema") {
-              tools["StructuredOutput"] = createStructuredOutputTool({
-                schema: lastUser.format.schema,
-                onSuccess(output) {
-                  structured = output
-                },
-              })
-            }
-
-            if (step === 1)
-              yield* summary.summarize({ sessionID, messageID: lastUser.id }).pipe(Effect.ignore, Effect.forkIn(scope))
-
-            const transformOutput = { messages: msgs }
-            yield* goal.trigger("experimental.chat.messages.transform", {}, transformOutput)
-            yield* plugin.trigger("experimental.chat.messages.transform", {}, transformOutput)
-
-            const minimalContext = agent.context === "minimal"
-            const [skills, env, mcpInstructions, modelMsgs, crew] = yield* Effect.all([
-              minimalContext ? Effect.succeed(undefined) : sys.skills(agent),
-              minimalContext ? Effect.succeed(undefined) : sys.environment(model),
-              minimalContext ? Effect.succeed(undefined) : sys.mcp(agent, session.permission),
-              MessageV2.toModelMessagesEffect(msgs, model),
-              // The parent's per-turn view of its own crew. Delegation is
-              // non-blocking, so the parent has to be able to answer "what is
-              // still running" from something that survives compaction and
-              // restart -- and that is this sentence, not the ledger row.
-              FanoutContext.sentence(db, sessionID),
-            ])
-            const instructions = session.parentID || minimalContext ? [] : (yield* instruction.system().pipe(Effect.orDie))
-            
-            // System One: inject effort level into system prompt from the mandatory pre-filter
-            let systemOnePrompt = ""
-            if (systemOneDecision) {
-              const { effort, category, reason } = systemOneDecision
-              systemOnePrompt = `\n\n[System One: effort=${effort}, category=${category}, reason=${reason}]\nAdjust your reasoning depth accordingly. In your thought, start with 'System One: effort=${effort}, category=${category}' and then explain how you are adjusting reasoning depth for this turn.`
-            }
-            
-            const system = [
-              env,
-              instructions.length ? instructions : undefined,
-              mcpInstructions,
-              skills,
-              crew,
-              systemOnePrompt || undefined,
-            ].filter((part): part is string => typeof part === "string")
-            const format = lastUser.format ?? { type: "text" as const }
-            if (format.type === "json_schema") system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
-            const result = yield* handle.process({
-              preflight: !preflightAttempted,
-              continuation,
-              firstTurn,
-              user: lastUser,
-              agent,
-              permission: session.permission,
-              sessionID,
-              parentSessionID: session.parentID,
-              system,
-              messages: [
-                ...modelMsgs,
-                ...(isLastStep ? [{ role: "assistant" as const, content: MAX_STEPS_PROMPT }] : []),
-              ],
-              tools,
-              model,
-              toolChoice: format.type === "json_schema" ? "required" : undefined,
-            })
-
-            if (structured !== undefined) {
-              handle.message.structured = structured
-              handle.message.finish = handle.message.finish ?? "stop"
-              yield* sessions.updateMessage(handle.message)
-              return "break" as const
-            }
-
-            const finished = handle.message.finish && !["tool-calls", "unknown"].includes(handle.message.finish)
-            if (finished && !handle.message.error) {
-              // Surface any content-filter finish (e.g. Anthropic stop_reason:
-              // refusal) as an error. These turns may have produced no visible
-              // output at all — previously the session went idle silently — or
-              // partial text that was cut off by the provider's filter.
-              if (handle.message.finish === "content-filter") {
-                handle.message.error = new SessionV1.ContentFilterError({
-                  message: "The response was blocked by the provider's content filter",
-                }).toObject()
-                yield* sessions.updateMessage(handle.message)
-                yield* events.publish(Session.Event.Error, { sessionID, error: handle.message.error })
-                return "break" as const
-              }
-              if (format.type === "json_schema") {
-                handle.message.error = new SessionV1.StructuredOutputError({
-                  message: "Model did not produce structured output",
-                  retries: 0,
-                }).toObject()
-                yield* sessions.updateMessage(handle.message)
-                return "break" as const
-              }
-              if (handle.message.finish === "length") {
-                const cfg = yield* config.get()
-                if (cfg.experimental?.length_continue !== true) {
-                  // length_continue disabled: fall through to compaction / existing behavior
-                } else {
-                  // Cap attempts to prevent infinite truncation loops.
-                  const priorContinues = msgs.filter(
-                    (m) =>
-                      m.info.role === "user" &&
-                      m.parts.some((p) => p.type === "text" && p.metadata?.length_continue === true),
-                  ).length
-                  if (priorContinues >= 3) {
-                    handle.message.error = new SessionV1.OutputLengthError({
-                      message: "Model output was truncated after 3 continue attempts",
-                    }).toObject()
-                    yield* sessions.updateMessage(handle.message)
-                    yield* events.publish(Session.Event.Error, { sessionID, error: handle.message.error })
-                    return "break" as const
-                  }
-                  const continueMsg = yield* sessions.updateMessage({
-                    id: MessageID.ascending(),
-                    role: "user",
-                    sessionID,
-                    time: { created: Date.now() },
-                    agent: lastUser.agent,
-                    model: lastUser.model,
-                  })
-                  yield* sessions.updatePart({
-                    id: PartID.ascending(),
-                    messageID: continueMsg.id,
-                    sessionID,
-                    type: "text",
-                    metadata: { length_continue: true },
-                    synthetic: true,
-                    text: "Your previous response was truncated due to reaching the output token limit. Continue from where you left off.",
-                    time: { start: Date.now(), end: Date.now() },
-                  })
-                  return "continue" as const
-                }
-              }
-            }
-
-            // Cancellation, permission denial and provider errors take priority.
-            if (result.result === "stop" || handle.message.error) return "break" as const
-            const parts = yield* MessageV2.parts(handle.message.id).pipe(
-              Effect.provideService(Database.Service, database),
-            )
-            // A normal final answer must not be restarted by a historical
-            // detector flag. Skip the recovery guard for it; the loop's
-            // top-of-iteration exit still runs, so a prompt submitted during
-            // the run is picked up on the next iteration.
-            if (finished && result.result !== "compact" && !parts.some((p) => p.type === "tool" && !p.metadata?.providerExecuted && !isOrphanedInterruptedTool(p))) return "continue" as const
-            const decision = progress.turn(parts.flatMap<Observation>((part) => {
-              if (part.type !== "tool") return []
-              if (part.state.status === "completed") return [{
-                tool: part.tool, input: part.state.input, status: "completed" as const,
-                result: { output: part.state.output, attachments: part.state.attachments?.map((a) => ({ mime: a.mime, url: a.url })) },
-              }]
-              if (part.state.status === "error" && !part.state.metadata?.interrupted) return [{
-                tool: part.tool, input: part.state.input, status: "error" as const, result: part.state.error,
-              }]
-              return []
-            }), handle.loopDetected)
-            if (decision === "stop") {
-              yield* sessions.updatePart({
-                id: PartID.ascending(), messageID: handle.message.id, sessionID,
-                type: "text", text: PROGRESS_STOP,
-                metadata: { observable_progress: "stop" },
-                time: { start: Date.now(), end: Date.now() },
-              })
-              handle.message.finish = "stop"
-              yield* sessions.updateMessage(handle.message)
-              return "break" as const
-            }
-            if (decision === "nudge") return "intervene" as const
-            if (result.result === "compact") {
-              if (result.preflight) preflightAttempted = true
-              yield* compaction.create({
-                sessionID,
-                agent: lastUser.agent,
-                model: lastUser.model,
-                auto: true,
-                overflow: result.preflight ? false : !handle.message.finish || undefined,
-                preflight: result.preflight,
-              })
-            }
-            return "continue" as const
-          }).pipe(
-            Effect.ensuring(instruction.clear(handle.message.id)),
-            Effect.onInterrupt(() => finalizeInterruptedAssistant),
-          )
-          if (outcome === "break") break
-          if (outcome === "intervene") {
-            yield* Effect.logWarning("observable_progress_nudge", { "session.id": sessionID, messageID: handle.message.id })
-            const breakMsg: SessionV1.User = {
-              id: MessageID.ascending(),
-              role: "user",
-              sessionID,
-              time: { created: Date.now() },
-              agent: lastUser.agent,
-              model: lastUser.model,
-              // DB reads return plain JSON; the event encoder requires the
-              // Format Schema.Class instance when publishing a new message.
-              format: lastUser.format ? Schema.decodeUnknownSync(SessionV1.Format)(lastUser.format) : undefined,
-            }
-            yield* sessions.updateMessage(breakMsg)
-            const breakPart: SessionV1.Part = {
-              type: "text",
-              id: PartID.ascending(),
-              messageID: breakMsg.id,
-              sessionID,
-              synthetic: true,
-              metadata: { observable_progress: "nudge" },
-              text: PROGRESS_NUDGE,
-            }
-            yield* sessions.updatePart(breakPart)
-            msgs = [
-              ...msgs,
-              { info: breakMsg, parts: [breakPart] },
-            ]
-            continue
-          }
+        if (task?.type === "subtask") {
+          yield* handleSubtask({ task, model, lastUser, sessionID, session, msgs })
           continue
         }
 
-        yield* compaction.prune({ sessionID }).pipe(Effect.ignore, Effect.forkIn(scope))
-        return yield* lastAssistant(sessionID)
-      },
-    )
+        if (task?.type === "compaction") {
+          const result = yield* compaction.process({
+            messages: msgs,
+            parentID: lastUser.id,
+            sessionID,
+            auto: task.auto,
+            overflow: task.overflow,
+            preflight: task.preflight,
+          })
+          if (result === "stop") break
+          continue
+        }
+
+        if (lastFinished && lastFinished.summary !== true) {
+          const finished = msgs.find((message) => message.info.id === lastFinished.id)
+          if (yield* compaction.isOverflow({ tokens: contextTokens(finished) ?? lastFinished.tokens, model })) {
+            yield* compaction.create({ sessionID, agent: lastUser.agent, model: lastUser.model, auto: true })
+            continue
+          }
+        }
+
+        const agent = yield* agents.get(lastUser.agent)
+        if (!agent) {
+          const available = (yield* agents.list()).filter((a) => !a.hidden).map((a) => a.name)
+          const hint = available.length ? ` Available agents: ${available.join(", ")}` : ""
+          const error = new NamedError.Unknown({ message: `Agent not found: "${lastUser.agent}".${hint}` })
+          yield* events.publish(Session.Event.Error, { sessionID, error: error.toObject() })
+          throw error
+        }
+        const maxSteps = agent.steps ?? cfg.experimental?.max_steps ?? Infinity
+        const isLastStep = step >= maxSteps
+        msgs = yield* SessionReminders.apply({ messages: msgs, agent, session }).pipe(
+          Effect.provideService(RuntimeFlags.Service, flags),
+          Effect.provideService(FSUtil.Service, fsys),
+          Effect.provideService(Session.Service, sessions),
+        )
+
+        const msg: SessionV1.Assistant = {
+          id: MessageID.ascending(),
+          parentID: lastUser.id,
+          role: "assistant",
+          mode: agent.name,
+          agent: agent.name,
+          variant: lastUser.model.variant,
+          path: { cwd: ctx.directory, root: ctx.worktree },
+          cost: 0,
+          tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          modelID: model.id,
+          providerID: model.providerID,
+          time: { created: Date.now() },
+          sessionID,
+        }
+        yield* sessions.updateMessage(msg)
+
+        const finalizeInterruptedAssistant = Effect.gen(function* () {
+          if (msg.time.completed) return
+          msg.error ??= MessageV2.fromError(new DOMException("Aborted", "AbortError"), {
+            providerID: msg.providerID,
+            aborted: true,
+          })
+          msg.time.completed = Date.now()
+          yield* sessions.updateMessage(msg)
+        })
+
+        const handle = yield* processor
+          .create({
+            assistantMessage: msg,
+            sessionID,
+            model,
+          })
+          .pipe(Effect.onInterrupt(() => finalizeInterruptedAssistant))
+
+        const outcome: "break" | "continue" | "intervene" = yield* Effect.gen(function* () {
+          const lastUserMsg = msgs.findLast((m) => m.info.role === "user")
+          const bypassAgentCheck = lastUserMsg?.parts.some((p) => p.type === "agent") ?? false
+          const promptOps = yield* ops()
+
+          const tools = yield* SessionTools.resolve({
+            agent,
+            session,
+            model,
+            processor: handle,
+            bypassAgentCheck,
+            messages: msgs,
+            promptOps,
+          }).pipe(
+            Effect.provideService(Plugin.Service, plugin),
+            Effect.provideService(GoalDriver.Service, goal),
+            Effect.provideService(Permission.Service, permission),
+            Effect.provideService(ToolRegistry.Service, registry),
+            Effect.provideService(MCP.Service, mcp),
+            Effect.provideService(Truncate.Service, truncate),
+            Effect.provideService(RuntimeFlags.Service, flags),
+          )
+
+          if (lastUser.format?.type === "json_schema") {
+            tools["StructuredOutput"] = createStructuredOutputTool({
+              schema: lastUser.format.schema,
+              onSuccess(output) {
+                structured = output
+              },
+            })
+          }
+
+          if (step === 1)
+            yield* summary.summarize({ sessionID, messageID: lastUser.id }).pipe(Effect.ignore, Effect.forkIn(scope))
+
+          const transformOutput = { messages: msgs }
+          yield* goal.trigger("experimental.chat.messages.transform", {}, transformOutput)
+          yield* plugin.trigger("experimental.chat.messages.transform", {}, transformOutput)
+
+          const minimalContext = agent.context === "minimal"
+          const [skills, env, mcpInstructions, modelMsgs, crew] = yield* Effect.all([
+            minimalContext ? Effect.succeed(undefined) : sys.skills(agent),
+            minimalContext ? Effect.succeed(undefined) : sys.environment(model),
+            minimalContext ? Effect.succeed(undefined) : sys.mcp(agent, session.permission),
+            MessageV2.toModelMessagesEffect(msgs, model),
+            // The parent's per-turn view of its own crew. Delegation is
+            // non-blocking, so the parent has to be able to answer "what is
+            // still running" from something that survives compaction and
+            // restart -- and that is this sentence, not the ledger row.
+            FanoutContext.sentence(db, sessionID),
+          ])
+          const instructions = session.parentID || minimalContext ? [] : yield* instruction.system().pipe(Effect.orDie)
+
+          // System One: inject effort level into system prompt from the mandatory pre-filter
+          let systemOnePrompt = ""
+          if (systemOneDecision) {
+            const { effort, category, reason } = systemOneDecision
+            systemOnePrompt = `\n\n[System One: effort=${effort}, category=${category}, reason=${reason}]\nAdjust your reasoning depth accordingly. In your thought, start with 'System One: effort=${effort}, category=${category}' and then explain how you are adjusting reasoning depth for this turn.`
+          }
+
+          // Assembled by the same function `opencode prompt show` reports on, so
+          // a report of the prompt cannot describe a different prompt.
+          const system = SystemPrompt.assemble({
+            env,
+            instructions: instructions.length ? instructions : undefined,
+            mcp: mcpInstructions,
+            skills,
+            crew,
+            systemOne: systemOnePrompt,
+          })
+          const format = lastUser.format ?? { type: "text" as const }
+          if (format.type === "json_schema") system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
+          const result = yield* handle.process({
+            preflight: !preflightAttempted,
+            continuation,
+            firstTurn,
+            user: lastUser,
+            agent,
+            permission: session.permission,
+            sessionID,
+            parentSessionID: session.parentID,
+            system,
+            messages: [
+              ...modelMsgs,
+              ...(isLastStep ? [{ role: "assistant" as const, content: MAX_STEPS_PROMPT }] : []),
+            ],
+            tools,
+            model,
+            toolChoice: format.type === "json_schema" ? "required" : undefined,
+          })
+
+          if (structured !== undefined) {
+            handle.message.structured = structured
+            handle.message.finish = handle.message.finish ?? "stop"
+            yield* sessions.updateMessage(handle.message)
+            return "break" as const
+          }
+
+          const finished = handle.message.finish && !["tool-calls", "unknown"].includes(handle.message.finish)
+          if (finished && !handle.message.error) {
+            // Surface any content-filter finish (e.g. Anthropic stop_reason:
+            // refusal) as an error. These turns may have produced no visible
+            // output at all — previously the session went idle silently — or
+            // partial text that was cut off by the provider's filter.
+            if (handle.message.finish === "content-filter") {
+              handle.message.error = new SessionV1.ContentFilterError({
+                message: "The response was blocked by the provider's content filter",
+              }).toObject()
+              yield* sessions.updateMessage(handle.message)
+              yield* events.publish(Session.Event.Error, { sessionID, error: handle.message.error })
+              return "break" as const
+            }
+            if (format.type === "json_schema") {
+              handle.message.error = new SessionV1.StructuredOutputError({
+                message: "Model did not produce structured output",
+                retries: 0,
+              }).toObject()
+              yield* sessions.updateMessage(handle.message)
+              return "break" as const
+            }
+            if (handle.message.finish === "length") {
+              const cfg = yield* config.get()
+              if (cfg.experimental?.length_continue !== true) {
+                // length_continue disabled: fall through to compaction / existing behavior
+              } else {
+                // Cap attempts to prevent infinite truncation loops.
+                const priorContinues = msgs.filter(
+                  (m) =>
+                    m.info.role === "user" &&
+                    m.parts.some((p) => p.type === "text" && p.metadata?.length_continue === true),
+                ).length
+                if (priorContinues >= 3) {
+                  handle.message.error = new SessionV1.OutputLengthError({
+                    message: "Model output was truncated after 3 continue attempts",
+                  }).toObject()
+                  yield* sessions.updateMessage(handle.message)
+                  yield* events.publish(Session.Event.Error, { sessionID, error: handle.message.error })
+                  return "break" as const
+                }
+                const continueMsg = yield* sessions.updateMessage({
+                  id: MessageID.ascending(),
+                  role: "user",
+                  sessionID,
+                  time: { created: Date.now() },
+                  agent: lastUser.agent,
+                  model: lastUser.model,
+                })
+                yield* sessions.updatePart({
+                  id: PartID.ascending(),
+                  messageID: continueMsg.id,
+                  sessionID,
+                  type: "text",
+                  metadata: { length_continue: true },
+                  synthetic: true,
+                  text: "Your previous response was truncated due to reaching the output token limit. Continue from where you left off.",
+                  time: { start: Date.now(), end: Date.now() },
+                })
+                return "continue" as const
+              }
+            }
+          }
+
+          // Cancellation, permission denial and provider errors take priority.
+          if (result.result === "stop" || handle.message.error) return "break" as const
+          const parts = yield* MessageV2.parts(handle.message.id).pipe(
+            Effect.provideService(Database.Service, database),
+          )
+          // A normal final answer must not be restarted by a historical
+          // detector flag. Skip the recovery guard for it; the loop's
+          // top-of-iteration exit still runs, so a prompt submitted during
+          // the run is picked up on the next iteration.
+          if (
+            finished &&
+            result.result !== "compact" &&
+            !parts.some((p) => p.type === "tool" && !p.metadata?.providerExecuted && !isOrphanedInterruptedTool(p))
+          )
+            return "continue" as const
+          const decision = progress.turn(
+            parts.flatMap<Observation>((part) => {
+              if (part.type !== "tool") return []
+              if (part.state.status === "completed")
+                return [
+                  {
+                    tool: part.tool,
+                    input: part.state.input,
+                    status: "completed" as const,
+                    result: {
+                      output: part.state.output,
+                      attachments: part.state.attachments?.map((a) => ({ mime: a.mime, url: a.url })),
+                    },
+                  },
+                ]
+              if (part.state.status === "error" && !part.state.metadata?.interrupted)
+                return [
+                  {
+                    tool: part.tool,
+                    input: part.state.input,
+                    status: "error" as const,
+                    result: part.state.error,
+                  },
+                ]
+              return []
+            }),
+            handle.loopDetected,
+          )
+          if (decision === "stop") {
+            yield* sessions.updatePart({
+              id: PartID.ascending(),
+              messageID: handle.message.id,
+              sessionID,
+              type: "text",
+              text: PROGRESS_STOP,
+              metadata: { observable_progress: "stop" },
+              time: { start: Date.now(), end: Date.now() },
+            })
+            handle.message.finish = "stop"
+            yield* sessions.updateMessage(handle.message)
+            return "break" as const
+          }
+          if (decision === "nudge") return "intervene" as const
+          if (result.result === "compact") {
+            if (result.preflight) preflightAttempted = true
+            yield* compaction.create({
+              sessionID,
+              agent: lastUser.agent,
+              model: lastUser.model,
+              auto: true,
+              overflow: result.preflight ? false : !handle.message.finish || undefined,
+              preflight: result.preflight,
+            })
+          }
+          return "continue" as const
+        }).pipe(
+          Effect.ensuring(instruction.clear(handle.message.id)),
+          Effect.onInterrupt(() => finalizeInterruptedAssistant),
+        )
+        if (outcome === "break") break
+        if (outcome === "intervene") {
+          yield* Effect.logWarning("observable_progress_nudge", {
+            "session.id": sessionID,
+            messageID: handle.message.id,
+          })
+          const breakMsg: SessionV1.User = {
+            id: MessageID.ascending(),
+            role: "user",
+            sessionID,
+            time: { created: Date.now() },
+            agent: lastUser.agent,
+            model: lastUser.model,
+            // DB reads return plain JSON; the event encoder requires the
+            // Format Schema.Class instance when publishing a new message.
+            format: lastUser.format ? Schema.decodeUnknownSync(SessionV1.Format)(lastUser.format) : undefined,
+          }
+          yield* sessions.updateMessage(breakMsg)
+          const breakPart: SessionV1.Part = {
+            type: "text",
+            id: PartID.ascending(),
+            messageID: breakMsg.id,
+            sessionID,
+            synthetic: true,
+            metadata: { observable_progress: "nudge" },
+            text: PROGRESS_NUDGE,
+          }
+          yield* sessions.updatePart(breakPart)
+          msgs = [...msgs, { info: breakMsg, parts: [breakPart] }]
+          continue
+        }
+        continue
+      }
+
+      yield* compaction.prune({ sessionID }).pipe(Effect.ignore, Effect.forkIn(scope))
+      return yield* lastAssistant(sessionID)
+    })
 
     const loop: (input: LoopInput) => Effect.Effect<SessionV1.WithParts> = Effect.fn("SessionPrompt.loop")(function* (
       input: LoopInput,
     ) {
-      return yield* state.ensureRunning(input.sessionID, lastAssistant(input.sessionID), runLoop(input.sessionID, input.systemOneDecision))
+      return yield* state.ensureRunning(
+        input.sessionID,
+        lastAssistant(input.sessionID),
+        runLoop(input.sessionID, input.systemOneDecision),
+      )
     })
 
     const shell: (input: ShellInput) => Effect.Effect<SessionV1.WithParts, Session.BusyError> = Effect.fn(

@@ -51,6 +51,44 @@ export function provider(model: Provider.Model) {
   return [buildSystemPrompt(PROMPT_DEFAULT)]
 }
 
+/**
+ * The system prompt, in the order it is sent.
+ *
+ * Extracted so that anything which reports on the prompt — `opencode prompt
+ * show` — assembles it exactly as the request does. A report that rebuilt this
+ * list itself would drift from the real prompt the first time a piece was added
+ * or reordered, and would then confidently report the wrong thing.
+ *
+ * Every piece is optional: a session with no skills, no project instructions and
+ * no MCP servers legitimately produces a shorter prompt, and `undefined` is how
+ * a piece says it has nothing to contribute.
+ */
+export interface Pieces {
+  /** What the model is told about where it is running. */
+  env?: string[]
+  /** AGENTS.md and friends, rendered as instructions. */
+  instructions?: string[]
+  /** What connected MCP servers say about themselves. */
+  mcp?: string
+  /** The skill index the agent may load from. */
+  skills?: string
+  /** Delegation state, which only exists during a turn. */
+  crew?: string
+  /** A pre-filter's effort instruction, which only exists during a turn. */
+  systemOne?: string
+}
+
+export function assemble(pieces: Pieces): string[] {
+  return [
+    ...(pieces.env ?? []),
+    ...(pieces.instructions ?? []),
+    pieces.mcp,
+    pieces.skills,
+    pieces.crew,
+    pieces.systemOne || undefined,
+  ].filter((part): part is string => typeof part === "string")
+}
+
 export interface Interface {
   readonly environment: (model: Provider.Model) => Effect.Effect<string[]>
   readonly skills: (agent: Agent.Info) => Effect.Effect<string | undefined>
@@ -60,12 +98,12 @@ export interface Interface {
 export class Service extends Context.Service<Service, Interface>()("@opencode/SystemPrompt") {}
 
 const layer = Layer.effect(
-    Service,
-    Effect.gen(function* () {
-      const skill = yield* Skill.Service
-      const locations = yield* LocationServiceMap.Service
+  Service,
+  Effect.gen(function* () {
+    const skill = yield* Skill.Service
+    const locations = yield* LocationServiceMap.Service
 
-      return Service.of({
+    return Service.of({
       environment: Effect.fn("SystemPrompt.environment")(function* (model: Provider.Model) {
         const ctx = yield* InstanceState.context
         const references = yield* Effect.gen(function* () {

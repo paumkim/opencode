@@ -384,6 +384,26 @@ Options:
       --format            output format         [string] [choices: "text", "json"] [default: "text"]"
 `;
 
+exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode prompt --help 1`] = `
+"opencode prompt
+
+inspect the prompt opencode sends
+
+Commands:
+  opencode prompt show [agent]  show what the harness will send as the system prompt, sized
+
+Options:
+  -h, --help              show help                                                        [boolean]
+  -v, --version           show version number                                              [boolean]
+      --internal-version  show internal fork build version (separate from compatibility version)
+                                                                                           [boolean]
+      --print-logs        print logs to stderr                                             [boolean]
+      --log-level         log level             [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
+      --debug             debug mode: DEBUG logs, print-logs, JSON streaming, and thinking blocks
+                                                                          [boolean] [default: false]
+      --pure              run without external plugins                                     [boolean]"
+`;
+
 exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode export --help 1`] = `
 "opencode export [sessionID]
 
@@ -849,6 +869,29 @@ Options:
                                                                           [boolean] [default: false]
       --pure              run without external plugins                                     [boolean]
   -n, --limit             how many of the largest parts to list               [number] [default: 10]
+      --format            output format       [string] [choices: "table", "json"] [default: "table"]"
+`;
+
+exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode prompt show --help 1`] = `
+"opencode prompt show [agent]
+
+show what the harness will send as the system prompt, sized
+
+Positionals:
+  agent  agent to report on (default: the project's default agent)                          [string]
+
+Options:
+  -h, --help              show help                                                        [boolean]
+  -v, --version           show version number                                              [boolean]
+      --internal-version  show internal fork build version (separate from compatibility version)
+                                                                                           [boolean]
+      --print-logs        print logs to stderr                                             [boolean]
+      --log-level         log level             [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
+      --debug             debug mode: DEBUG logs, print-logs, JSON streaming, and thinking blocks
+                                                                          [boolean] [default: false]
+      --pure              run without external plugins                                     [boolean]
+  -m, --model             model to report for (default: the agent's default model)          [string]
+  -n, --limit             how many of the largest tool definitions to list    [number] [default: 12]
       --format            output format       [string] [choices: "table", "json"] [default: "table"]"
 `;
 
