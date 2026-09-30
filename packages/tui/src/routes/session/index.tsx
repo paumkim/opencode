@@ -1603,12 +1603,14 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
           </text>
         </box>
       </Show>
+      {/* The id is what makes this message addressable: /timeline, next/prev
+          navigation, and a search hit all resolve a message by looking for a
+          scroll child with this id. Without it an assistant reply can be read
+          but never jumped to. This note has to live in a comment container: a
+          bare `//` line in JSX child position is text content, not a comment,
+          and OpenTUI refuses to insert a text node whose parent is a box. */}
       <Switch>
         <Match when={props.last || final() || props.message.error?.name === "MessageAbortedError"}>
-          // The id is what makes this message addressable: /timeline, next/prev
-          // navigation, and a search hit all resolve a message by looking for a
-          // scroll child with this id. Without it an assistant reply can be read
-          // but never jumped to.
           <box id={props.message.id} ref={(el: BoxRenderable) => alwaysSeparate.add(el)} paddingLeft={3}>
             <text marginTop={1}>
               <span
