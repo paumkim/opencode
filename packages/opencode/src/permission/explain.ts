@@ -70,6 +70,32 @@ export function fallback(permission: string): PermissionV1.Rule {
   return { action: "ask", permission, pattern: "*" }
 }
 
+/**
+ * How a question was decided, in the form the permission request carries.
+ *
+ * The indexes count the whole flattened set, so a client can say "rule 64 of 87"
+ * and mean what `opencode permission explain` means by it. An empty result
+ * means no rule matched and the implicit default asked.
+ */
+export function matched(
+  permission: string,
+  pattern: string,
+  ...rulesets: readonly PermissionV1.Ruleset[]
+): PermissionV1.Matched[] {
+  const all = candidates(permission, pattern, ...rulesets)
+  const best = all.findLast((item) => item.matches)
+  // A question no rule covered is answered by the implicit default, and that is
+  // the most common reason a user is stopped at all. Reporting it as "no rule"
+  // is the whole difference between a prompt that explains itself and one that
+  // looks arbitrary.
+  return best
+    ? [{ pattern, rule: best.rule, index: best.index, total: all.length }]
+    : [{ pattern, rule: fallback(permission), index: -1, total: all.length }]
+}
+
+/** Whether a decision came from a rule at all, or from the default. */
+export const isDefault = (item: PermissionV1.Matched) => item.index < 0
+
 export function explain(
   permission: string,
   pattern: string,
@@ -120,6 +146,24 @@ function describe(all: readonly Verdict[], matched: readonly Verdict[], permissi
  * Renders one ruleset line the way the decision reads it, for a report that
  * shows the whole file rather than one question about it.
  */
+/**
+ * The one line a prompt shows to say why it is asking.
+ *
+ * Wording matches what `opencode permission explain` prints for the same
+ * decision, so a user who runs one to dig into a prompt sees the same rule
+ * described the same way.
+ */
+export function describeAsk(matched: readonly PermissionV1.Matched[] | undefined): string | undefined {
+  const first = matched?.[0]
+  if (!first) return undefined
+  // A negative index is the implicit default: nothing in the config covers this
+  // question, which is the most common reason a user is stopped at all. That is
+  // an answer, not an absence of one, and a prompt that stays silent here is
+  // exactly the prompt that looks arbitrary.
+  if (first.index < 0) return "no rule covers this, so it defaults to ask"
+  return `Rule ${first.index + 1}/${first.total} (${first.rule.permission} = ${first.rule.action})`
+}
+
 export function describeRule(rule: PermissionV1.Rule): string {
   return `${rule.permission} ${rule.action} ${rule.pattern === "*" ? "" : rule.pattern}`.trim()
 }

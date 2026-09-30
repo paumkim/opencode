@@ -679,6 +679,13 @@ export type Todo = {
   priority: "high" | "medium" | "low"
 }
 
+export type PermissionMatched = {
+  pattern: string
+  rule: PermissionRule
+  index: number
+  total: number
+}
+
 export type SessionStatus =
   | {
       type: "idle"
@@ -1465,6 +1472,7 @@ export type GlobalEvent = {
             messageID: string
             callID: string
           }
+          matched?: Array<PermissionMatched>
         }
       }
     | {
@@ -2640,6 +2648,7 @@ export type PermissionRequest = {
     messageID: string
     callID: string
   }
+  matched?: Array<PermissionMatched>
 }
 
 export type PermissionNotFoundError = {
@@ -6156,6 +6165,7 @@ export type PermissionAsked = {
       messageID: string
       callID: string
     }
+    matched?: Array<PermissionMatched>
   }
 }
 
@@ -7384,6 +7394,7 @@ export type EventPermissionAsked = {
       messageID: string
       callID: string
     }
+    matched?: Array<PermissionMatched>
   }
 }
 

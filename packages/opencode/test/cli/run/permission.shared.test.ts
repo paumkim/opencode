@@ -130,6 +130,53 @@ describe("run permission shared", () => {
     })
   })
 
+  test("says which rule asked, so widening a permission is not blind", () => {
+    const info = permissionInfo(
+      req({
+        permission: "bash",
+        metadata: { input: { command: "rm -rf build" } },
+        matched: [
+          {
+            pattern: "rm -rf build",
+            rule: { permission: "bash", action: "ask", pattern: "rm*" },
+            index: 63,
+            total: 87,
+          },
+        ],
+      }),
+    )
+    // The command is still the subject; the rule is the reason, so it is
+    // appended rather than leading and looking like part of the command.
+    expect(info.lines).toEqual(["$ rm -rf build", "because Rule 64/87 (bash = ask)"])
+  })
+
+  test("says when no rule covered it, which is the usual answer", () => {
+    const info = permissionInfo(
+      req({
+        permission: "bash",
+        metadata: { input: { command: "ls" } },
+        matched: [{ pattern: "ls", rule: { permission: "bash", action: "ask", pattern: "*" }, index: -1, total: 3 }],
+      }),
+    )
+    expect(info.lines).toEqual(["$ ls", "because no rule covers this, so it defaults to ask"])
+  })
+
+  test("reaches the non-tool prompts too", () => {
+    for (const permission of ["doom_loop", "external_directory", "custom_tool"]) {
+      const info = permissionInfo(
+        req({
+          permission,
+          matched: [{ pattern: "x", rule: { permission, action: "ask", pattern: "*" }, index: 0, total: 1 }],
+        }),
+      )
+      expect(info.lines.at(-1)).toBe(`because Rule 1/1 (${permission} = ask)`)
+    }
+  })
+
+  test("adds nothing when the server named no rule", () => {
+    expect(permissionInfo(req({ permission: "custom_tool" })).lines).toEqual(["Tool: custom_tool"])
+  })
+
   test("formats always-allow copy for wildcard and explicit patterns", () => {
     expect(permissionAlwaysLines(req({ permission: "bash", always: ["*"] }))).toEqual([
       "This will allow bash until OpenCode is restarted.",

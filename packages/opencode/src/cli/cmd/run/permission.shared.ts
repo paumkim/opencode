@@ -16,6 +16,7 @@
 import type { PermissionRequest } from "@opencode-ai/sdk/v2"
 import type { PermissionReply } from "./types"
 import { toolPath, toolPermissionInfo } from "./tool"
+import { describeAsk } from "../../../permission/explain"
 
 type Dict = Record<string, unknown>
 
@@ -94,33 +95,53 @@ export function permissionInfo(request: PermissionRequest): PermissionInfo {
   const input = data(request)
   const info = toolPermissionInfo(request.permission, input, dict(request.metadata), pats)
   if (info) {
-    return info
+    return withReason(info, request)
   }
 
   if (request.permission === "external_directory") {
     const meta = dict(request.metadata)
     const raw = text(meta.parentDir) || text(meta.filepath) || pats[0] || ""
     const dir = raw.includes("*") ? raw.slice(0, raw.indexOf("*")).replace(/[\\/]+$/, "") : raw
-    return {
-      icon: "←",
-      title: `Access external directory ${toolPath(dir, { home: true })}`,
-      lines: pats.map((item) => `- ${item}`),
-    }
+    return withReason(
+      {
+        icon: "←",
+        title: `Access external directory ${toolPath(dir, { home: true })}`,
+        lines: pats.map((item) => `- ${item}`),
+      },
+      request,
+    )
   }
 
   if (request.permission === "doom_loop") {
-    return {
-      icon: "⟳",
-      title: "Continue after repeated failures",
-      lines: ["This keeps the session running despite repeated failures."],
-    }
+    return withReason(
+      {
+        icon: "⟳",
+        title: "Continue after repeated failures",
+        lines: ["This keeps the session running despite repeated failures."],
+      },
+      request,
+    )
   }
 
-  return {
-    icon: "⚙",
-    title: `Call tool ${request.permission}`,
-    lines: [`Tool: ${request.permission}`],
-  }
+  return withReason(
+    {
+      icon: "⚙",
+      title: `Call tool ${request.permission}`,
+      lines: [`Tool: ${request.permission}`],
+    },
+    request,
+  )
+}
+
+/**
+ * Appends the rule that asked, so the user is not asked to widen a permission
+ * without being told which line is about to widen. Appended rather than
+ * prepended because the rule is the reason for the question, not part of it.
+ */
+function withReason(info: PermissionInfo, request: PermissionRequest): PermissionInfo {
+  const reason = describeAsk(request.matched)
+  if (!reason) return info
+  return { ...info, lines: [...info.lines, `because ${reason}`] }
 }
 
 export function permissionAlwaysLines(request: PermissionRequest): string[] {

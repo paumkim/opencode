@@ -77,6 +77,9 @@ const layer = Layer.effect(
       const { approved, pending } = yield* InstanceState.get(state)
       const { ruleset, ...request } = input
       let needsAsk = false
+      // Recorded as the question is answered, so the prompt that stops the agent
+      // can say which rule stopped it rather than leaving the user to guess.
+      const matched: PermissionV1.Matched[] = []
 
       for (const pattern of request.patterns) {
         const rule = evaluate(request.permission, pattern, ruleset, approved)
@@ -88,6 +91,7 @@ const layer = Layer.effect(
         }
         if (rule.action === "allow") continue
         needsAsk = true
+        matched.push(...PermissionExplain.matched(request.permission, pattern, ruleset, approved))
       }
 
       if (!needsAsk) return
@@ -101,6 +105,7 @@ const layer = Layer.effect(
         metadata: request.metadata,
         always: request.always,
         tool: request.tool,
+        ...(matched.length > 0 ? { matched } : {}),
       }
       yield* Effect.logInfo("asking", { id, permission: info.permission, patterns: info.patterns })
 
