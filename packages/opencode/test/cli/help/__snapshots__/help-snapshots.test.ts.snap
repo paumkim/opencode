@@ -336,6 +336,54 @@ Options:
                                                                                             [string]"
 `;
 
+exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode doctor --help 1`] = `
+"opencode doctor
+
+diagnose configuration, providers, MCP servers, and tooling
+
+Options:
+  -h, --help              show help                                                        [boolean]
+  -v, --version           show version number                                              [boolean]
+      --internal-version  show internal fork build version (separate from compatibility version)
+                                                                                           [boolean]
+      --print-logs        print logs to stderr                                             [boolean]
+      --log-level         log level             [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
+      --debug             debug mode: DEBUG logs, print-logs, JSON streaming, and thinking blocks
+                                                                          [boolean] [default: false]
+      --pure              run without external plugins                                     [boolean]
+      --json              emit the report as JSON on stdout               [boolean] [default: false]
+      --brief             only report errors and warnings                 [boolean] [default: false]
+      --mcp               connect to configured MCP servers to report their status
+                                                                           [boolean] [default: true]"
+`;
+
+exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode search --help 1`] = `
+"opencode search <query..>
+
+search the text of every message in your sessions
+
+Positionals:
+  query  text to look for; the rest of the command line is used     [array] [required] [default: []]
+
+Options:
+  -h, --help              show help                                                        [boolean]
+  -v, --version           show version number                                              [boolean]
+      --internal-version  show internal fork build version (separate from compatibility version)
+                                                                                           [boolean]
+      --print-logs        print logs to stderr                                             [boolean]
+      --log-level         log level             [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
+      --debug             debug mode: DEBUG logs, print-logs, JSON streaming, and thinking blocks
+                                                                          [boolean] [default: false]
+      --pure              run without external plugins                                     [boolean]
+      --session           only search this session                                          [string]
+      --all               search every project, not just the current one  [boolean] [default: false]
+      --case              match case                                      [boolean] [default: false]
+      --synthetic         include text the agent injected (reminders, compaction output)
+                                                                          [boolean] [default: false]
+  -n, --limit             maximum number of hits (default: 50)                              [number]
+      --format            output format         [string] [choices: "text", "json"] [default: "text"]"
+`;
+
 exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode export --help 1`] = `
 "opencode export [sessionID]
 
