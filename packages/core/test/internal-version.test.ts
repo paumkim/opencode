@@ -9,7 +9,8 @@ import {
   readInternalVersion,
   validateInternalVersion,
 } from "../src/installation/internal-version"
-import { InstallationVersion } from "../src/installation/version"
+import { ConsoleAgentSegment, ConsoleVersion, InstallationVersion } from "../src/installation/version"
+import consolePkg from "../../console/app/package.json"
 
 const dirs: string[] = []
 afterEach(async () => {
@@ -45,6 +46,51 @@ test("internal bumps reset lower components without changing compatibility versi
   // anything, and the assertion above would pass for the wrong reason again.
   expect(opencodePkg.version).not.toBe("0.0.0-local")
   expect(pkg.version).toMatch(/^\d+\.\d+\.\d+/)
+})
+
+test("the console version reaches the User-Agent as its own segment", () => {
+  // A source checkout has the console app next to it, so the segment is populated -- and it has to
+  // be the console's own version, not a copy of the installer's: the two are released separately
+  // and a header claiming otherwise sends every console-hosted request to the wrong cohort.
+  expect(ConsoleVersion).toBe(consolePkg.version)
+  expect(ConsoleAgentSegment).toBe(` console/${consolePkg.version}`)
+  // Leading space is load-bearing: this is spliced straight after the installer version, so a
+  // missing one has to collapse to nothing rather than leave a double space in the header.
+  expect(ConsoleAgentSegment.startsWith(" ")).toBe(true)
+  expect(`opencode/${InstallationVersion}${ConsoleAgentSegment}`).not.toContain("  ")
+})
+
+test("an absent console leaves the User-Agent byte-identical", async () => {
+  // A bundled artifact resolves `import.meta.url` to its own outdir, so the relative walk up to
+  // packages/console/app/package.json finds nothing. That is exactly the packaged-binary case, and
+  // it is how every end-user install sees this code -- so the segment has to vanish, not degrade to
+  // "undefined" or a doubled space.
+  const dir = await temporary()
+  const entry = path.join(dir, "ua.ts")
+  await Bun.write(
+    entry,
+    `import { ConsoleAgentSegment, ConsoleVersion, InstallationVersion } from ${JSON.stringify(path.resolve(import.meta.dir, "../src/installation/version.ts"))};
+console.log(JSON.stringify({
+  segment: ConsoleAgentSegment,
+  version: ConsoleVersion ?? null,
+  header: \`opencode/\${InstallationVersion}\${ConsoleAgentSegment}\`,
+  plain: \`opencode/\${InstallationVersion}\`,
+}));`,
+  )
+  const result = await Bun.build({ entrypoints: [entry], target: "bun", outdir: path.join(dir, "out") })
+  expect(result.success).toBe(true)
+  const out = await Bun.spawn([process.execPath, result.outputs[0].path], { stdout: "pipe", stderr: "pipe" })
+  expect(await out.exited).toBe(0)
+  const value = JSON.parse(await new Response(out.stdout).text()) as {
+    segment: string
+    version: string | null
+    header: string
+    plain: string
+  }
+  expect(value.version).toBeNull()
+  expect(value.segment).toBe("")
+  // The whole point: with no console the header is exactly what it was before this existed.
+  expect(value.header).toBe(value.plain)
 })
 
 test("reject invalid versions, bumps, and overflow", () => {
