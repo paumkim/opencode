@@ -31,19 +31,13 @@ knew what they meant.
 
 ## Files
 
-- `references/phrase-catalogue.md` — the banned-word, banned-phrase and
-  structural-tell tables. Merged from the `ai-writing-detox` skill in the
-  awesome-skills collection. This skill is the canonical one; consult that
-  collection's skill for journalism-specific patterns only.
-- `scripts/prose-audit.py` — measures the tells mechanically.
+None. The tables and the audit script this skill used to ship with are not in
+this directory. The catalogue of tells is the list below, and an audit is a
+grep for the mechanical ones:
 
 ```
-python3 scripts/prose-audit.py README.md docs/*.md
-python3 scripts/prose-audit.py --max-em-dashes 0 --fail-on-tells README.md
+rg -n '—|not just|here.s the thing|worth noting' README.md
 ```
-
-Run it before committing any doc change. Exit code 1 means a threshold was
-exceeded, so it can go in a pre-commit hook.
 
 ## Tells to remove, with replacements
 
