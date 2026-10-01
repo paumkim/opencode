@@ -153,14 +153,6 @@ const targetName = (item: { os: string; arch: string; avx2?: false; abi?: "musl"
     .filter(Boolean)
     .join("-")
 
-// Clean only the targets this run rebuilds. Wiping all of dist meant a --single
-// build silently destroyed the other 11 platform binaries: ~1.4 GB of real
-// compile time that cannot be reconstructed from the source tree.
-await $`mkdir -p dist`
-for (const item of targets) {
-  await $`rm -rf dist/${targetName(item)}`
-}
-
 const expectBranch = process.argv.includes("--expect-branch")
   ? process.argv[process.argv.indexOf("--expect-branch") + 1]
   : undefined
@@ -213,6 +205,19 @@ if (gitState.insideRepo) {
   // last fetch -- that is why the counts above can understate a real divergence.
   if (expectBranch && gitState.branch !== "HEAD" && gitState.branch !== expectBranch)
     console.warn(`warning: building ${gitState.branch}, not the expected ${expectBranch}`)
+}
+
+// Clean only the targets this run rebuilds. Wiping all of dist meant a --single
+// build silently destroyed the other 11 platform binaries: ~1.4 GB of real
+// compile time that cannot be reconstructed from the source tree.
+//
+// This runs after the guards above on purpose. Deleting a target directory is
+// destructive, so a build that refuses has to refuse before it deletes
+// anything -- otherwise the check meant to protect the binaries is what destroys
+// them on its way out.
+await $`mkdir -p dist`
+for (const item of targets) {
+  await $`rm -rf dist/${targetName(item)}`
 }
 
 const provenance = gitState.insideRepo
