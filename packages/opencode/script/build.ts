@@ -141,16 +141,8 @@ const targets = singleFlag
     })
   : allTargets
 
-await $`rm -rf dist`
-
-const binaries: Record<string, string> = {}
-if (!skipInstall) {
-  await $`bun install --os="*" --cpu="*" @opentui/core@${pkg.dependencies["@opentui/core"]}`
-  await $`bun install --os="*" --cpu="*" @parcel/watcher@${pkg.dependencies["@parcel/watcher"]}`
-  await $`bun install --os="*" --cpu="*" @ff-labs/fff-bun@${pkg.dependencies["@ff-labs/fff-bun"]}`
-}
-for (const item of targets) {
-  const name = [
+const targetName = (item: { os: string; arch: string; avx2?: false; abi?: "musl" }) =>
+  [
     pkg.name,
     // changing to win32 flags npm for some reason
     item.os === "win32" ? "windows" : item.os,
@@ -160,6 +152,43 @@ for (const item of targets) {
   ]
     .filter(Boolean)
     .join("-")
+
+// Clean only the targets this run rebuilds. Wiping all of dist meant a --single
+// build silently destroyed the other 11 platform binaries: ~1.4 GB of real
+// compile time that cannot be reconstructed from the source tree.
+await $`mkdir -p dist`
+for (const item of targets) {
+  await $`rm -rf dist/${targetName(item)}`
+}
+
+// Record what actually went into each binary. Provenance used to live only in a
+// hand-written comment in ~/.opencode/bin/opencode, which drifted out of date and
+// went on claiming a commit the binary was not built from.
+const provenance = await (async () => {
+  try {
+    return {
+      branch: (await $`git rev-parse --abbrev-ref HEAD`.text()).trim(),
+      commit: (await $`git rev-parse HEAD`.text()).trim(),
+      dirty: (await $`git status --porcelain`.text()).trim().length > 0,
+    }
+  } catch {
+    // Building from an exported tree rather than a checkout.
+    return { branch: null, commit: null, dirty: null }
+  }
+})()
+
+if (provenance.dirty) {
+  console.warn(`warning: worktree has uncommitted changes; these binaries will not match any commit`)
+}
+
+const binaries: Record<string, string> = {}
+if (!skipInstall) {
+  await $`bun install --os="*" --cpu="*" @opentui/core@${pkg.dependencies["@opentui/core"]}`
+  await $`bun install --os="*" --cpu="*" @parcel/watcher@${pkg.dependencies["@parcel/watcher"]}`
+  await $`bun install --os="*" --cpu="*" @ff-labs/fff-bun@${pkg.dependencies["@ff-labs/fff-bun"]}`
+}
+for (const item of targets) {
+  const name = targetName(item)
   console.log(`building ${name}`)
   await $`mkdir -p dist/${name}/bin`
 
@@ -233,6 +262,26 @@ for (const item of targets) {
         os: [item.os],
         cpu: [item.arch],
         ...(item.abi ? { libc: [item.abi] } : {}),
+      },
+      null,
+      2,
+    ),
+  )
+  // Provenance travels with the target, so "which commit is this binary?" is
+  // answerable from the binary's own directory instead of from a comment
+  // somewhere else that nobody remembers to update.
+  await Bun.file(`dist/${name}/build-info.json`).write(
+    JSON.stringify(
+      {
+        name,
+        version: Script.version,
+        internalVersion,
+        channel: Script.channel,
+        branch: provenance.branch,
+        commit: provenance.commit,
+        dirty: provenance.dirty,
+        embeddedWebUi: !skipEmbedWebUi,
+        builtAt: new Date().toISOString(),
       },
       null,
       2,
