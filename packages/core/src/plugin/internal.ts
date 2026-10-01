@@ -33,6 +33,7 @@ import { ModelsDevPlugin } from "./models-dev"
 import { ProviderPlugins } from "./provider"
 import { SkillPlugin } from "./skill"
 import { VariantPlugin } from "./variant"
+import type { Plugin } from "./define"
 
 export type Requirements =
   | AgentV2.Service
@@ -51,14 +52,10 @@ export type Requirements =
   | Reference.Service
   | SkillV2.Service
 
-export interface Plugin<R = never> {
-  readonly id: string
-  readonly effect: (context: PluginContext) => Effect.Effect<void, never, R | Scope.Scope>
-}
-
-export function define<R>(plugin: Plugin<R>) {
-  return plugin
-}
+// Re-exported so callers that already reach for `./internal` keep working. The declaration lives in
+// `./define` because provider modules must be able to declare a plugin without importing this file.
+export type { Plugin } from "./define"
+export { define } from "./define"
 
 const layer = Layer.effectDiscard(
   Effect.gen(function* () {
