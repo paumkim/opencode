@@ -161,25 +161,63 @@ for (const item of targets) {
   await $`rm -rf dist/${targetName(item)}`
 }
 
-// Record what actually went into each binary. Provenance used to live only in a
-// hand-written comment in ~/.opencode/bin/opencode, which drifted out of date and
-// went on claiming a commit the binary was not built from.
-const provenance = await (async () => {
+const expectBranch = process.argv.includes("--expect-branch")
+  ? process.argv[process.argv.indexOf("--expect-branch") + 1]
+  : undefined
+const allowDirty = process.argv.includes("--allow-dirty")
+const allowUnpushed = process.argv.includes("--allow-unpushed")
+const allowBehind = process.argv.includes("--allow-behind")
+
+// What the working tree and the remote actually look like right now. Everything
+// here is advisory except the guards below, which stop the build.
+const gitState = await (async () => {
   try {
-    return {
-      branch: (await $`git rev-parse --abbrev-ref HEAD`.text()).trim(),
-      commit: (await $`git rev-parse HEAD`.text()).trim(),
-      dirty: (await $`git status --porcelain`.text()).trim().length > 0,
-    }
+    const branch = (await $`git rev-parse --abbrev-ref HEAD`.text()).trim()
+    const commit = (await $`git rev-parse HEAD`.text()).trim()
+    const dirty = (await $`git status --porcelain`.text()).trim().length > 0
+    // A detached HEAD (CI) or a branch with no upstream lands here, and neither
+    // has anything to compare against.
+    let upstream: string | null = null
+    let unpushed = 0
+    let behind = 0
+    try {
+      upstream = (await $`git rev-parse --abbrev-ref @{u}`.text()).trim()
+      unpushed = Number((await $`git rev-list --count @{u}..HEAD`.text()).trim())
+      behind = Number((await $`git rev-list --count HEAD..@{u}`.text()).trim())
+    } catch {}
+    return { insideRepo: true as const, branch, commit, dirty, upstream, unpushed, behind }
   } catch {
-    // Building from an exported tree rather than a checkout.
-    return { branch: null, commit: null, dirty: null }
+    return { insideRepo: false as const }
   }
 })()
 
-if (provenance.dirty) {
-  console.warn(`warning: worktree has uncommitted changes; these binaries will not match any commit`)
+// Refuse to build when the resulting binary could not be pointed at honestly.
+// build-info.json names a commit; if that commit is dirty, unpushed, or behind,
+// the name is a claim nobody can reproduce, and a later rebase or force-push
+// turns it into a dangling reference. Failing here is cheaper than discovering
+// it from a binary that quietly disagrees with the branch it came from.
+if (gitState.insideRepo) {
+  const blockers: string[] = []
+  if (gitState.dirty && !allowDirty) blockers.push(`uncommitted changes in the worktree`)
+  if (gitState.upstream && gitState.unpushed > 0 && !allowUnpushed)
+    blockers.push(`${gitState.unpushed} commit(s) not pushed to ${gitState.upstream}`)
+  if (gitState.upstream && gitState.behind > 0 && !allowBehind)
+    blockers.push(`${gitState.behind} commit(s) behind ${gitState.upstream}`)
+  if (blockers.length > 0) {
+    console.error(`refusing to build: ${blockers.join("; ")}`)
+    console.error(`these binaries could not be reproduced from ${gitState.upstream ?? "the remote"}`)
+    console.error(`resolve them, or pass --allow-dirty / --allow-unpushed / --allow-behind to override`)
+    process.exit(1)
+  }
+  // Reported from local remote-tracking refs, which are only as fresh as the
+  // last fetch -- that is why the counts above can understate a real divergence.
+  if (expectBranch && gitState.branch !== "HEAD" && gitState.branch !== expectBranch)
+    console.warn(`warning: building ${gitState.branch}, not the expected ${expectBranch}`)
 }
+
+const provenance = gitState.insideRepo
+  ? { branch: gitState.branch, commit: gitState.commit, dirty: gitState.dirty }
+  : { branch: null, commit: null, dirty: null }
 
 const binaries: Record<string, string> = {}
 if (!skipInstall) {
@@ -280,6 +318,14 @@ for (const item of targets) {
         branch: provenance.branch,
         commit: provenance.commit,
         dirty: provenance.dirty,
+        upstream: gitState.insideRepo ? gitState.upstream : null,
+        // Which guards were waived, so an artifact built under an override is
+        // distinguishable from one that passed clean.
+        overrides: [
+          allowDirty ? "--allow-dirty" : undefined,
+          allowUnpushed ? "--allow-unpushed" : undefined,
+          allowBehind ? "--allow-behind" : undefined,
+        ].filter(Boolean),
         embeddedWebUi: !skipEmbedWebUi,
         builtAt: new Date().toISOString(),
       },
