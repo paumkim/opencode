@@ -246,6 +246,63 @@ describe("sessionSearch.search", () => {
     }),
   )
 
+  it.instance("finds the contents of a file the user attached, not its metadata envelope", () =>
+    Effect.gen(function* () {
+      const session = yield* SessionNs.Service
+      const created = yield* session.create({ title: "attached" })
+      const messageID = MessageID.ascending()
+      yield* session.updateMessage(userMessage(messageID, created.id))
+      // A FilePart has no top-level `text`; the contents sit inside the
+      // `{value,start,end}` envelope at `source.text`, the same shape
+      // `FilePartSource` declares.
+      const contents = "const a = 1\nconst b = 2\nthrow new Error('boom')"
+      yield* session.updatePart({
+        id: PartID.ascending(),
+        sessionID: created.id,
+        messageID,
+        type: "file",
+        mime: "text/plain",
+        filename: "boom.ts",
+        url: "file:///repo/boom.ts",
+        source: { type: "file", path: "boom.ts", text: { value: contents, start: 0, end: contents.length } },
+      } as unknown as SessionV1.Part)
+
+      const search = yield* SessionSearch.Service
+      const hits = yield* search.search({ query: "boom" })
+      expect(hits).toHaveLength(1)
+      expect(hits[0].snippet).toContain("throw new Error('boom')")
+      expect(hits[0].snippet).not.toContain('"value"')
+    }),
+  )
+
+  it.instance("matches a query that spans two lines of a file", () =>
+    Effect.gen(function* () {
+      const session = yield* SessionNs.Service
+      const created = yield* session.create({ title: "multiline" })
+      const messageID = MessageID.ascending()
+      yield* session.updateMessage(userMessage(messageID, created.id))
+      const contents = "const a = 1\nconst b = 2\nthrow new Error('boom')"
+      yield* session.updatePart({
+        id: PartID.ascending(),
+        sessionID: created.id,
+        messageID,
+        type: "file",
+        mime: "text/plain",
+        filename: "boom.ts",
+        url: "file:///repo/boom.ts",
+        source: { type: "file", path: "boom.ts", text: { value: contents, start: 0, end: contents.length } },
+      } as unknown as SessionV1.Part)
+
+      const search = yield* SessionSearch.Service
+      // Two lines copied out of the file, newline and all. Reading the envelope
+      // instead of the contents serialized the newlines to `\n`, so the search
+      // string could not line up with the stored one and this found nothing.
+      const hits = yield* search.search({ query: "const b = 2\nthrow" })
+      expect(hits).toHaveLength(1)
+      expect(hits[0].snippet).toContain("\n")
+    }),
+  )
+
   it.instance("still does not match a part that carries no text at all", () =>
     Effect.gen(function* () {
       const session = yield* SessionNs.Service

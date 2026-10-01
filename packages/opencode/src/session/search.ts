@@ -136,11 +136,18 @@ const messageRole = sql<string>`json_extract(${MessageTable.data}, '$.role')`
  * either. Matching only `type = 'text'` made the substance of a session
  * unsearchable: searching for a value the agent had found and printed in front
  * of you returned nothing, which reads as the tool never having run.
+ *
+ * A file part stores its contents at `source.text.value`; `source.text` is the
+ * `{value,start,end}` envelope around them. Reading the envelope handed
+ * `json_extract` an object, which it returns as serialized JSON, so the whole
+ * part became one line of `{"value":"...","start":0,"end":47}` with escaped
+ * newlines. A query spanning two lines of a file could not match, and the
+ * excerpt showed the envelope instead of the code.
  */
 const body = sql<string>`case ${partType}
   when 'text' then json_extract(${PartTable.data}, '$.text')
   when 'reasoning' then json_extract(${PartTable.data}, '$.text')
-  when 'file' then coalesce(json_extract(${PartTable.data}, '$.text'), json_extract(${PartTable.data}, '$.source.text'))
+  when 'file' then coalesce(json_extract(${PartTable.data}, '$.text'), json_extract(${PartTable.data}, '$.source.text.value'))
   when 'tool' then coalesce(
     json_extract(${PartTable.data}, '$.state.output'),
     json_extract(${PartTable.data}, '$.state.error'),
