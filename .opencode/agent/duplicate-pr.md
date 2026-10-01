@@ -3,9 +3,9 @@ mode: primary
 hidden: true
 model: opencode/claude-haiku-4-5
 color: "#E67E22"
-tools:
-  "*": false
-  "github-pr-search": true
+permission:
+  "*": deny
+  "github-pr-search": allow
 ---
 
 You are a duplicate PR detection agent. When a PR is opened, your job is to search for potentially duplicate or related open PRs.
