@@ -7,38 +7,65 @@
 - **Never raise test concurrency.** Do not add `--concurrent`, and do not raise Bun's default worker count. Leave concurrency at its default. A memory spike is the signal to run FEWER tests, not more.
 - **Cap memory with a cgroup, never with `ulimit -v`.** Use:
   `systemd-run --user --scope -p MemoryMax=6G -p MemorySwapMax=0 -- <command>`
-  This terminates the process cleanly at the cap. **`ulimit -v` is actively harmful for Bun commands** and must not be used here — see "Bun reserves address space" below. Verified: a 4G cgroup SIGTERMs typecheck cleanly, 6G lets it finish.
+  This terminates the process cleanly at the cap. **`ulimit -v` is actively harmful for Bun commands** and must not be used here. See "Bun reserves address space" below. Verified: a 4G cgroup SIGTERMs typecheck cleanly, 6G lets it finish.
 - **Watch RSS on long runs.** For stress or soak runs, sample `ps -o rss` periodically and abort if it crosses ~6GB. Prefer short, targeted runs repeated over one huge run.
 - **Known exception: `test/cli/run/run-process.test.ts` needs `-p MemoryMax=12G`.** All 11 tests are concurrent and each spawns a full `opencode run` subprocess. At 6G it does not fail, it *hangs* with no test completing. Verified 13 pass / 0 fail at 12G. A hang there is this, not a wedged machine.
-- **When delegating**, state the memory rule in the task prompt explicitly. A subagent asked to "run the tests" will otherwise run the full suite and exhaust RAM.
-- If a task appears to require the full suite, STOP and ask the user for permission first. The default answer is no.
+- **When delegating**, state the memory rule in the task prompt. A subagent asked to "run the tests" will otherwise run the full suite and exhaust RAM.
+- If a task appears to need the full suite, STOP and ask the user first. The default answer is no.
 
-### Bun reserves address space — why `ulimit -v` is the wrong tool
+### Bun reserves address space, so `ulimit -v` is the wrong tool
 
-Measured on a live opencode process: `VmSize` 74.5 GB and `VmPeak` 135 GB, while `VmRSS` is only 65 MB. Essentially all of that is `VmData` (73.7 GB) of *reserved* address space — the JavaScriptCore GC arena plus per-thread malloc arenas — that is never committed to physical RAM.
+Measured on a live opencode process: `VmSize` 74.5 GB and `VmPeak` 135 GB, while `VmRSS` is only 65 MB. Essentially all of that is `VmData` (73.7 GB) of *reserved* address space: the JavaScriptCore GC arena plus per-thread malloc arenas. It is never committed to physical RAM.
 
 Consequences, all learned the hard way on this machine:
 
-- **`ulimit -v` caps address space, not resident memory.** Setting it below what Bun reserves makes the process die outright rather than throttle. `ulimit -v 4194304` (4G) crashed `bun run typecheck` with a goroutine stack trace; the identical command with no cap passes. It is not a memory cap, it is a way to break Bun.
-- **To cap Bun, cap the cgroup** (`MemoryMax`), which bounds RSS regardless of how much address space is reserved.
+- **`ulimit -v` caps address space, not resident memory.** Setting it below what Bun reserves kills the process outright instead of throttling it. `ulimit -v 4194304` (4G) crashed `bun run typecheck` with a goroutine stack trace; the identical command with no cap passes. It is not a memory cap, it is a way to break Bun.
+- **To cap Bun, cap the cgroup** (`MemoryMax`). It bounds RSS no matter how much address space is reserved.
 - **Never judge capacity by VIRT or VmPeak.** Use `VmRSS` / `ps -o rss` only.
 
 ### Heavy tooling: typecheck and formatting
 
-- **`tsgo --noEmit` peaks at ~1.95 GB RSS for a single package.** The root `bun typecheck` script is `bun turbo typecheck`, which fans out across ~33 packages **in parallel**. Unbounded that is many gigabytes at once, and it is the most likely way to stall this machine outside of the test suite.
+- **`tsgo --noEmit` peaks at ~1.95 GB RSS for a single package.** The root `bun typecheck` script is `bun turbo typecheck`, which fans out across ~33 packages **in parallel**. Unbounded that is many gigabytes at once, and it is the most likely way to stall this machine short of the test suite.
 - **Always cap turbo concurrency when typechecking the monorepo:**
   `systemd-run --user --scope -p MemoryMax=6G -p MemorySwapMax=0 -- bun turbo typecheck --concurrency=2`
-  Verified: 33/33 tasks pass in ~17s. Raise the memory cap before raising the concurrency, never the other way round.
-- **Prefer per-package typecheck** when you only touched one package: `cd packages/<pkg> && bun run typecheck`. One `tsgo` at ~2GB instead of a parallel fan-out.
-- **Never use `bunx` for tooling you already have installed.** `bunx prettier` re-resolves the package, spawning an extra runtime and potentially hitting the network. Call the local binary instead:
-  `node node_modules/prettier/bin/prettier.cjs --write <files>` — 0.4s versus seconds, and no extra process.
-- **Do not run `prettier --write` on a whole pre-existing file** just to land a small change. Some files are not prettier-clean, so `--write` reformats hundreds of unrelated lines and buries the real diff. Use `--check` to verify, and only `--write` when you accept a whole-file reformat as part of the change.
+  Verified: 33/33 tasks pass in ~17s. Raise the memory cap before raising concurrency, never the reverse.
+- **Prefer per-package typecheck** when you touched one package: `cd packages/<pkg> && bun run typecheck`. That is one `tsgo` at ~2GB instead of a parallel fan-out.
+- **Never use `bunx` for tooling already installed.** `bunx prettier` re-resolves the package, which spawns an extra runtime and can hit the network. Call the local binary:
+  `node node_modules/prettier/bin/prettier.cjs --write <files>` runs in 0.4s against seconds for `bunx`, with no extra process.
+- **Do not run `prettier --write` on a whole pre-existing file** to land a small change. Some files are not prettier-clean, so `--write` reformats hundreds of unrelated lines and hides the actual change. Use `--check` to verify. Only `--write` when you accept a whole-file reformat as part of the change.
 
 
 ## Language
 
 - **Default language: US English.** All agents and subagents must communicate in US English (American English spelling, vocabulary, and phrasing) for all user-facing responses, summaries, documentation, and comments.
 - When translating or localizing content, default to US English unless the user explicitly requests another variant.
+
+## Writing Style
+
+Every agent writes in the house style. Do not wait to be asked. It applies to
+READMEs, docs, SKILL.md files, templates, code comments, commit message bodies,
+PR descriptions, and any reply longer than three sentences.
+
+Load the `plain-prose` skill (`.opencode/skills/plain-prose/SKILL.md`) before
+writing or reviewing any of the above. The rules it lists are not suggestions.
+Subagents receive this section, so pass the requirement on in any task prompt
+that asks for prose.
+
+The short version, so the common failures are visible without opening the skill:
+
+- Short sentences. Break anything over 25 words.
+- Concrete nouns and real numbers over abstract claims and adjectives.
+- Zero em-dash asides in a document. If an aside matters, give it its own sentence.
+- No "not just X but Y", no colon-then-reveal, no "here's the thing", no "worth noting".
+- Bold only for literal identifiers (a flag, a path, a key, a config name).
+- Write the number of items that exist. Do not pad to three.
+- Cut "very", "really", "extremely", "quite", "fairly".
+- Do not open a paragraph that only introduces the next one. Do not close by restating the section.
+- Say "allows" instead of "presents a risk". Say "prevents" or admit it does not.
+
+Plain is not the goal. Clear is. Keep the directness, the technical vocabulary,
+the admitted limits, and any voice that is actually there. Flat corporate prose
+has the same defect as the mannered kind.
 
 ## Silent Execution
 
@@ -51,17 +78,17 @@ During execution, use `+ Thought:` for internal reasoning and proceed directly t
 
 ## Subagent Delegation Discipline
 
-1. **One subagent at a time** — Never spawn multiple subagents in parallel for a single task. Break work into sequential, small, focused sub-tasks and delegate one at a time.
+1. One subagent at a time. Never spawn several in parallel for a single task. Break the work into sequential, small, focused pieces and delegate one at a time.
 
-2. **Break down before delegating** — Before spawning a subagent, decompose the task into the smallest meaningful unit. The delegating agent must know exactly what it needs: the specific question, the exact file:line, the precise change. Do not hand off vague or broad requests.
+2. Break down before delegating. Decompose the task into the smallest meaningful unit. The delegating agent must know exactly what it needs: the specific question, the exact file:line, the precise change. Do not hand off a vague or broad request.
 
-3. **Subagents decompose too** — If a subagent receives a task that is still too large, it must break it down further and execute the smallest piece itself before delegating the next piece. No subagent should blindly forward a broad task downstream.
+3. Subagents decompose too. If a subagent receives a task that is still too large, it breaks it down further and executes the smallest piece itself before delegating the next one. No subagent forwards a broad task downstream untouched.
 
-4. **Agents must be productive, not just delegators** — The orchestrating agent should do as much of the work as it can directly (analysis, planning, simple edits, reasoning). Only delegate what genuinely requires a subagent's tool surface. Avoid the "useless manager" anti-pattern where everything is handed off and the orchestrator contributes nothing.
+4. Agents do the work, not just the delegating. The orchestrating agent handles what it can directly: analysis, planning, simple edits, reasoning. Delegate only what genuinely needs a subagent's tool surface. The "useless manager" pattern, where everything is handed off and the orchestrator contributes nothing, is a failure.
 
-5. **Clear task prompts** — Every subagent task prompt must include: (a) the objective in one sentence, (b) the exact steps or scope, (c) the expected output, and (d) how to verify success.
+5. Clear task prompts. Every prompt states the objective in one sentence, the exact scope, the expected output, and how to verify success. If the subagent will write prose, name the house style from "Writing Style" above and tell it to load `plain-prose`.
 
-6. **No spam spawning** — If a task can be done in one focused subagent call, do that. Do not fan out into many subagents for what is fundamentally one job.
+6. No spam spawning. If one focused subagent call does the job, do that. Do not fan out into many subagents for what is one task.
 
 - To regenerate the legacy JavaScript SDK, run `./packages/sdk/js/script/build.ts`.
 - After changing the public Protocol or Server `HttpApi`, run `bun run generate` from `packages/client`. Do not edit `src/generated` or `src/generated-effect` directly.
@@ -77,11 +104,11 @@ Examples: `session-recovery`, `fix-scroll-state`, `regenerate-sdk`.
 
 ## Commits and PR Titles
 
-Use conventional commit-style messages and PR titles: `type(scope): summary`.
-
-Valid types are `feat`, `fix`, `docs`, `chore`, `refactor`, and `test`. Scopes are optional; use the affected package or area when helpful, e.g. `core`, `opencode`, `tui`, `app`, `desktop`, `sdk`, or `plugin`.
+Subjects follow `type(scope): summary`. Valid types are `feat`, `fix`, `docs`, `chore`, `refactor`, and `test`. Scopes are optional; use the affected package or area when helpful, e.g. `core`, `opencode`, `tui`, `app`, `desktop`, `sdk`, or `plugin`.
 
 Examples: `fix(tui): simplify thinking toggle styling`, `docs: update contributing guide`, `chore(sdk): regenerate types`.
+
+Bodies follow the house style. State what changed and why. Do not narrate the diff, and do not close by restating the subject.
 
 ## Style Guide
 
