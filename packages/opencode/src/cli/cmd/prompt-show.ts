@@ -90,9 +90,11 @@ export const PromptShowCommand = effectCmd({
     lines.push(`${UI.Style.TEXT_DIM}${report.agent} · ${report.model}${UI.Style.TEXT_NORMAL}`)
     lines.push("")
 
-    const sent = report.parts.filter((part) => part.present)
-    const sentTokens = report.total
-    const everything = sentTokens + report.toolsTotal
+    // `report.total` is every part that is sent, and the tool definitions are one
+    // of its parts. Adding `toolsTotal` to it again counted them twice, which
+    // shrank every share bar and printed a total the request never reaches.
+    const everything = report.total
+    const promptOnly = everything - report.toolsTotal
     for (const part of report.parts) {
       const tokens = part.tokens ?? 0
       const share = everything === 0 ? 0 : tokens / everything
@@ -136,7 +138,7 @@ export const PromptShowCommand = effectCmd({
     lines.push("")
     lines.push(
       `sent on every request: ` +
-        `${SessionPromptSize.formatTokens(sentTokens)} of prompt · ` +
+        `${SessionPromptSize.formatTokens(promptOnly)} of prompt · ` +
         `${SessionPromptSize.formatTokens(report.toolsTotal)} of tool definitions · ` +
         `${SessionPromptSize.formatTokens(everything)} total` +
         UI.Style.TEXT_DIM +

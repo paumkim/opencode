@@ -74,7 +74,7 @@ describe("sessionPromptSize.assemble", () => {
   })
 
   test("lists the per-turn pieces rather than pretending they do not exist", () => {
-    const parts = SessionPromptSize.partsOf({ agent: "build", hasAgentPrompt: true, agent_prompt: undefined } as never)
+    const parts = SessionPromptSize.partsOf({ agent: "build", hasAgentPrompt: true })
     expect(parts.length).toBeGreaterThan(0)
     expect(SessionPromptSize.PER_TURN.map((item) => item.piece)).toEqual(["crew", "system-one"])
     for (const item of SessionPromptSize.PER_TURN) {
@@ -82,6 +82,19 @@ describe("sessionPromptSize.assemble", () => {
       expect(item.tokens).toBeNull()
       expect(item.detail).toContain("per turn")
     }
+  })
+
+  test("sizes the agent's own prompt rather than its name", () => {
+    // The request sends `agent.prompt` as the base prompt in place of the
+    // built-in one, so that text is what a report has to measure. Measuring the
+    // name reported "3 tokens of agent prompt" for an eleven-character name.
+    const parts = SessionPromptSize.partsOf({
+      agent: "orchestrator",
+      hasAgentPrompt: true,
+      agentPrompt: "x".repeat(4_000),
+    })
+    expect(parts[0].piece).toBe("agent")
+    expect(parts[0].tokens).toBe(1_000)
   })
 })
 
@@ -166,16 +179,32 @@ describe("sessionPromptSize.analyze", () => {
   })
 
   test("names tool definitions that are most of what is sent up front", () => {
+    // `total` is what the request carries, tool definitions included, so the
+    // parts passed here include the tools row the way the service builds it.
     const findings = SessionPromptSize.analyze({
       ...base,
-      parts: [part("agent", 1_000)],
+      parts: [part("agent", 1_000), part("tools", 5_000)],
       tools: [tool("bash", { tokens: 5_000 })],
-      total: 1_000,
+      total: 6_000,
       toolsTotal: 5_000,
     })
     const dominant = findings.find((finding) => finding.id === "prompt.tools-dominate")
     expect(dominant?.title).toContain("83%")
     expect(dominant?.detail).toContain("bash")
+  })
+
+  test("counts the tool share against a total that already includes the tools", () => {
+    // Tools at 55% of everything sent up front. Scoring them as a share of
+    // `total + toolsTotal` gave 37% and the finding stayed silent, so the gate
+    // could not fire for anything short of two thirds.
+    expect(
+      ids({
+        ...base,
+        parts: [part("agent", 10_000), part("tools", 12_000)],
+        total: 22_000,
+        toolsTotal: 12_000,
+      }),
+    ).toContain("prompt.tools-dominate")
   })
 
   test("still says nothing about a large share of a tiny prompt", () => {

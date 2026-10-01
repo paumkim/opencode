@@ -107,6 +107,12 @@ const tokensOf = (text: string | undefined) => (typeof text === "string" ? Token
 export function partsOf(input: {
   agent: string
   hasAgentPrompt: boolean
+  /**
+   * The agent's own prompt. This is the base prompt the request sends, in place
+   * of the built-in one, so it is the text to measure: sizing the agent's *name*
+   * would report an eleven-character name as the whole base prompt.
+   */
+  agentPrompt?: string
   providerPrompt?: string
   env?: string[]
   instructions?: string[]
@@ -114,7 +120,7 @@ export function partsOf(input: {
   skills?: string
 }): Part[] {
   const pieces: [Piece, string | string[] | undefined][] = [
-    input.hasAgentPrompt ? ["agent", input.agent] : ["provider", input.providerPrompt],
+    input.hasAgentPrompt ? ["agent", input.agentPrompt] : ["provider", input.providerPrompt],
     ["environment", input.env],
     ["instructions", input.instructions],
     ["mcp", input.mcp],
@@ -195,16 +201,18 @@ export function analyze(input: {
   // A share alone is not worth reporting on a prompt that is small anyway: tools
   // being 40% of five hundred tokens is arithmetic, not a problem. The absolute
   // size is what a user can do something about, so it has to be met too.
-  if (
-    input.toolsTotal >= TOOLS_WORTH_NAMING &&
-    input.total > 0 &&
-    input.toolsTotal / (input.total + input.toolsTotal) >= DOMINANT_SHARE
-  ) {
+  //
+  // `total` already counts the tool definitions, because the tools row is one of
+  // its parts. Dividing by `total + toolsTotal` counted them a second time, which
+  // under-reported the share and moved the gate: tools that are 53% of what is
+  // sent scored 35% and this stayed silent.
+  const toolsShare = input.total > 0 ? input.toolsTotal / input.total : 0
+  if (input.toolsTotal >= TOOLS_WORTH_NAMING && toolsShare >= DOMINANT_SHARE) {
     const worst = input.tools[0]
     findings.push({
       id: "prompt.tools-dominate",
       severity: "info",
-      title: `Tool definitions are ${formatTokens(input.toolsTotal)} tokens, ${((input.toolsTotal / (input.total + input.toolsTotal)) * 100).toFixed(0)}% of everything sent up front`,
+      title: `Tool definitions are ${formatTokens(input.toolsTotal)} tokens, ${(toolsShare * 100).toFixed(0)}% of everything sent up front`,
       detail: worst ? `${worst.name} is the largest at ${formatTokens(worst.tokens)}.` : undefined,
       hint: "Tools are sent in full on every request whether or not a turn uses them; an agent with fewer tools sends less, always.",
     })
@@ -341,6 +349,7 @@ const layer = Layer.effect(
       const pieces = partsOf({
         agent: agent.name,
         hasAgentPrompt: typeof agent.prompt === "string" && agent.prompt.length > 0,
+        agentPrompt: agent.prompt,
         providerPrompt: SystemPrompt.provider(model)[0],
         env,
         instructions,
