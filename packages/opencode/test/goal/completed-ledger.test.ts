@@ -135,6 +135,27 @@ describe("the completed-work ledger", () => {
     expect((await getGoal(sessionID))?.completed).toEqual([])
   })
 
+  test("the tool rejects a call that is missing its required field by name", async () => {
+    // The goal tools build a `Tool.Def` directly rather than through `Tool.define`, so their Zod
+    // schema only ever described the shape to the model; nothing decoded the arguments against it.
+    // A call that missed `item` therefore reached the implementation as `undefined` and died on
+    // `item.trim()`. From the minified bundle that surfaced as
+    // `undefined is not an object (evaluating 'J.trim')`, which names neither the tool nor the field
+    // and reads as a crash inside the harness rather than a mistake in the call. The model is told
+    // to call this tool the moment a unit of work is finished, so the record was lost silently and
+    // the next turn, which reads the ledger rather than the transcript, redid the work.
+    const sessionID = "ledger-bad-args"
+    await createGoal(sessionID, "keep improving", { maxAutoTurns: 100 })
+
+    await expect(runTool("record_goal_completion", { value: "did a thing" }, sessionID)).rejects.toThrow(
+      /record_goal_completion/,
+    )
+    await expect(runTool("record_goal_completion", {}, sessionID)).rejects.toThrow(/record_goal_completion/)
+
+    // A rejected call records nothing, rather than recording the wrong thing.
+    expect((await getGoal(sessionID))?.completed).toEqual([])
+  })
+
   test("the tool still reports a genuine record as recorded", async () => {
     const sessionID = "ledger-active"
     await createGoal(sessionID, "keep improving", { maxAutoTurns: 100 })

@@ -159,6 +159,7 @@ function defineTool(
   execute: Execute,
 ): Tool.Def<Schema.Decoder<unknown>> {
   const { parameters, jsonSchema } = zodArgs(args)
+  const schema = z.object(args)
   return {
     id,
     description,
@@ -166,7 +167,22 @@ function defineTool(
     jsonSchema,
     execute: (toolArgs, toolCtx) =>
       Effect.gen(function* () {
-        const output = yield* Effect.promise(() => execute(toolArgs, toolCtx))
+        // Validate before executing, the way `Tool.define` does for every other core tool. These
+        // tools build a `Tool.Def` directly instead of going through `Tool.define`, so nothing
+        // decoded `toolArgs` against the schema above: it existed only to describe the shape to the
+        // model. A call that missed a required field therefore reached the implementation as
+        // `undefined` and failed on the first property access — `record_goal_completion` died on
+        // `item.trim()`, surfacing as `undefined is not an object (evaluating 'J.trim')` from the
+        // minified bundle, which names neither the tool nor the field. The model is told to call this
+        // tool the moment a unit of work is finished, so an unreadable failure there meant the record
+        // was silently lost and the next turn redid the work.
+        const parsed = schema.safeParse(toolArgs)
+        if (!parsed.success) {
+          return yield* Effect.fail(
+            new Tool.InvalidArgumentsError({ tool: id, detail: parsed.error.message }),
+          )
+        }
+        const output = yield* Effect.promise(() => execute(parsed.data, toolCtx))
         const info = yield* deps.agent.get(toolCtx.agent)
         const truncated = yield* deps.truncate.output(output, {}, info)
         return {
@@ -186,6 +202,8 @@ function defineTool(
             ...(toolCtx.callID ? { "tool.call_id": toolCtx.callID } : {}),
           },
         }),
+        // `Tool.define` dies on a failed decode too, so a rejected call surfaces the same way here.
+        Effect.orDie,
       ),
   }
 }
